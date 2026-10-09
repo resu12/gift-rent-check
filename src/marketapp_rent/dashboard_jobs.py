@@ -13,8 +13,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
 from typing import Callable
+from urllib.parse import unquote
 
-from .addresses import canonical_address, preferred_address
+from .addresses import address_key, canonical_address, preferred_address
 from .api import ApiClient, RETRY_STATUSES
 from .collector import collect
 from .price_collection import collect_prices, collect_rental_prices
@@ -287,9 +288,60 @@ class JobStore:
             connection.execute("DELETE FROM dashboard_lease WHERE worker=?", (worker,))
 
 
+def _sync_progress(phase, completed=0, total=None, *, unit="collections", current_collection=None, processed_items=0):
+    return {"phase": phase, "completed": completed, "total": total, "unit": unit,
+            "current_collection": current_collection, "processed_items": processed_items}
+
+
+def _market_sync_progress(store, job, settings, streams):
+    def signature(stream):
+        return stream["kind"], stream["path"], json.dumps(stream.get("params", {}), sort_keys=True)
+
+    saved = {signature(stream): stream for stream in streams}
+    manifest = settings.get("streams")
+    planned = manifest if isinstance(manifest, list) else streams
+    work = [{**spec, "state": saved.get(signature(spec), {}).get("state", "pending")} for spec in planned]
+    groups = {}
+    for stream in work:
+        if stream["kind"] == "collection":
+            continue
+        scope = stream.get("params", {}).get("collection_address")
+        if scope is None and stream["kind"] == "attribute":
+            path = stream["path"]
+            if path.startswith("/v1/collections/") and path.endswith("/attributes/"):
+                scope = unquote(path[len("/v1/collections/"):-len("/attributes/")])
+        stream["scope"] = address_key(scope)
+        groups.setdefault(stream["scope"], []).append(stream)
+    # Unfiltered scans cannot truthfully claim a known collection denominator.
+    total = None if None in groups else len(groups)
+    completed = sum(all(stream["state"] == "complete" for stream in values)
+                    for scope, values in groups.items() if scope is not None)
+    processed = store.connection.execute("""SELECT count(*) FROM observations o JOIN pages p ON p.id=o.page_id
+        JOIN streams s ON s.id=p.stream_id WHERE s.run_id=? AND s.kind IN ('listing','history')""", (job["run_id"],)).fetchone()[0]
+    running = next((stream for stream in work if stream["state"] == "running"), None)
+    current = running or next((stream for stream in work if stream["state"] != "complete"), None)
+    if ((running is None or running["kind"] == "collection")
+            and any(stream["kind"] == "collection" and stream["state"] != "complete" for stream in work)):
+        return _sync_progress("preparing", total=total, processed_items=processed)
+    if current is None:
+        return _sync_progress("complete", completed, total, processed_items=processed)
+    phase = {"listing": "listings", "history": "rentals"}.get(current["kind"], "preparing")
+    name = None
+    if current.get("scope") is not None:
+        for row in store.connection.execute("""SELECT r.data_json FROM observations o JOIN pages p ON p.id=o.page_id
+            JOIN streams s ON s.id=p.stream_id JOIN records r ON r.id=o.record_id
+            WHERE s.run_id=? AND r.kind='collection' ORDER BY o.id DESC""", (job["run_id"],)):
+            collection = json.loads(row[0])
+            if address_key(collection.get("collection_address")) == current["scope"]:
+                value = collection.get("name")
+                name = value.strip() if isinstance(value, str) and value.strip() else None
+                break
+    return _sync_progress(phase, completed, total, current_collection=name, processed_items=processed)
+
+
 def progress_for(database, job):
     if not job.get("run_id"):
-        return {}
+        return {"sync": _sync_progress("preparing", unit="gifts" if job["kind"] in {"refresh", "discover"} else "collections")}
     with Store(database) as store:
         if job["kind"] in {"collect", "prices", "rental_prices"}:
             from .history_refresh import history_refresh_summary
@@ -303,10 +355,30 @@ def progress_for(database, job):
             listing = listing_refresh_summary(settings, streams)
             if listing:
                 progress["listing_refresh"] = listing
+            progress["sync"] = _market_sync_progress(store, job, settings, streams)
             return progress
         discovery = DiscoveryStore(store)
-        candidates = discovery.candidates(job["run_id"])
-        return {"pages": sum(row["pages"] for row in discovery.checkpoints(job["run_id"])), "candidates": len(candidates), "verified": sum(row["verified"] is True for row in candidates), "pending": sum(row["state"] == "pending" for row in candidates)}
+        run = discovery.get_run(job["run_id"])
+        checkpoints = discovery.checkpoints(job["run_id"])
+        counts = store.connection.execute("""SELECT count(*) AS candidates,
+            coalesce(sum(verified=1),0) AS verified,coalesce(sum(state='pending'),0) AS pending,
+            coalesce(sum(state='done'),0) AS checked FROM discovery_candidates WHERE run_id=?""", (job["run_id"],)).fetchone()
+        fixed = run["settings"].get("mode") == "portfolio_refresh" or job["kind"] == "refresh"
+        total = counts["candidates"]
+        if fixed:
+            seeds = {address_key(value.get("nft_address")) for value in run["settings"].get("seed_candidates", [])
+                     if isinstance(value, dict) and value.get("nft_address")}
+            total = max(total, len(seeds))
+        enumerated = fixed or bool(checkpoints) and all(row["state"] == "complete" for row in checkpoints)
+        if not run["catalog_committed"]:
+            sync = _sync_progress("preparing", total=total if fixed else None, unit="gifts", processed_items=counts["checked"])
+        elif not enumerated:
+            sync = _sync_progress("discovering", counts["checked"], unit="gifts", processed_items=counts["checked"])
+        else:
+            sync = _sync_progress("complete" if counts["checked"] == total else "verifying", counts["checked"], total,
+                                  unit="gifts", processed_items=counts["checked"])
+        return {"pages": sum(row["pages"] for row in checkpoints), "candidates": counts["candidates"],
+                "verified": counts["verified"], "pending": counts["pending"], "sync": sync}
 
 
 def _checkpoint_signature(store, kind, run_id):

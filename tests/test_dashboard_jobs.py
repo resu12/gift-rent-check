@@ -281,7 +281,7 @@ def test_executor_links_discovery_run_before_provider_work_and_resumes_it(jobs, 
 
     def fake_discover(store, settings, token, **kwargs):
         calls.append(kwargs)
-        run_id = kwargs["resume_id"] or 77
+        run_id = kwargs["resume_id"] or DiscoveryStore(store).create_run(WALLET, {"mode": "portfolio_refresh"})
         kwargs["on_run_created"](run_id)
         # This assertion executes where the first HTTP attempt would occur.
         assert JobStore(jobs.path).get(1)["run_id"] == run_id
@@ -295,7 +295,7 @@ def test_executor_links_discovery_run_before_provider_work_and_resumes_it(jobs, 
     resumed, _ = jobs.enqueue(resume_job_id=first["id"])
     second = execute_job(resumed, jobs, settings, DiscoverySettings())
     assert second["state"] == "complete"
-    assert [call["resume_id"] for call in calls] == [None, 77]
+    assert [call["resume_id"] for call in calls] == [None, result["discovery_run_id"]]
     assert all(call["mode"] == "portfolio_refresh" for call in calls)
     assert calls[0]["seed_candidates"][0]["nft_address"] == NFT
 
@@ -386,6 +386,8 @@ def test_rental_price_progress_uses_history_stream_checkpoints(jobs):
         store.commit_page(history, None, ApiResponse(body, 200, "2026-10-08T10:00:01Z"), parse_page("history", body))
     assert jobs_module.progress_for(database, {"kind": "rental_prices", "run_id": run}) == {
         "pages": 2, "streams_complete": 1, "streams_total": 2,
+        "sync": {"phase": "rentals", "completed": 0, "total": 1, "unit": "collections",
+                 "current_collection": None, "processed_items": 0},
     }
 
 

@@ -85,6 +85,12 @@ The queue is stored next to the collector database as `<name>.dashboard.sqlite3`
 
 Activity includes job state, partial/failure reasons, provider run IDs, saved run coverage, and historical observations. These are observations at individual times. An expired rental does not prove that the gift returned, and an idle contract alone does not establish a visible listing. Historical gift payments are not treated as your income.
 
+## Reading sync progress
+
+Desktop and Telegram share the same sync cards. Each card explains whether it is checking your own gift prices, updating listing comparisons, reading actual rentals for the saved timeframe, or finding wallet gifts. The progress bar stays visible when **Refresh data** is collapsed. **Stop** saves progress; a paused collection offers **Continue**.
+
+The percentage counts completed collections (all requested scans for each collection) or checked gifts when the gift total is known. It is not an estimate of elapsed time: collections can differ greatly in size. Wallet discovery shows an indeterminate bar until enumeration establishes the total. Unresolved gift checks count as checked, not as successfully updated. Request allowances, saved dates, cache information, and technical reasons are under **Details**. Completed automatic price checks use a compact summary.
+
 ## Supplemental local review
 
 An explicit `--review-directory PATH` adds dated review annotations from `updated_inventory.csv`, `holder_review.csv`, and `unresolved.csv`. There is no automatic search for neighboring folders. The parser validates required columns, wallet identity, and canonical addresses. Optional saved `evidence/live-recheck` responses can be verified offline against the pinned decoder. The UI distinguishes automatic database members, review annotations, and validated supplemental evidence.

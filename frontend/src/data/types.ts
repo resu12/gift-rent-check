@@ -154,7 +154,14 @@ export interface Job {
   updated_at: string;
   reason: string | null;
   run_id: number | null;
-  progress: DataRecord & { history_refresh?: {
+  progress: DataRecord & { sync?: {
+    phase: 'preparing' | 'listings' | 'rentals' | 'discovering' | 'verifying' | 'complete';
+    completed: number;
+    total: number | null;
+    unit: 'collections' | 'gifts';
+    current_collection: string | null;
+    processed_items: number;
+  }; history_refresh?: {
     incremental_streams: number;
     full_streams: number;
     overlap_seconds: number;

@@ -1,0 +1,46 @@
+/* Shared, readable sync status for desktop and Telegram. */
+.app-shell .sync-card.job-card{display:block;padding:20px;background:linear-gradient(120deg,#152b2b,#151f2b);border-bottom:1px solid #2d414b}
+.app-shell .sync-card-header{display:flex;align-items:center;gap:11px;min-width:0}
+.app-shell .sync-card-header>strong{flex:1;min-width:0;font-size:16px;line-height:1.4;font-weight:600;color:#e2eeef}
+.app-shell .sync-card .sync-state{flex-shrink:0;padding:4px 8px;border:1px solid #36584f;border-radius:6px;font-size:11px;line-height:1.4;color:#a4e8d1;background:#254238}
+.app-shell .sync-card.sync-paused,.app-shell .sync-card.sync-waiting{background:linear-gradient(120deg,#252a25,#19232c)}
+.app-shell .sync-card.sync-paused .sync-state,.app-shell .sync-card.sync-waiting .sync-state{color:#f0cb94;border-color:#68583c;background:#3a3427}
+.app-shell .sync-card.sync-failed .sync-state{color:#f2b5b0;border-color:#76504b;background:#3c292d}
+.app-shell .sync-card .sync-purpose{font-size:13px;line-height:1.6;color:#a6babf;margin:8px 0 15px}
+.app-shell .sync-card .sync-message{font-size:13px;line-height:1.6;color:#bed0d5;margin:10px 0 0;overflow-wrap:anywhere}
+.sync-progress-label{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:0 0 8px;color:#bdced2;font-size:13px;line-height:1.5}
+.sync-progress-label strong{font-size:21px;line-height:1.1;font-weight:600;color:#87e8cb;font-variant-numeric:tabular-nums}
+.sync-progress-track{height:8px;border-radius:8px;background:#293946;overflow:hidden}
+.sync-progress-track>span{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#53b89d,#88e7c9);transition:width .3s ease}
+.sync-progress-track.indeterminate>span{width:28%;opacity:.65}
+.sync-progress-track.indeterminate.moving>span{animation:sync-progress-slide 1.8s ease-in-out infinite}
+.sync-paused .sync-progress-track>span,.sync-waiting .sync-progress-track>span{background:#c9a46e}
+.sync-failed .sync-progress-track>span{background:#d78f87}
+.app-shell .sync-card-footer{display:flex;align-items:flex-start;gap:14px;margin-top:14px}
+.app-shell .sync-details{flex:1;min-width:0;color:#94abb6;font-size:12px;line-height:1.65}
+.app-shell .sync-details>summary{cursor:pointer;min-height:40px;display:list-item;align-content:center;width:fit-content;color:#a9c3cb}
+.app-shell .sync-details>summary:focus-visible{outline:2px solid var(--teal);outline-offset:3px;border-radius:3px}
+.app-shell .sync-details>div{padding-top:8px;overflow-wrap:anywhere}
+.app-shell .sync-details p{font-size:12px;line-height:1.65;margin:0 0 9px;color:#93aab6}
+.app-shell .sync-details .job-metrics{font-size:12px;line-height:1.6;gap:7px 14px;margin:8px 0}
+.app-shell .sync-details time{font-size:11px;color:#899eaf}
+.app-shell .sync-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;flex-shrink:0}
+.app-shell .sync-actions .button.small{font-size:13px;min-height:42px;padding:9px 14px}
+.app-shell .sync-actions .button.small svg{display:block}
+.app-shell .sync-limit-details{margin:0 0 14px;color:#98adba;font-size:12px;line-height:1.6}
+.app-shell .sync-limit-details>summary{cursor:pointer;min-height:34px;align-content:center;width:fit-content;color:#a8bec8}
+.app-shell .sync-limit-details>div{border:1px solid #2d4051;border-radius:9px;padding:12px 14px;margin-top:6px;background:#15212c}
+.app-shell .sync-limit-details p{font-size:12px;line-height:1.65;margin:0 0 8px}
+.app-shell .sync-limit-details .cloud-window-error{color:#efba95}
+.app-shell .active-jobs{border-color:#304c50;margin:0 0 18px}
+@keyframes sync-progress-slide{0%{transform:translateX(-100%)}100%{transform:translateX(460%)}}
+@media(max-width:480px){
+  .app-shell .sync-card.job-card{padding:16px}
+  .app-shell .sync-card-header{gap:8px;flex-wrap:wrap}
+  .app-shell .sync-card-header>strong{font-size:15px;flex-basis:160px}
+  .app-shell .sync-card-header .job-symbol{width:28px;height:28px}
+  .app-shell .sync-card .sync-state{font-size:10px}
+  .app-shell .sync-card-footer{gap:10px}
+  .app-shell .sync-actions .button.small{padding:9px 12px;font-size:12px}
+}
+@media(prefers-reduced-motion:reduce){.sync-progress-track>span{transition:none}.sync-progress-track.indeterminate.moving>span{animation:none;transform:none}}

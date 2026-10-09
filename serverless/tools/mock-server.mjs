@@ -18,6 +18,11 @@ const port = Number(process.env.MOCK_PORT || 8766);
 const seedManifest = process.env.MOCK_SEED_MANIFEST;
 const readOnlyPreview = Boolean(seedManifest);
 const mockOwnedPrices = process.env.MOCK_OWNED_PRICES === '1' && !readOnlyPreview;
+// Optional synthetic progress fixtures; seed previews remain unchanged.
+const collectionCount = readOnlyPreview ? 1 : Number(process.env.MOCK_COLLECTIONS || 1);
+const mockRetryAfter = readOnlyPreview ? 0 : Number(process.env.MOCK_RETRY_AFTER_SECONDS || 0);
+if (!Number.isSafeInteger(collectionCount) || collectionCount < 1 || collectionCount > 10) throw new Error('MOCK_COLLECTIONS must be an integer from 1 to 10');
+if (!Number.isSafeInteger(mockRetryAfter) || mockRetryAfter < 0 || mockRetryAfter > 60) throw new Error('MOCK_RETRY_AFTER_SECONDS must be an integer from 0 to 60');
 const database = new DatabaseSync(readOnlyPreview ? ':memory:' : (process.env.MOCK_DB || ':memory:'));
 database.exec('CREATE TABLE IF NOT EXISTS cloud_events (sequence INTEGER PRIMARY KEY,event_key TEXT NOT NULL,state_json TEXT NOT NULL,job_id INTEGER,job_json TEXT,records_json TEXT NOT NULL,raw_body TEXT,observed_at TEXT NOT NULL)');
 database.exec('CREATE TABLE IF NOT EXISTS collector_state (id INTEGER PRIMARY KEY,revision INTEGER NOT NULL DEFAULT 0,document TEXT NOT NULL)');
@@ -28,16 +33,21 @@ const db = {
 };
 const address = id => `0:${String(id).padStart(64, '0')}`;
 const collection = address(100);
+const groups = Array.from({length: collectionCount}, (_, i) => ({
+  collection: address(100 + i), name: i === 0 ? 'Demo Low Riders' : `Demo Low Riders ${i + 1}`,
+  ids: [1, 2, 3, 4].map(id => i * 4 + id),
+}));
+const nftCollections = new Map(groups.flatMap(group => group.ids.map(id => [address(id), group.collection])));
 const wallet = address(999);
 const observed = new Date().toISOString();
-const item = (id, amount) => ({nft_address: address(id), nft_name: `Demo Low Rider #${id}`, owner: wallet, attributes: [{trait_type: 'Model', value: 'Sample model'}, {trait_type: 'Backdrop', value: id === 4 ? 'Onyx' : 'Black'}], min_duration: 1, max_duration: 30, price_per_day: amount, discount_per_day: 0, listed_at: null});
-const pages = {
-  head: {cursor: 'page-2', items: [item(1, '390000000'), item(2, '125500000')]},
-  'page-2': {cursor: 'page-3', items: [item(3, '170000000')]},
-  'page-3': {cursor: null, items: [item(4, '50000000')]},
-};
-let providerAttempts = 0, tonAttempts = 0;
-const history = id => ({address: address(id), name: `Demo Low Rider #${id}`, collection_address: collection, src: wallet, dst: address(888), price: id === 1 ? '0.6' : '0.9', price_nano: id === 1 ? '600000000' : '900000000', currency: 'GRAM', ts: Math.floor(Date.now() / 1000) - id * 3600, duration: 259200, is_extend: false, tx_hash: `demo-${id}`});
+const item = (id, amount) => ({nft_address: address(id), nft_name: `Demo Low Rider #${id}`, owner: wallet, attributes: [{trait_type: 'Model', value: 'Sample model'}, {trait_type: 'Backdrop', value: id % 4 === 0 ? 'Onyx' : 'Black'}], min_duration: 1, max_duration: 30, price_per_day: amount, discount_per_day: 0, listed_at: null});
+const pagesFor = ids => ({
+  head: {cursor: 'page-2', items: [item(ids[0], '390000000'), item(ids[1], '125500000')]},
+  'page-2': {cursor: 'page-3', items: [item(ids[2], '170000000')]},
+  'page-3': {cursor: null, items: [item(ids[3], '50000000')]},
+});
+let providerAttempts = 0, tonAttempts = 0, mockRetrySent = false;
+const history = id => ({address: address(id), name: `Demo Low Rider #${id}`, collection_address: nftCollections.get(address(id)), src: wallet, dst: address(888), price: id % 4 === 1 ? '0.6' : '0.9', price_nano: id % 4 === 1 ? '600000000' : '900000000', currency: 'GRAM', ts: Math.floor(Date.now() / 1000) - id * 3600, duration: 259200, is_extend: false, tx_hash: `demo-${id}`});
 const engine = createCloudEngine({repository: createCloudRepository(db), ownerTelegramId: 42, marketappToken: 'mock-only-token', ownedPriceRefresh: mockOwnedPrices, limits: {invocation_attempts: Number(process.env.MOCK_ATTEMPTS || 100)}, fetch: async (url, options) => {
   if (readOnlyPreview) throw new Error('Collection is disabled in the read-only seed preview');
   if (options.method !== 'GET' || !url.startsWith('https://api.marketapp.org/')) throw new Error('Unexpected mock request');
@@ -45,10 +55,18 @@ const engine = createCloudEngine({repository: createCloudRepository(db), ownerTe
   await new Promise(done => setTimeout(done, Number(process.env.MOCK_DELAY_MS || 750)));
   const parsed = new URL(url);
   let page;
-  if (parsed.pathname === '/v1/collections/gifts/') page = [{address: collection, name: 'Demo Low Riders', extra_data: {}}];
-  else if (parsed.pathname === '/v1/rent/gifts/') page = pages[parsed.searchParams.get('cursor') || 'head'];
-  else if (parsed.pathname === '/v1/rent/gifts/history/') page = {cursor: null, items: [history(1), history(2), history(3)]};
-  else throw new Error('Unexpected mock route');
+  if (parsed.pathname === '/v1/collections/gifts/') page = groups.map(group => ({address: group.collection, name: group.name, extra_data: {}}));
+  else {
+    if (!['/v1/rent/gifts/', '/v1/rent/gifts/history/'].includes(parsed.pathname)) throw new Error('Unexpected mock route');
+    const group = groups.find(group => group.collection === parsed.searchParams.get('collection_address'));
+    if (!group) throw new Error('Unexpected mock collection');
+    if (mockRetryAfter && !mockRetrySent) {
+      mockRetrySent = true;
+      return {status: 429, url, headers: {get: name => name.toLowerCase() === 'retry-after' ? String(mockRetryAfter) : null}, text: async () => JSON.stringify({error: 'Synthetic provider cooldown'})};
+    }
+    page = parsed.pathname === '/v1/rent/gifts/' ? pagesFor(group.ids)[parsed.searchParams.get('cursor') || 'head']
+      : {cursor: null, items: group.ids.slice(0, 3).map(history)};
+  }
   return {status: 200, url, headers: {get: () => null}, text: async () => JSON.stringify(page)};
 }});
 // Synthetic UI fixture only. Cryptographic decoding is independently tested
@@ -61,7 +79,7 @@ const ownedPrices = createOwnedPriceEngine({repository: createCloudRepository(db
     tonAttempts++;
     await new Promise(done=>setTimeout(done,Number(process.env.MOCK_DELAY_MS||750)));
     const parsed=new URL(url), addresses=parsed.searchParams.getAll('address');
-    const body=parsed.pathname==='/api/v3/nft/items'?{nft_items:addresses.map(address=>({address,init:true,owner_address:fakeHolder,collection_address:collection,last_transaction_lt:'123'}))}
+    const body=parsed.pathname==='/api/v3/nft/items'?{nft_items:addresses.map(address=>({address,init:true,owner_address:fakeHolder,collection_address:nftCollections.get(address)||collection,last_transaction_lt:'123'}))}
       :parsed.pathname==='/api/v3/accountStates'?{accounts:addresses.map(address=>({address,last_transaction_lt:'123'}))}:null;
     if(!body) throw new Error('Unexpected mock TON route');
     return {status:200,url,headers:{get:()=>null},text:async()=>JSON.stringify(body)};
@@ -71,14 +89,14 @@ const ownedMethods={getOwnedPriceRefresh:'getStatus',startOwnedPriceRefresh:'sta
 const context = {initData: {user: {id: 42}}};
 const seed = [
   {kind: 'settings', key: 'demo-settings', observed_at: observed, record: {wallet}},
-  ...[1, 2, 3, 4].flatMap(id => {
-    const listing = item(id, id === 1 ? '390000000' : '170000000');
+  ...groups.flatMap(group => group.ids.flatMap(id => {
+    const listing = item(id, id % 4 === 1 ? '390000000' : '170000000');
     return [
-      {kind: 'portfolio', key: `demo-gift-${id}`, observed_at: observed, record: {nft_address: address(id), name: listing.nft_name, collection_address: collection, collection_name: 'Demo Low Riders', is_portfolio: true, automatic_membership: true, membership_sources: ['ton_verified'], verification_method: 'imported_ton_evidence', observed_at: observed, state: id === 2 ? 'rented' : 'idle_rental_contract', display_state: id === 2 ? 'Rented (imported)' : 'For rent (observed)', ui_state: id === 2 ? null : 'for_rent', image_url: null, uncertainties: ['Synthetic fixture for local UI verification.']}},
-      {kind: 'listing', key: `demo-listing-${id}`, observed_at: observed, record: {identity: address(id), source_json: listing, params: {collection_address: collection}, collection_address: collection}},
+      {kind: 'portfolio', key: `demo-gift-${id}`, observed_at: observed, record: {nft_address: address(id), name: listing.nft_name, collection_address: group.collection, collection_name: group.name, is_portfolio: true, automatic_membership: true, membership_sources: ['ton_verified'], verification_method: 'imported_ton_evidence', observed_at: observed, state: id % 4 === 2 ? 'rented' : 'idle_rental_contract', display_state: id % 4 === 2 ? 'Rented (imported)' : 'For rent (observed)', ui_state: id % 4 === 2 ? null : 'for_rent', image_url: null, uncertainties: ['Synthetic fixture for local UI verification.']}},
+      {kind: 'listing', key: `demo-listing-${id}`, observed_at: observed, record: {identity: address(id), source_json: listing, params: {collection_address: group.collection}, collection_address: group.collection}},
       {kind: 'history', key: `demo-history-${id}`, observed_at: observed, record: {identity: address(id), source_json: history(id)}},
     ];
-  }),
+  })),
 ];
 if (readOnlyPreview) {
   const localSeed = await readSeed(seedManifest, option(process.argv.slice(2), '--app-id'));

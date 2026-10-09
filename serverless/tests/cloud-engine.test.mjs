@@ -46,11 +46,14 @@ test('imports are bounded, atomic, idempotent, and reject changed replays', asyn
 
 test('catalog and scoped listing traversal use exact GET routes, parameters and raw token', async () => {
   const t = setup([response(catalog), page('opaque /+=?&', []), page('', [listing()]), page(null, [])]); await seed(t); const id = await start(t);
-  await step(t, id); assert.equal(t.requests[0].url, 'https://api.marketapp.org/v1/collections/gifts/');
+  assert.deepEqual((await t.engine.getJobs(ctx)).jobs[0].progress.sync, {phase: 'preparing', completed: 0, total: 1, unit: 'collections', current_collection: null, processed_items: 0});
+  const catalogDone = await step(t, id); assert.equal(t.requests[0].url, 'https://api.marketapp.org/v1/collections/gifts/');
+  assert.deepEqual(catalogDone.progress.sync, {phase: 'listings', completed: 0, total: 1, unit: 'collections', current_collection: 'Gifts', processed_items: 0});
   await step(t, id); assert.equal(t.requests.length, 1);
   for (let i = 0; i < 3; i++) {t.advance(1000); await step(t, id);}
   const jobs = await t.engine.getJobs(ctx); assert.equal(jobs.jobs[0].state, 'complete');
   assert.equal(jobs.jobs[0].progress.pages, 4);
+  assert.deepEqual(jobs.jobs[0].progress.sync, {phase: 'complete', completed: 1, total: 1, unit: 'collections', current_collection: null, processed_items: 1});
   for (const request of t.requests) {assert.equal(request.options.method, 'GET'); assert.equal(request.options.headers.Authorization, token); assert.equal(request.options.redirect, 'error');}
   const url = new URL(t.requests[2].url); assert.equal(url.pathname, '/v1/rent/gifts/'); assert.equal(url.searchParams.get('cursor'), 'opaque /+=?&');
   assert.equal(url.searchParams.get('collection_address'), scope); assert.equal(url.searchParams.get('sort_by'), 'recently_touch'); assert.equal(url.searchParams.get('limit'), '100');

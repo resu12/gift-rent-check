@@ -74,6 +74,29 @@ function scopedCollections(records) {
   return {scopes: [...scopes].sort(([a], [b]) => a.localeCompare(b)).map(([, original]) => original), unresolved};
 }
 
+export function cloudSyncProgress(job) {
+  const groups = new Map();
+  for (const stream of job.streams) {
+    if (stream.kind === 'collection') continue;
+    const key = stream.scope ? stableKey(stream.scope) : null;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(stream);
+  }
+  const total = groups.has(null) ? null : groups.size;
+  const completed = [...groups].filter(([key, streams]) => key !== null && streams.every(stream => stream.complete)).length;
+  const current = job.streams.find(stream => !stream.complete);
+  const preparing = job.streams.some(stream => stream.kind === 'collection' && !stream.complete);
+  const phase = preparing ? 'preparing' : !current ? 'complete' : current.kind === 'listing' ? 'listings' : current.kind === 'history' ? 'rentals' : 'preparing';
+  const name = !preparing && current?.scope ? job.scope_names?.[stableKey(current.scope)] : null;
+  return {
+    phase, completed: preparing ? 0 : completed, total, unit: 'collections',
+    current_collection: typeof name === 'string' && name.trim() ? name.trim() : null,
+    // Old jobs do not distinguish catalog items from market observations.
+    // Report only the market item count explicitly recorded by this version.
+    processed_items: Number.isSafeInteger(job.market_observations) && job.market_observations >= 0 ? job.market_observations : 0,
+  };
+}
+
 export function createCloudEngine({repository, fetch: request, ownerTelegramId, marketappToken, now: localNow = () => Date.now(), clock = null, random = Math.random, limits = {}, dashboard = buildCloudDashboard, ownedPriceRefresh = false}) {
   const cap = {...CLOUD_LIMITS, ...limits};
   let observedTime = null;
@@ -104,6 +127,7 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       scopes: job.scopes.length, unresolved_collections: job.unresolved_collections, warnings: job.warnings,
       history_refresh: historyRefreshProgress(job.streams),
       market_cache: marketCacheProgress(job.streams),
+      sync: cloudSyncProgress(job),
       next_allowed_at: Math.max(state.next_allowed_at, job.lease_until || 0), server_time: now(),
       requires_resume: readonly && isActive(job) && (job.lease_until || 0) <= now(),
       marketapp_budget: {invocation_used: job.invocation_used, invocation_limit: cap.invocation_attempts, rolling_24h_used: budget(state).used_24h, rolling_24h_limit: cap.daily_attempts, resets_at: budget(state).resets_at, run_seconds: cap.duration_ms / 1000},
@@ -168,7 +192,7 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
         streams: [{kind: 'collection', scope: null}, ...scopes.flatMap(scope => kinds.map(kind => ({kind, scope})))].map(s => ({...s, cursor: null, started: false, complete: false, cursors: [], retry: 0, pages: 0, last_timestamp: null, ordered: true, scope_verified: true,
           ...(s.kind === 'history' ? {history_plan: planHistoryRefresh(state.history_coverage?.[stableKey(s.scope)], Math.floor(Date.parse(window.window_from) / 1000), Math.floor(now() / 1000))} : {}),
         })),
-        pages: 0, observations: 0, warnings: [], invocation_used: 0, invocation_deadline: now() + cap.duration_ms, invocation: 1, lease: null, lease_until: 0};
+        pages: 0, observations: 0, market_observations: 0, scope_names: {}, warnings: [], invocation_used: 0, invocation_deadline: now() + cap.duration_ms, invocation: 1, lease: null, lease_until: 0};
       for (const stream of state.job.streams) if (stream.kind !== 'collection') {
         const cached = cachedMarketStream(state.market_cache, stream, state.job.page_size, now());
         if (cached) {stream.complete = true; stream.completion_reason = 'shared_market_cache'; stream.cache_source = cached;}
@@ -288,6 +312,12 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       current.first_observed_at ??= providerObservedAt;
       current.last_observed_at = providerObservedAt;
       if (parsed.cursor !== null) current.cursors.push(parsed.cursor);
+      if (current.kind === 'collection') {
+        job.scope_names = Object.fromEntries(parsed.items.filter(item => typeof item.name === 'string' && item.name.trim())
+          .map(item => [stableKey(item.address), item.name.trim()]));
+      } else {
+        job.market_observations = (job.market_observations || 0) + parsed.records.length;
+      }
       if (current.kind === 'history') {
         const timestamps = parsed.items.map(item => item.ts);
         if (parsed.items.some(item => stableKey(item.collection_address) !== stableKey(current.scope))) current.scope_verified = false;

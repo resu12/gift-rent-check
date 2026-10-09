@@ -1,4 +1,6 @@
-.owned-price-status{display:flex;align-items:center;justify-content:space-between;gap:8px 16px;flex-wrap:wrap;margin:0 0 12px;padding:9px 12px;border:1px solid #2b4548;border-radius:9px;background:#14262b;color:#afd3c9;font-size:12px;line-height:1.5}
-.owned-price-status.partial,.owned-price-status.unavailable{color:#d0c6a9;border-color:#484536;background:#26261f}
-.owned-price-status .text-button{min-height:30px;font-size:12px;white-space:nowrap;margin-left:auto}
-@media(max-width:760px){.owned-price-status{font-size:11px;padding:7px 10px;gap:4px 10px}.owned-price-status .text-button{min-height:32px;font-size:11px}}
+.app-shell .owned-price-status.sync-card{margin:0 0 16px;border:1px solid #2d494b;border-radius:12px}
+.app-shell .owned-price-status.sync-compact{padding:12px 16px}
+.app-shell .owned-price-status.sync-compact .sync-card-header>strong{font-size:14px}
+.app-shell .owned-price-status.sync-compact .sync-message{margin-top:5px}
+.app-shell .owned-price-status.sync-compact .sync-card-footer{margin-top:2px}
+.app-shell .owned-price-status.sync-compact .sync-details>summary{min-height:32px}

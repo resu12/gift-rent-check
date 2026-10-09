@@ -12,6 +12,8 @@ import { ListFooter } from './ListFooter';
 import { RentalCount, RentalHistoryDetails } from './RentalCount';
 import { useOwnedPriceRefresh } from './useOwnedPriceRefresh';
 import { OwnedPriceStatus } from './OwnedPriceStatus';
+import { SyncProgress } from './SyncProgress';
+import { presentJobSync } from './data/syncPresentation';
 
 type Page = 'pricing' | 'overview' | 'gifts' | 'activity';
 const NAV: { id: Page; label: string; icon: 'overview' | 'gift' | 'pricing' | 'activity' }[] = [
@@ -101,29 +103,39 @@ function JobCard({ job, onResume, disabled, onStop, stopping, stopDisabled }: {
   const requiresResume = job.progress?.requires_resume === true;
   const active = isActiveJob(job) && !requiresResume;
   const isStopping = active && (stopping || job.stop_requested);
-  const metrics = Object.entries(job.progress || {}).filter(([, value]) => typeof value === 'number' || typeof value === 'string').slice(0, 4);
-  const budget = job.progress?.marketapp_budget as { invocation_used: number; invocation_limit: number; rolling_24h_used: number; rolling_24h_limit: number } | undefined;
   const window = job.collection_window;
-  const historyRefresh = job.progress?.history_refresh;
-  const listingRefresh = job.progress?.listing_refresh;
-  const marketCache = job.progress?.market_cache;
-  const incremental = (historyRefresh?.incremental_streams ?? 0) > 0;
-  const reason = job.reason === 'timeframe_covered' ? 'Selected timeframe covered. Older pages were not requested.' : job.reason === 'incremental_history_covered' ? 'Recent rentals checked. Older records use the saved completed scan.' : job.reason;
-  return <article className={`job-card job-${job.state}`}>
-    <span className={`job-symbol ${active ? 'spinning' : ''}`}><Icon name={active ? 'refresh' : job.state === 'complete' ? 'check' : job.state === 'failed' ? 'alert' : 'clock'} /></span>
-    <div className="job-content"><div className="job-title"><strong>{JOB_LABEL[job.kind] || humanize(job.kind)}</strong><span className={`job-state ${job.state}`}>{isStopping ? 'Stopping' : requiresResume ? 'Waiting for you' : humanize(job.state)}</span></div>
-      <p>{isStopping ? 'Stopping after the current request. Saved progress can be resumed.' : requiresResume ? 'The app is not collecting. Continue from the saved checkpoint when you are ready.' : reason || (job.state === 'running' ? 'Reading records and saving progress as it arrives.' : job.state === 'queued' ? 'Waiting to start.' : job.state === 'complete' ? 'Completed. The latest saved observations are ready.' : 'Saved progress is available to inspect.')}</p>
-      {active && !isStopping && <p>Continues through batches within its limits. At a safety limit, progress is saved for manual Resume.</p>}
-      {window && <p>Saved pricing window: {timeframeLabel({ source: job.kind === 'rental_prices' ? 'rentals' : 'listings', timeframe: window.timeframe, dateFrom: window.date_from || undefined, dateTo: window.date_to || undefined })}.{window.window_from && <> From {dateTime(window.window_from)}{window.window_to ? ` to ${dateTime(window.window_to)}` : ''}.</>} Resume keeps this window.</p>}
-      {historyRefresh && <p>History plan: {historyRefresh.incremental_streams} incremental; {historyRefresh.full_streams} full-window.{incremental && <> Recent updates recheck a {historyRefresh.overlap_seconds / 3600}-hour overlap and reuse older saved records.</>}</p>}
-      {listingRefresh && listingRefresh.reused_streams > 0 && <p>{listingRefresh.reused_streams} listing group{listingRefresh.reused_streams === 1 ? '' : 's'} covered by completed broader scans. No extra requests or duplicate observations for those groups.</p>}
-      {marketCache && marketCache.reused_streams > 0 && <p>Telegram cache: {marketCache.reused_streams} of {marketCache.total_streams} market scans reused without provider requests. The cache accepts scans less than {marketCache.ttl_seconds / 60} minutes old when this job starts.{marketCache.oldest_observed_at && <> Original observations from {dateTime(marketCache.oldest_observed_at)}.</>}</p>}
-      {budget && <div className="job-metrics"><span>Marketapp requests <b>{budget.invocation_used} / {budget.invocation_limit}</b> this start/resume</span><span>Last 24 hours <b>{budget.rolling_24h_used} / {budget.rolling_24h_limit}</b></span></div>}
-      {metrics.length > 0 && <div className="job-metrics">{metrics.map(([key, value]) => <span key={key}>{humanize(key)} <b>{String(value)}</b></span>)}</div>}
-      <time dateTime={job.updated_at}>{dateTime(job.updated_at, true)}{job.run_id != null ? ` · Run ${job.run_id}` : ''}</time>
+  const windowLabel = window ? timeframeLabel({ source: job.kind === 'rental_prices' ? 'rentals' : 'listings', timeframe: window.timeframe, dateFrom: window.date_from || undefined, dateTo: window.date_to || undefined }) : undefined;
+  const view = presentJobSync(job, { stopping: isStopping, timeframeLabel: windowLabel });
+  const budget = job.progress?.marketapp_budget as { invocation_used: number; invocation_limit: number; rolling_24h_used: number; rolling_24h_limit: number } | undefined;
+  const history = job.progress?.history_refresh;
+  const listing = job.progress?.listing_refresh;
+  const cache = job.progress?.market_cache;
+  const metrics = [['pages', 'Pages read'], ['observations', 'Records saved'], ['streams_complete', 'Checks completed'], ['streams_total', 'Checks planned']] as const;
+  return <article className={`job-card sync-card job-${job.state} sync-${view.state}`} aria-label={view.title}>
+    <div className="sync-card-header">
+      <span className={`job-symbol ${active && !isStopping && view.state !== 'waiting' ? 'spinning' : ''}`} aria-hidden="true"><Icon name={view.state === 'complete' ? 'check' : view.state === 'failed' ? 'alert' : active && !isStopping && view.state !== 'waiting' ? 'refresh' : 'clock'} /></span>
+      <strong>{view.title}</strong><span className="sync-state">{view.stateLabel}</span>
     </div>
-    {(job.state === 'partial' || requiresResume) && <button className="button small secondary" disabled={disabled} onClick={() => onResume(job)}>{requiresResume ? 'Continue' : 'Resume'}<Icon name="arrow" size={15} /></button>}
-    {isActiveJob(job) && <button className="button small secondary" disabled={stopDisabled || isStopping} onClick={() => onStop(job)} aria-label={`Stop ${JOB_LABEL[job.kind] || humanize(job.kind)}`}>{isStopping ? 'Stopping…' : 'Stop'}</button>}
+    <p className="sync-purpose">{view.objective}</p>
+    <SyncProgress progress={view.progress} moving={active && !isStopping && view.state !== 'waiting'} />
+    <p className="sync-message" role="status">{view.message}</p>
+    <div className="sync-card-footer">
+      <details className="sync-details"><summary>Details</summary><div>
+        <p>Progress counts completed collections or gift checks, not time remaining. Collections can take different amounts of time.</p>
+        {window && <p>Selected period: {windowLabel}.{window.window_from && <> From {dateTime(window.window_from)}{window.window_to ? ` to ${dateTime(window.window_to)}` : ''}.</>} Continue keeps this period.</p>}
+        {budget && <div className="job-metrics"><span>Requests this session <b>{budget.invocation_used} / {budget.invocation_limit}</b></span><span>Last 24 hours <b>{budget.rolling_24h_used} / {budget.rolling_24h_limit}</b></span></div>}
+        <div className="job-metrics">{metrics.map(([key, label]) => typeof job.progress?.[key] === 'number' ? <span key={key}>{label} <b>{String(job.progress[key])}</b></span> : null)}</div>
+        {history && <p>History: {history.incremental_streams} incremental and {history.full_streams} full-window plans. Incremental checks reread {history.overlap_seconds / 3600} hours of overlap.</p>}
+        {listing && listing.reused_streams > 0 && <p>{listing.reused_streams} listing groups use completed broader scans.</p>}
+        {cache && cache.reused_streams > 0 && <p>{cache.reused_streams} scans use the Telegram cache, without new comparison requests.{cache.oldest_observed_at && <> Original observations from {dateTime(cache.oldest_observed_at)}.</>}</p>}
+        {view.rawReason && <p>Saved status: {view.rawReason}</p>}
+        <time dateTime={job.updated_at}>Updated {dateTime(job.updated_at, true)}{job.run_id != null ? ` · Run ${job.run_id}` : ''}</time>
+      </div></details>
+      <div className="sync-actions">
+        {(job.state === 'partial' || requiresResume) && <button className="button small secondary" disabled={disabled} onClick={() => onResume(job)}>{view.actionLabel || 'Continue'}<Icon name="arrow" size={15} /></button>}
+        {isActiveJob(job) && <button className="button small secondary" disabled={stopDisabled || isStopping} onClick={() => onStop(job)} aria-label={`Stop ${JOB_LABEL[job.kind] || humanize(job.kind)}`}>{isStopping ? 'Stopping…' : 'Stop'}</button>}
+      </div>
+    </div>
   </article>;
 }
 
@@ -149,22 +161,15 @@ function Coverage({ data }: { data: Dashboard }) {
 
 function CollectionLimits({ data, selection }: { data: Dashboard; selection: PricingSelection }) {
   const limits = data.capabilities.marketapp_limits;
-  const historyError = historyCollectionError(selection);
-  if (data.capabilities.hosting === 'serverless') return <div className="notice info cloud-limits"><Icon name="shield" size={18} /><div>
-    <strong>{limits ? `${limits.remaining_24h} of ${limits.rolling_24h_attempts} requests remain · last 24 hours` : 'Bounded market collection'}</strong>
-    {limits && <p>{limits.max_attempts} per start/resume · {limits.run_seconds / 60} min · {limits.requests_per_second} request/s. Retries count.</p>}
-    {selection.source === 'rentals' && historyError && <p className="cloud-window-error">{historyError}</p>}
-    <details><summary>Collection and timeframe details</summary><p>{selection.source === 'rentals'
-      ? `Rental collection follows ${timeframeLabel(selection).toLowerCase()}. After a completed scan, refresh checks recent rentals with a 48-hour overlap and reuses older saved records. A refresh requested after seven days rechecks the full selected window. Safety limits still apply.`
-      : 'Collection reads current asking prices. The timeframe filters saved observations; Marketapp cannot supply past listing snapshots for that window.'} Changing filters and reloading this view use saved data only. Resume retains the original window.</p></details>
-  </div></div>;
-  return <div className="notice info"><Icon name="shield" size={18} /><div>
-    <strong>{limits ? 'Marketapp request limits' : 'Collection scope'}</strong>
-    {limits && <p>Up to {limits.max_attempts} requests per start/resume, {limits.rolling_24h_attempts} across this dashboard in 24 hours, and {limits.run_seconds} seconds per start/resume. Maximum {limits.requests_per_second} request{limits.requests_per_second === 1 ? '' : 's'} per second. {limits.remaining_24h} requests remain in the rolling 24-hour allowance. Retries count toward these limits.</p>}
-    <p>{selection.source === 'rentals'
-      ? historyError || `Rental collection follows ${timeframeLabel(selection).toLowerCase()}. After a completed scan, refresh checks recent rentals with a 48-hour overlap and reuses older saved records. A refresh requested after seven days rechecks the full selected window. Safety limits still apply.`
-      : 'Collection reads current asking prices. The timeframe filters saved observations; Marketapp cannot supply past listing snapshots for that window.'} Changing filters and reloading this view use saved data only.</p>
-  </div></div>;
+  const historyError = selection.source === 'rentals' ? historyCollectionError(selection) : null;
+  return <>
+    {historyError && <div className="notice error" role="alert"><Icon name="alert" size={18} /><p>{historyError}</p></div>}
+    <details className="sync-limit-details"><summary>Update limits & details</summary><div>
+      {limits && <p>{limits.remaining_24h} of {limits.rolling_24h_attempts} requests remain in the last 24 hours. Each start or continuation allows up to {limits.max_attempts} requests and {limits.run_seconds / 60} minutes, at {limits.requests_per_second} request/s. Retries count.</p>}
+      <p>{selection.source === 'rentals' ? `Checks actual rentals for ${timeframeLabel(selection).toLowerCase()}. Completed history is reused with a 48-hour overlap; a requested update after seven days rechecks the full period.` : 'Checks current asking prices. Past listing prices come from previously saved observations.'}</p>
+      <p>Changing filters reads saved data. Continue keeps the original period. No prices are changed on Marketapp.</p>
+    </div></details>
+  </>;
 }
 
 function Overview({ data, onFilter, onSelect }: { data: Dashboard; onFilter: (filter: GiftFilter) => void; onSelect: (gift: Gift) => void }) {
@@ -277,7 +282,8 @@ export default function App({ adapter, walletControl }: {
   const [refreshOpen, setRefreshOpen] = useState(false);
   const simplePricing = page === 'pricing' && pricingView === 'grid';
   const activeJobs = jobs.filter(job => isActiveJob(job) && job.progress?.requires_resume !== true);
-  const visibleJobs = cloud ? jobs.filter(job => isActiveJob(job) || job.state === 'partial').sort((a, b) => Number(isActiveJob(b)) - Number(isActiveJob(a)) || b.id - a.id).slice(0, 3) : activeJobs;
+  const latestJobId = Math.max(0, ...jobs.map(job => job.id));
+  const visibleJobs = jobs.filter(job => isActiveJob(job) || job.state === 'partial' || (job.id === latestJobId && job.state === 'failed')).sort((a, b) => Number(isActiveJob(b)) - Number(isActiveJob(a)) || b.id - a.id).slice(0, 3);
   const busy = submitting || activeJobs.length > 0;
   const closeDetails = useCallback(() => setSelected(null), []);
   const changePricing = (next: PricingSelection) => { setSelected(null); setPricingSelection(next); };
@@ -348,7 +354,7 @@ export default function App({ adapter, walletControl }: {
   const goFilter = (value: GiftFilter) => { setFilter(value); setPage('gifts'); setSearch(''); setCollection(''); };
   const nav = <>{NAV.map(item => <button key={item.id} aria-current={page === item.id ? 'page' : undefined} className={`nav-item ${page === item.id ? 'active' : ''}`} onClick={() => setPage(item.id)}><Icon name={item.icon} size={20} /><span>{item.label}</span>{item.id === 'gifts' && data && <b>{data.summary.portfolio_count}</b>}</button>)}</>;
 
-  const jobCards = visibleJobs.length > 0 && <div className="active-jobs" aria-live="polite">{visibleJobs.map(job => <JobCard key={job.id} job={job} onResume={onResume} disabled={busy || !canSync} onStop={onStop} stopping={stoppingJobs.has(job.id)} stopDisabled={!data} />)}</div>;
+  const jobCards = visibleJobs.length > 0 && <div className="active-jobs">{visibleJobs.map(job => <JobCard key={job.id} job={job} onResume={onResume} disabled={busy || !canSync} onStop={onStop} stopping={stoppingJobs.has(job.id)} stopDisabled={!data} />)}</div>;
 
   const headingActions = <div className="heading-actions"><a className="button secondary export-button" href={data && !adapter.exportCsv ? adapter.exportUrl(pricingSelection) : undefined} role={adapter.exportCsv ? 'button' : undefined} onClick={event => { if (adapter.exportCsv && data) { event.preventDefault(); adapter.exportCsv(data, pricingSelection); } }} onKeyDown={event => { if (adapter.exportCsv && data && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); adapter.exportCsv(data, pricingSelection); } }} aria-disabled={!data} tabIndex={data ? 0 : -1}><Icon name="download" size={16} />Export</a><div className="sync-control"><button className="button primary" onClick={() => { void launch(priceJob); }} disabled={!canSync || busy} title={!canSync ? cloud ? 'Configure the private server token and import your portfolio to collect comparison prices.' : 'Configure your wallet and local Marketapp API token, and enable network collection to sync.' : pricingSelection.source === 'rentals' ? 'Collect recorded rentals for your gift collections' : 'Collect observed asking prices for your gift collections'}><Icon name={busy ? 'refresh' : 'pricing'} size={17} className={busy ? 'spinning' : ''} />{busy ? 'Sync in progress' : simplePricing ? 'Refresh prices' : pricingSelection.source === 'rentals' ? 'Collect actual rentals' : 'Collect comparison prices'}</button><button className="button primary sync-more" disabled={!canSync || busy} aria-label="More sync options" aria-expanded={syncMenu} onClick={() => setSyncMenu(!syncMenu)}><span>⌄</span></button>{syncMenu && <div className="sync-menu">{supportsJob('refresh') && <button onClick={() => { void launch('refresh'); }}><Icon name="refresh" size={18} /><span><strong>Refresh gift status</strong><small>Update ownership, traits and configured asking prices</small></span></button>}{supportsJob('discover') && <button onClick={() => { void launch('discover'); }} disabled={!data?.capabilities.marketapp_configured}><Icon name="discover" size={18} /><span><strong>Discover wallet gifts</strong><small>Search holdings and transfer history</small></span></button>}<button onClick={() => { void launch('collect'); }} disabled={!data?.capabilities.marketapp_configured}><Icon name="layers" size={18} /><span><strong>Collect market listings</strong><small>{cloud ? 'Refresh public listings and bounded rental history' : 'Read public listings; rented-gift prices use Refresh gift status'}</small></span></button></div>}</div></div>;
 
@@ -365,13 +371,9 @@ export default function App({ adapter, walletControl }: {
       {page === 'pricing' && <PricingControls selection={pricingSelection} onChange={changePricing} loading={loading} compact={simplePricing} />}
       {ownedPriceRefresh && <OwnedPriceStatus driver={ownedPriceRefresh} />}
       {page === 'pricing' && data && (simplePricing ? <details className="grid-collection-settings" open={refreshOpen} onToggle={event => { setRefreshOpen(event.currentTarget.open); if (!event.currentTarget.open) setSyncMenu(false); }}>
-        <summary>Refresh prices & activity{visibleJobs.length > 0 && <span className="grid-collection-summary-state"> · {activeJobs.length > 0 ? 'Collecting' : 'Saved progress'}</span>}</summary>
-        {refreshOpen && <div className="grid-collection-content">{headingActions}<CollectionLimits data={data} selection={pricingSelection} />{cloud && <p>Keep the app open while collecting. Ownership uses your saved wallet scan.</p>}{jobCards}<button className="text-button" onClick={() => setPage('activity')}>Open collection activity <Icon name="arrow" size={14} /></button></div>}
+        <summary>Refresh data</summary>
+        {refreshOpen && <div className="grid-collection-content">{headingActions}<CollectionLimits data={data} selection={pricingSelection} />{cloud && <p>Keep Telegram open while updating.</p>}<button className="text-button" onClick={() => setPage('activity')}>Open collection activity <Icon name="arrow" size={14} /></button></div>}
       </details> : <CollectionLimits data={data} selection={pricingSelection} />)}
-      {simplePricing && !refreshOpen && activeJobs.length > 0 && <div className="grid-collection-running" aria-live="polite">{activeJobs.map(job => {
-        const isStopping = stoppingJobs.has(job.id) || job.stop_requested;
-        return <div key={job.id}><span><Icon name="refresh" size={15} className={isStopping ? '' : 'spinning'} />{isStopping ? 'Stopping collection…' : 'Collecting prices'}</span><button className="button small secondary" disabled={!data || Boolean(isStopping)} onClick={() => onStop(job)} aria-label={`Stop ${JOB_LABEL[job.kind] || humanize(job.kind)}`}>{isStopping ? 'Stopping…' : 'Stop'}</button></div>;
-      })}</div>}
       {error && <div className="notice error" role="alert"><Icon name="alert" size={19} /><div><strong>{cloud ? 'Telegram data could not be loaded' : data ? 'Showing saved data · local service unavailable' : 'The local service is unavailable'}</strong><p>{error}{loadedAt ? ` Last loaded ${dateTime(loadedAt)}.` : cloud ? ' Reopen the Mini App from your private bot and try again.' : ' Start the dashboard service and try again.'}</p></div><button className="text-button" onClick={() => { void reload(); }}>Retry<Icon name="refresh" size={15} /></button></div>}
       {jobError && <div className="notice error" role="alert"><Icon name="alert" size={19} /><div><strong>Sync action failed</strong><p>{jobError}</p></div><button className="icon-button" aria-label="Dismiss sync error" onClick={() => setJobError(null)}><Icon name="close" size={17} /></button></div>}
       {data && !data.capabilities.network_enabled && (!simplePricing || refreshOpen) && <div className="notice info"><Icon name="shield" size={18} /><div><strong>Browsing saved observations</strong><p>{data.capabilities.owned_price_refresh ? 'Marketapp collection is disabled. Your known gifts’ contract prices can still refresh through TON.' : 'Network collection is disabled for this dashboard. You can still inspect and export your local data.'}</p></div>{!data.capabilities.owned_price_refresh && <span className="quiet-pill">OFFLINE MODE</span>}</div>}
@@ -379,7 +381,7 @@ export default function App({ adapter, walletControl }: {
       {data && data.capabilities.network_enabled && data.capabilities.wallet_configured && !data.capabilities.marketapp_configured && <div className="notice info"><Icon name="layers" size={18} /><div><strong>{cloud ? 'A Marketapp API token is required on Telegram' : 'A local Marketapp API token is required to sync'}</strong><p>{cloud ? 'Configure the private backend token before collecting. Saved data remains available.' : 'Configure the token locally so refresh and discovery can check the eligible collection catalog. Sync and resume stay disabled until it is configured; saved data remains available.'}</p></div></div>}
       {cloud && data && !simplePricing && <details className="cloud-note"><summary>Keep the app open while collecting <span>· private portfolio</span></summary><p>{data.capabilities.ownership_note || 'Portfolio membership and ownership evidence were imported from your saved wallet scan. Telegram refreshes market prices; it does not yet discover new gifts or recheck rental contract ownership.'} Closing or hiding the Mini App interrupts collection; Continue resumes saved progress. Opening the app and changing filters use saved data only.</p></details>}
       {reviewWarnings.length > 0 && <div className="notice error"><Icon name="alert" size={18} /><div><strong>Some review evidence could not be loaded</strong>{reviewWarnings.map((warning, index) => <p key={index}>{warning}</p>)}</div></div>}
-      {!simplePricing && page !== 'activity' && jobCards}
+      {page !== 'activity' && jobCards}
       {loading && !data ? <div className="loading-state" role="status"><div className="loading-cards">{[0, 1, 2, 3].map(key => <div className="skeleton" key={key} />)}</div><div className="skeleton loading-panel" /><p>Reading your saved collection…</p></div> : data ? <>
         {!simplePricing && <div className="observation-caption"><span className="tiny-dot" />{cloud ? 'Telegram saved-data view' : 'Local database view'}<span className="caption-divider">·</span><span title={dateTime(latestEvidence)}>Latest evidence {relativeTime(latestEvidence)}</span><span className="caption-divider">·</span><span>Generated {dateTime(data.generated_at, true)}</span></div>}
         {page === 'pricing' && <PricingPage data={data} selection={pricingSelection} onSelectionChange={changePricing} filters={pricingFilters} onFiltersChange={setPricingFilters} onSelect={setSelected} renderImage={gift => <GiftImage gift={gift} />} collectPrices={() => { void launch(priceJob); }} disabled={!canSync || busy} viewMode={pricingView} />}
