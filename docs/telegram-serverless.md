@@ -4,7 +4,7 @@ The private Mini App reuses the main pricing screen and runs its price calculati
 
 Every endpoint checks Telegram's platform-verified `ctx.initData.user.id` against the configured human owner ID before accessing data or providers. The browser cannot grant itself access by supplying an ID. The public static URL does not grant access to portfolio data.
 
-Replace `YOUR_BOT`, `YOUR_TELEGRAM_USER_ID`, and `YOUR_APP_ID` below with your bot handle, your human Telegram user ID, and the numeric Serverless app ID reported by the official CLI. These are separate identifiers. Administrative tools require an explicit `--app-id` and reject a saved login for a different app; import also checks the reviewed manifest's destination. A checkout has no preconfigured deployment target.
+Replace `YOUR_BOT`, `YOUR_TELEGRAM_USER_ID`, and `YOUR_APP_ID` below with your bot handle, your human Telegram user ID, and the numeric Serverless app ID reported by the official CLI. These are separate identifiers. Publishing, status, migration, import, export, and verification require an explicit app ID (`-AppId` in PowerShell or `--app-id` in Node commands). Credentials for another app are rejected; import also checks the reviewed manifest's destination. A checkout has no preconfigured deployment target.
 
 ## Included
 
@@ -141,11 +141,16 @@ Environment values take precedence over `.env`; `--owner-id` takes precedence ov
 In BotFather, open **@YOUR_BOT → Serverless**, enable it, and obtain the **CLI Access → Access token**. Log in through `scripts/login-serverless.ps1` and enter that token at its prompt; the Serverless CLI token is different from the bot API token. On a clean checkout, install the locked CLI dependencies first with `pnpm --dir serverless install --frozen-lockfile`. All supplied publishing/import helpers disable `TGCLOUD_DEBUG`, which otherwise can log private source payloads. Do not print private config or `.tgcloud` snapshots.
 
 ```powershell
-& .\scripts\publish-serverless.ps1 -Action status
-& .\scripts\publish-serverless.ps1 -Action publish
-& .\scripts\publish-serverless.ps1 -Action migrate-check
-& .\scripts\publish-serverless.ps1 -Action migrate-safe
+& .\scripts\login-serverless.ps1
+& .\scripts\publish-serverless.ps1 -AppId YOUR_APP_ID -Action status
+& .\scripts\publish-serverless.ps1 -AppId YOUR_APP_ID -Action publish
+& .\scripts\publish-serverless.ps1 -AppId YOUR_APP_ID -Action migrate-check
+& .\scripts\publish-serverless.ps1 -AppId YOUR_APP_ID -Action migrate-safe
 ```
+
+These wrappers and the `serverless/package.json` commands use the same destination guard. It rejects custom `TG_CLOUD_API_URL` values and `TGCLOUD_BETA` before importing the CLI, then checks the resolved token against the explicit app ID. An inherited `TGCLOUD_TOKEN` takes precedence over saved credentials and must match; it never silently falls back to a different saved login. The validated token is pinned for the command, including status and migration. No token is printed or passed in command-line arguments.
+
+Interactive login asks for its own token and refuses a nonempty `TGCLOUD_TOKEN`; unset that variable first so snapshot synchronization uses the token you enter. Remove custom API/beta overrides before using these production helpers. For direct Node/pnpm use, for example, `pnpm --dir serverless status --app-id YOUR_APP_ID` and `pnpm --dir serverless push --app-id YOUR_APP_ID` use the same checks. Login itself requires no app ID; later operations check the ID you supply. Use these guarded entrypoints instead of invoking the underlying deployment CLI directly.
 
 Publishing targets schema, library, endpoints and static assets, preserving unrelated bot modules. Review conflicts; do not force an unknown remote revision. Migration is additive. Configure your bot's **Open app** menu or Main Mini App to use the exact URL reported by the CLI, in the form `https://appYOUR_APP_ID.tgcloud.ai/`.
 

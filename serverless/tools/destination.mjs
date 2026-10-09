@@ -14,10 +14,14 @@ export function requireId(value, flag) {
   return value;
 }
 
-export function validateAuthenticatedDestination(token, appId, env = process.env) {
-  requireId(appId, '--app-id');
-  const match = typeof token === 'string' ? /^app([1-9][0-9]*):[A-Za-z0-9_-]+$/.exec(token) : null;
-  if (!match || match[0] !== token || match[1] !== appId) throw new Error('The saved login does not match the explicit Telegram app ID');
+export function validateServerlessEnvironment(env = process.env) {
   if (env.TG_CLOUD_API_URL && env.TG_CLOUD_API_URL !== OFFICIAL_API) throw new Error('Administrative tools require the official Telegram cloud API');
   if (env.TGCLOUD_BETA && env.TGCLOUD_BETA !== '0') throw new Error('Administrative tools require the production Telegram app');
+}
+
+export function validateAuthenticatedDestination(token, appId, env = process.env) {
+  validateServerlessEnvironment(env);
+  requireId(appId, '--app-id');
+  const match = typeof token === 'string' ? /^app([1-9][0-9]*):[A-Za-z0-9_-]+$/.exec(token) : null;
+  if (!match || match[0] !== token || match[1] !== appId) throw new Error('The CLI credentials do not match the explicit Telegram app ID');
 }

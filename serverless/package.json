@@ -5,11 +5,11 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "status": "tgcloud status",
-    "login": "tgcloud login",
-    "push": "tgcloud push",
-    "migrate:check": "tgcloud migrate --dry-run",
-    "migrate:safe": "tgcloud migrate --safe"
+    "status": "node tools/manage.mjs --action status",
+    "login": "node tools/manage.mjs --action login",
+    "push": "node tools/manage.mjs --action publish",
+    "migrate:check": "node tools/manage.mjs --action migrate-check",
+    "migrate:safe": "node tools/manage.mjs --action migrate-safe"
   },
   "devDependencies": {
     "@tgcloud/cli": "0.2.0"

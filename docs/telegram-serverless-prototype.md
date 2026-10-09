@@ -57,13 +57,13 @@ Follow the [current deployment instructions](telegram-serverless.md#credentials-
 3. Inspect the file-name status (it does not print secret source), and review any existing bot modules before publishing:
 
    ```powershell
-   & .\scripts\publish-serverless.ps1 -Action status
+   & .\scripts\publish-serverless.ps1 -AppId YOUR_APP_ID -Action status
    ```
 
 4. Build, review, publish, and migrate using the current guide. Publishing uploads the selected schema, backend modules and static assets; it does not upload the local SQLite database. Targeted push preserves unrelated update handlers. Review conflicts with existing modules; never use `--force` to overwrite unknown remote work.
 5. Set the Mini App URL in BotFather to the exact URL reported by the CLI, in the form `https://appYOUR_APP_ID.tgcloud.ai/`. Replace `YOUR_APP_ID` with the numeric app ID. Open it inside Telegram using your allowed account. Opening the static URL alone does not grant access to data.
 
-Current export, import, verification, runtime-probe, and live-smoke tools require an explicit `--app-id YOUR_APP_ID`. Owner-context operations also require `--owner-id YOUR_TELEGRAM_USER_ID`. The normal deployment verifier and its `--full-response` mode require `--expect-portfolio` and `--expect-unresolved` counts from your reviewed dataset. See the current guide for complete commands; no personal destination is built in.
+Current export, import, verification, runtime-probe, and live-smoke tools require an explicit `--app-id YOUR_APP_ID`. The PowerShell publication/status/migration wrapper requires `-AppId YOUR_APP_ID`; its npm equivalents require `--app-id`. These commands reject mismatched credentials and custom API/beta destinations. Interactive login rejects inherited `TGCLOUD_TOKEN` values so the entered token controls its snapshot. Owner-context operations also require `--owner-id YOUR_TELEGRAM_USER_ID`. The normal deployment verifier and its `--full-response` mode require `--expect-portfolio` and `--expect-unresolved` counts from your reviewed dataset. See the current guide for complete commands; no personal destination is built in.
 
 ## Historical prototype smoke-test behavior
 
