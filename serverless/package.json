@@ -1,0 +1,17 @@
+{
+  "name": "gift-rent-serverless-prototype",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "status": "tgcloud status",
+    "login": "tgcloud login",
+    "push": "tgcloud push",
+    "migrate:check": "tgcloud migrate --dry-run",
+    "migrate:safe": "tgcloud migrate --safe"
+  },
+  "devDependencies": {
+    "@tgcloud/cli": "0.2.0"
+  }
+}

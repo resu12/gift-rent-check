@@ -1,0 +1,50 @@
+{
+  "wallet_address": "UQC3PX8rXmcy22kJazMuSSXTzeIISgB4fXBo-_6GH60EObwF",
+  "coverage": "Two user-supplied examples only",
+  "samples": [
+    {
+      "label": "Electric Skull #6175",
+      "user_supplied_state": "for-rent",
+      "nft_address": "EQDYePEMSIgRLf476_Ih2nXgiThidMVPPnZ_9Tea8wO5tQUT",
+      "collection_address": "EQAOYYJib8K6-91TjeOYRbWEtbtRJHXKoWltnULwdaqd7mR5",
+      "holding_contract": "EQD5NHP-QahzGBhkLsqLgzUVHds1NhfUgr50zxeTebkIpZqU",
+      "recorded_owner_raw": "0:b73d7f2b5e6732db69096b332e4925d3cde2084a00787d7068fbfe861fad0439",
+      "wallet_match": true,
+      "nft_match": true,
+      "marketplace_raw": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+      "role_raw": 0,
+      "status_raw": 0,
+      "rental_duration_raw": 0,
+      "rental_until_raw": 0,
+      "rental_until_utc_interpreted": null,
+      "renter_raw": null,
+      "counterpart_contract_raw": null,
+      "identity_observed_at": "2026-10-08T14:38:45.271485+00:00",
+      "state_observed_at": "2026-10-08T14:38:46.460072+00:00",
+      "nft_observed_at": "2026-10-08T14:34:11.932483+00:00",
+      "interpretation": "Identity and state getter layout checked against observed disassembly; actual contract code hash is not present in the current official ABI registry. No full contract audit or complete portfolio scan."
+    },
+    {
+      "label": "Timeless Book #53508",
+      "user_supplied_state": "rented",
+      "nft_address": "EQBsPJMrW7YK7_ZVQgyMAgmZeETAfAmMyz_LOe2rODFGcQUy",
+      "collection_address": "EQC212djrq0gglQXi8MSFX1bcw4LHw3Es62lKvt1lZzzsYuF",
+      "holding_contract": "EQBfCuC_KWEbF8iiMdrcLz5jdO6zNuW2ZgUCS8WDrB168yaN",
+      "recorded_owner_raw": "0:b73d7f2b5e6732db69096b332e4925d3cde2084a00787d7068fbfe861fad0439",
+      "wallet_match": true,
+      "nft_match": true,
+      "marketplace_raw": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+      "role_raw": 1,
+      "status_raw": 1,
+      "rental_duration_raw": 86400,
+      "rental_until_raw": 1791553429,
+      "rental_until_utc_interpreted": "2026-10-09T13:43:49+00:00",
+      "renter_raw": "0:7dadb32dadc47eeb136d2c10c2a2b2b91302a8079caac544d17de37f266f3df1",
+      "counterpart_contract_raw": "0:29332f962af7e98b8d29212c2e2ceb355b51104ab559ded8321857ed957c009f",
+      "identity_observed_at": "2026-10-08T14:38:47.604698+00:00",
+      "state_observed_at": "2026-10-08T14:38:48.772770+00:00",
+      "nft_observed_at": "2026-10-08T14:34:11.932483+00:00",
+      "interpretation": "Identity and state getter layout checked against observed disassembly; actual contract code hash is not present in the current official ABI registry. No full contract audit or complete portfolio scan."
+    }
+  ]
+}

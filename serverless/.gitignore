@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.tgcloud/
+tgcloud/lib/private-config.js
+.private-config-*
+*.sqlite*
+*.db*
+*.log

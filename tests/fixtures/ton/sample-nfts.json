@@ -1,0 +1,217 @@
+{
+  "observed_at": "2026-10-08T14:34:11.932483+00:00",
+  "url": "https://toncenter.com/api/v3/nft/items?address=EQDYePEMSIgRLf476_Ih2nXgiThidMVPPnZ_9Tea8wO5tQUT&address=EQBsPJMrW7YK7_ZVQgyMAgmZeETAfAmMyz_LOe2rODFGcQUy",
+  "status": 200,
+  "body": {
+    "nft_items": [
+      {
+        "address": "0:6C3C932B5BB60AEFF655420C8C0209997844C07C098CCB3FCB39EDAB38314671",
+        "init": true,
+        "index": "30321093467734807522206761898400900586542654078370819108354162747806692741921",
+        "collection_address": "0:B6D76763AEAD208254178BC312157D5B730E0B1F0DC4B3ADA52AFB75959CF3B1",
+        "owner_address": "0:5F0AE0BF29611B17C8A231DADC2F3E6374EEB336E5B66605024BC583AC1D7AF3",
+        "content": {
+          "uri": "https://nft.fragment.com/gift/timelessbook-53508.json"
+        },
+        "last_transaction_lt": "108624287000049",
+        "code_hash": "i3EeaAlnLAM13GHR2h3MQFnJcySK9we9WGJFCF6nCzI=",
+        "data_hash": "Mlw7C7h9XTccx2NnKmrhhaE36vRzpy9EtcLObj7qdBQ=",
+        "collection": {
+          "address": "0:B6D76763AEAD208254178BC312157D5B730E0B1F0DC4B3ADA52AFB75959CF3B1",
+          "owner_address": null,
+          "last_transaction_lt": "108624968000021",
+          "next_item_index": "-1",
+          "collection_content": {
+            "uri": "https://nft.fragment.com/collection/timelessbook.json"
+          },
+          "data_hash": "uS55KtMVrLy9QpDi/cRVMc72nSa7umBpMQNq7rVWZW0=",
+          "code_hash": "iEEMIg+CIYFmgmnOg+ucwNOznCGZnItV3gM2CiDnwoI="
+        },
+        "on_sale": false,
+        "real_owner": "0:5F0AE0BF29611B17C8A231DADC2F3E6374EEB336E5B66605024BC583AC1D7AF3"
+      },
+      {
+        "address": "0:D878F10C4888112DFE3BEBF221DA75E089386274C54F3E767FF5379AF303B9B5",
+        "init": true,
+        "index": "46414298126106219629032867688804702037199646614418674199398515848863984322042",
+        "collection_address": "0:0E6182626FC2BAFBDD538DE39845B584B5BB512475CAA1696D9D42F075AA9DEE",
+        "owner_address": "0:F93473FE41A8731818642ECA8B8335151DDB353617D482BE74CF179379B908A5",
+        "content": {
+          "uri": "https://nft.fragment.com/gift/electricskull-6175.json"
+        },
+        "last_transaction_lt": "105296563000004",
+        "code_hash": "i3EeaAlnLAM13GHR2h3MQFnJcySK9we9WGJFCF6nCzI=",
+        "data_hash": "ams3FfP/2bu2W4cg5SsT7fC5xSjs6xuubWkSBWpP0dE=",
+        "collection": {
+          "address": "0:0E6182626FC2BAFBDD538DE39845B584B5BB512475CAA1696D9D42F075AA9DEE",
+          "owner_address": null,
+          "last_transaction_lt": "108440781000003",
+          "next_item_index": "-1",
+          "collection_content": {
+            "uri": "https://nft.fragment.com/collection/electricskull.json"
+          },
+          "data_hash": "FXIsaAzwPok1JmKsiEROxWcTxFxJQv1A3vViy0go1Lg=",
+          "code_hash": "iEEMIg+CIYFmgmnOg+ucwNOznCGZnItV3gM2CiDnwoI="
+        },
+        "on_sale": false,
+        "real_owner": "0:F93473FE41A8731818642ECA8B8335151DDB353617D482BE74CF179379B908A5"
+      }
+    ],
+    "address_book": {
+      "0:0E6182626FC2BAFBDD538DE39845B584B5BB512475CAA1696D9D42F075AA9DEE": {
+        "user_friendly": "EQAOYYJib8K6-91TjeOYRbWEtbtRJHXKoWltnULwdaqd7mR5",
+        "domain": "join-giftshop-on-t-g.ton",
+        "interfaces": [
+          "nft_collection"
+        ]
+      },
+      "0:5F0AE0BF29611B17C8A231DADC2F3E6374EEB336E5B66605024BC583AC1D7AF3": {
+        "user_friendly": "EQBfCuC_KWEbF8iiMdrcLz5jdO6zNuW2ZgUCS8WDrB168yaN",
+        "domain": null,
+        "interfaces": [
+          "wallet_highload_v2"
+        ]
+      },
+      "0:6C3C932B5BB60AEFF655420C8C0209997844C07C098CCB3FCB39EDAB38314671": {
+        "user_friendly": "EQBsPJMrW7YK7_ZVQgyMAgmZeETAfAmMyz_LOe2rODFGcQUy",
+        "domain": null,
+        "interfaces": []
+      },
+      "0:B6D76763AEAD208254178BC312157D5B730E0B1F0DC4B3ADA52AFB75959CF3B1": {
+        "user_friendly": "EQC212djrq0gglQXi8MSFX1bcw4LHw3Es62lKvt1lZzzsYuF",
+        "domain": null,
+        "interfaces": [
+          "nft_collection"
+        ]
+      },
+      "0:D878F10C4888112DFE3BEBF221DA75E089386274C54F3E767FF5379AF303B9B5": {
+        "user_friendly": "EQDYePEMSIgRLf476_Ih2nXgiThidMVPPnZ_9Tea8wO5tQUT",
+        "domain": null,
+        "interfaces": []
+      },
+      "0:F93473FE41A8731818642ECA8B8335151DDB353617D482BE74CF179379B908A5": {
+        "user_friendly": "EQD5NHP-QahzGBhkLsqLgzUVHds1NhfUgr50zxeTebkIpZqU",
+        "domain": null,
+        "interfaces": [
+          "wallet_highload_v2"
+        ]
+      }
+    },
+    "metadata": {
+      "0:0E6182626FC2BAFBDD538DE39845B584B5BB512475CAA1696D9D42F075AA9DEE": {
+        "is_indexed": true,
+        "token_info": [
+          {
+            "valid": true,
+            "type": "nft_collections",
+            "name": "Electric Skulls",
+            "description": "Electric Skulls is an exclusive NFT collection by Telegram. Owners can showcase these unique NFTs in the Gifts section of their Telegram account and \u00e2\u20ac\u02dcwear\u00e2\u20ac\u2122 them \u00e2\u20ac\u201d displaying them next to their names and applying the gift\u00e2\u20ac\u2122s unique style to personalize their profile page.",
+            "image": "https://nft.fragment.com/collection/electricskull.webp",
+            "is_nsfw": false,
+            "is_scam": false,
+            "extra": {
+              "_image_big": "https://proxy.toncenter.com/AxXTOcAr81nuIhj-vhNd1T9nRpNEUpq1zxoOSAeGMIE/pr:big/bG9jYWw6Ly8vMGIvYWUvMGJhZTVmNzcwYzk0ZjI3ZDg0YTU3MWE2YzQ2ZTAxMjZlY2ZiYmEzMzcwMGI1ZDRjZTMxZGE0ZjQyOWY5MzJjOQ",
+              "_image_medium": "https://proxy.toncenter.com/vKc17mPnmr-N29-7P6DTx3QagSKKmskRaphFEseHDHE/pr:medium/bG9jYWw6Ly8vMGIvYWUvMGJhZTVmNzcwYzk0ZjI3ZDg0YTU3MWE2YzQ2ZTAxMjZlY2ZiYmEzMzcwMGI1ZDRjZTMxZGE0ZjQyOWY5MzJjOQ",
+              "_image_small": "https://proxy.toncenter.com/Cnw4H5FoOReLwMeKur4mkF9U84Wf-_c8OtoV2QPZ0Eo/pr:small/bG9jYWw6Ly8vMGIvYWUvMGJhZTVmNzcwYzk0ZjI3ZDg0YTU3MWE2YzQ2ZTAxMjZlY2ZiYmEzMzcwMGI1ZDRjZTMxZGE0ZjQyOWY5MzJjOQ",
+              "external_link": "https://fragment.com/gifts/electricskull",
+              "uri": "https://nft.fragment.com/collection/electricskull.json"
+            }
+          }
+        ]
+      },
+      "0:6C3C932B5BB60AEFF655420C8C0209997844C07C098CCB3FCB39EDAB38314671": {
+        "is_indexed": true,
+        "token_info": [
+          {
+            "valid": true,
+            "type": "nft_items",
+            "name": "Timeless Book #53508",
+            "description": "An exclusive Timeless Book with the appearance Big Brother on a Black background with Anchor icons.",
+            "image": "https://nft.fragment.com/gift/timelessbook-53508.webp",
+            "nft_index": "30321093467734807522206761898400900586542654078370819108354162747806692741921",
+            "is_nsfw": false,
+            "is_scam": false,
+            "extra": {
+              "_image_big": "https://proxy.toncenter.com/14vmyN5jQBp453eHyiBCqsFfTkZ6KOsD0UfT9QX-e9s/pr:big/bG9jYWw6Ly8vYmYvNzIvYmY3MjFlNzdkYWE0OWU1ZDU0OWQ0ZmU0MDM5NjQyMWMyNzIyOWU3ZjMxNDA4MzY5MGFjMDRiNThjMTUxM2EwOA",
+              "_image_medium": "https://proxy.toncenter.com/VFdtBH5x33NWF0XeIsXusONwcCi8oao5UmmwS4zzUAs/pr:medium/bG9jYWw6Ly8vYmYvNzIvYmY3MjFlNzdkYWE0OWU1ZDU0OWQ0ZmU0MDM5NjQyMWMyNzIyOWU3ZjMxNDA4MzY5MGFjMDRiNThjMTUxM2EwOA",
+              "_image_small": "https://proxy.toncenter.com/WlMnDkFu8mHRVx1qBzWNY-YEqhrM3c-bkuDxoqX1tzA/pr:small/bG9jYWw6Ly8vYmYvNzIvYmY3MjFlNzdkYWE0OWU1ZDU0OWQ0ZmU0MDM5NjQyMWMyNzIyOWU3ZjMxNDA4MzY5MGFjMDRiNThjMTUxM2EwOA",
+              "attributes": [
+                {
+                  "trait_type": "Model",
+                  "value": "Big Brother"
+                },
+                {
+                  "trait_type": "Backdrop",
+                  "value": "Black"
+                },
+                {
+                  "trait_type": "Symbol",
+                  "value": "Anchor"
+                }
+              ],
+              "lottie": "https://nft.fragment.com/gift/timelessbook-53508.lottie.json",
+              "uri": "https://nft.fragment.com/gift/timelessbook-53508.json"
+            }
+          }
+        ]
+      },
+      "0:B6D76763AEAD208254178BC312157D5B730E0B1F0DC4B3ADA52AFB75959CF3B1": {
+        "is_indexed": true,
+        "token_info": [
+          {
+            "valid": true,
+            "type": "nft_collections",
+            "name": "Timeless Books",
+            "description": "Timeless Books is an exclusive NFT collection by Telegram. Owners can showcase these unique NFTs in the Gifts section of their Telegram account and \u00e2\u20ac\u02dcwear\u00e2\u20ac\u2122 them \u00e2\u20ac\u201d displaying them next to their names and applying the gift\u00e2\u20ac\u2122s unique style to personalize their profile page.",
+            "image": "https://nft.fragment.com/collection/timelessbook.webp",
+            "is_nsfw": false,
+            "is_scam": false,
+            "extra": {
+              "_image_big": "https://proxy.toncenter.com/1jD4gJVGXU-WekY_FJqFod_qcsrudA5EnjOiOCBzfjc/pr:big/bG9jYWw6Ly8vNzEvNWUvNzE1ZTJhNGI5YTE5Y2Y3YjdjNTkyYzMzY2EyZDc4MjM4Mzk2NjVkMmVlYjkyMzJmYzViNGVkYzI5NTU0ZjcyYQ",
+              "_image_medium": "https://proxy.toncenter.com/Nbydgkeazkbe-KQJlore1AkW67ZMRu-F7dHIl3J8SJM/pr:medium/bG9jYWw6Ly8vNzEvNWUvNzE1ZTJhNGI5YTE5Y2Y3YjdjNTkyYzMzY2EyZDc4MjM4Mzk2NjVkMmVlYjkyMzJmYzViNGVkYzI5NTU0ZjcyYQ",
+              "_image_small": "https://proxy.toncenter.com/pZmBOOfYlSWGazoJOlXgZilDcGag0U3sv3_ledhhJ_I/pr:small/bG9jYWw6Ly8vNzEvNWUvNzE1ZTJhNGI5YTE5Y2Y3YjdjNTkyYzMzY2EyZDc4MjM4Mzk2NjVkMmVlYjkyMzJmYzViNGVkYzI5NTU0ZjcyYQ",
+              "external_link": "https://fragment.com/gifts/timelessbook",
+              "uri": "https://nft.fragment.com/collection/timelessbook.json"
+            }
+          }
+        ]
+      },
+      "0:D878F10C4888112DFE3BEBF221DA75E089386274C54F3E767FF5379AF303B9B5": {
+        "is_indexed": true,
+        "token_info": [
+          {
+            "valid": true,
+            "type": "nft_items",
+            "name": "Electric Skull #6175",
+            "description": "An exclusive Electric Skull with the appearance Nightmare on a Electric Purple background with Inca Sun icons.",
+            "image": "https://nft.fragment.com/gift/electricskull-6175.webp",
+            "nft_index": "46414298126106219629032867688804702037199646614418674199398515848863984322042",
+            "is_nsfw": false,
+            "is_scam": false,
+            "extra": {
+              "_image_big": "https://proxy.toncenter.com/KDcRAuk6anJce8-JqtbbKVp4M4dQvL1n0rcTkOcirqw/pr:big/bG9jYWw6Ly8vMDkvOTMvMDk5MzI4Y2YzZDI4MDA4YzE4NWExZmRjZWUyODIxYzFmOGFmN2RjOWVkNDhmOWU0MTEzYjZkZjZmNGU5OGRjNQ",
+              "_image_medium": "https://proxy.toncenter.com/cTxbATWGnLo7ScdToVidjM5WUx5LTc1z0-o1BwDfbkY/pr:medium/bG9jYWw6Ly8vMDkvOTMvMDk5MzI4Y2YzZDI4MDA4YzE4NWExZmRjZWUyODIxYzFmOGFmN2RjOWVkNDhmOWU0MTEzYjZkZjZmNGU5OGRjNQ",
+              "_image_small": "https://proxy.toncenter.com/vmKhdlyIOHdrIDcfrS_4YR4LF4qjJf2PbzZCQEcnq7E/pr:small/bG9jYWw6Ly8vMDkvOTMvMDk5MzI4Y2YzZDI4MDA4YzE4NWExZmRjZWUyODIxYzFmOGFmN2RjOWVkNDhmOWU0MTEzYjZkZjZmNGU5OGRjNQ",
+              "attributes": [
+                {
+                  "trait_type": "Model",
+                  "value": "Nightmare"
+                },
+                {
+                  "trait_type": "Backdrop",
+                  "value": "Electric Purple"
+                },
+                {
+                  "trait_type": "Symbol",
+                  "value": "Inca Sun"
+                }
+              ],
+              "lottie": "https://nft.fragment.com/gift/electricskull-6175.lottie.json",
+              "uri": "https://nft.fragment.com/gift/electricskull-6175.json"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

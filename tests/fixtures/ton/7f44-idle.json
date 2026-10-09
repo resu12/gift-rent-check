@@ -1,0 +1,48 @@
+{
+  "description": "Selected public on-chain fields from TON Center v3 captured responses; not a full raw response.",
+  "label": "Swiss Watch #9790",
+  "wallet_address": "0:b73d7f2b5e6732db69096b332e4925d3cde2084a00787d7068fbfe861fad0439",
+  "code_fixture": "observed-7f44-code.boc.base64",
+  "account_observed_at": "2026-10-08T15:38:26.675689+00:00",
+  "account": {
+    "address": "0:FF34474D76FDDD919086E8A3FFFDA660E38C27E050862160185ADB3B46DA1525",
+    "status": "active",
+    "code_hash": "f0S+rfSRFyQmjXAIxJC+Yn8gMEf+pNMna1G9/VW/I/w=",
+    "data_hash": "UgHIlS8PGWiwKm6XsUWRC4R7bBCGMNdwAs5z2dg9wo8=",
+    "data_boc": "te6ccgECBQEAARYABEDQZmMc9SJQzECb6pXseEQV0QIXwY9ZdU5HEPDYa59auwECAwQA2YAW56/la8zmW20hLWZlySS6ebxBCUAPD64NH3/Qw/WghzAACblJO5qf/lMWsrmtxjbrC7YieSflHGhbXDJtH/720YIATU5cBW/eizF6iEOza5mq1hYBmCftDpLSPLOHGnfmuVmAAAAANTgJ8ZAAGwAAAAAAAAAAAAAAAAAQADOAAKjAABZpgCAhYOwAAAAAAAAAH0AAAA+gQAClgA6BUrdDmplNo0GcXeAWRUq+K1bMLtbcneAdXP+TOirPAAAAAGAAAAyQANxhwSJjYxOKfYJQmhkYm9DoH8BSislqRuHMsr2wBZbAAAAACAAAAZI=",
+    "last_transaction_lt": "98233378000011"
+  },
+  "nft_before_observed_at": "2026-10-08T15:38:25.444327+00:00",
+  "nft_before": {
+    "address": "0:026E524EE6A7FF94C5ACAE6B718DBAC2ED889E49F9471A16D70C9B47FFBDB460",
+    "owner_address": "0:FF34474D76FDDD919086E8A3FFFDA660E38C27E050862160185ADB3B46DA1525",
+    "collection_address": "0:48D3B3D77B0F78610CFB1B037BDA73CD185EA1B524CE264B94E0AC7F6E34D9BF",
+    "init": true,
+    "last_transaction_lt": "98233378000012"
+  },
+  "nft_after_observed_at": "2026-10-08T15:38:27.711450+00:00",
+  "nft_after": {
+    "address": "0:026E524EE6A7FF94C5ACAE6B718DBAC2ED889E49F9471A16D70C9B47FFBDB460",
+    "owner_address": "0:FF34474D76FDDD919086E8A3FFFDA660E38C27E050862160185ADB3B46DA1525",
+    "collection_address": "0:48D3B3D77B0F78610CFB1B037BDA73CD185EA1B524CE264B94E0AC7F6E34D9BF",
+    "init": true,
+    "last_transaction_lt": "98233378000012"
+  },
+  "sources": [
+    "https://toncenter.com/api/v3/nft/items",
+    "https://toncenter.com/api/v3/accountStates"
+  ],
+  "expected": {
+    "recorded_owner": "0:b73d7f2b5e6732db69096b332e4925d3cde2084a00787d7068fbfe861fad0439",
+    "decoded_nft": "0:026e524ee6a7ff94c5acae6b718dbac2ed889e49f9471a16d70c9b47ffbdb460",
+    "marketplace": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+    "created_at": 1785730019,
+    "role": 0,
+    "status": 0,
+    "rental_duration": 0,
+    "rental_until": 0,
+    "renter": null,
+    "counterpart": null,
+    "rental_state": "idle_rental_contract"
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "observed_at": "2026-10-08T14:38:46.460072+00:00",
+  "url": "https://toncenter.com/api/v2/runGetMethod",
+  "status": 200,
+  "address": "EQD5NHP-QahzGBhkLsqLgzUVHds1NhfUgr50zxeTebkIpZqU",
+  "method": 86957,
+  "body": {
+    "ok": true,
+    "result": {
+      "@type": "smc.runResult",
+      "gas_used": 1662,
+      "stack": [
+        [
+          "num",
+          "0x0"
+        ],
+        [
+          "num",
+          "0x0"
+        ],
+        [
+          "num",
+          "0x0"
+        ],
+        [
+          "num",
+          "0x0"
+        ],
+        [
+          "cell",
+          {
+            "bytes": "te6cckEBAQEAAwAAASCUQYZV",
+            "object": {
+              "data": {
+                "b64": "IA==",
+                "len": 2
+              },
+              "refs": [],
+              "special": false
+            }
+          }
+        ],
+        [
+          "cell",
+          {
+            "bytes": "te6cckEBAQEAAwAAASCUQYZV",
+            "object": {
+              "data": {
+                "b64": "IA==",
+                "len": 2
+              },
+              "refs": [],
+              "special": false
+            }
+          }
+        ]
+      ],
+      "exit_code": 0,
+      "block_id": {
+        "@type": "ton.blockIdExt",
+        "workchain": -1,
+        "shard": "-9223372036854775808",
+        "seqno": 97736564,
+        "root_hash": "OiyvMq1ZPczU1nUL5vEUbaU3hoOD0jVmEEJfsAF1eTY=",
+        "file_hash": "riDxpX38LHdQo9fAXhWU3uU/CtmYl+z5xx65eN8c2+8="
+      },
+      "last_transaction_id": {
+        "@type": "internal.transactionId",
+        "lt": "105296563000003",
+        "hash": "MZD68kSYXnBntPkW2jF/3B91v2lqXjFqLOzz5nC8/HA="
+      }
+    },
+    "@extra": "1791470326:2:30.955"
+  }
+}

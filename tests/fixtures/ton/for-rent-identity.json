@@ -1,0 +1,81 @@
+{
+  "observed_at": "2026-10-08T14:38:45.271485+00:00",
+  "url": "https://toncenter.com/api/v2/runGetMethod",
+  "status": 200,
+  "address": "EQD5NHP-QahzGBhkLsqLgzUVHds1NhfUgr50zxeTebkIpZqU",
+  "method": 124409,
+  "body": {
+    "ok": true,
+    "result": {
+      "@type": "smc.runResult",
+      "gas_used": 1610,
+      "stack": [
+        [
+          "cell",
+          {
+            "bytes": "te6cckEBAQEAJAAAQ4AW56/la8zmW20hLWZlySS6ebxBCUAPD64NH3/Qw/WghzBmmOXg",
+            "object": {
+              "data": {
+                "b64": "gBbnr+VrzOZbbSEtZmXJJLp5vEEJQA8Prg0ff9DD9aCHMA==",
+                "len": 267
+              },
+              "refs": [],
+              "special": false
+            }
+          }
+        ],
+        [
+          "cell",
+          {
+            "bytes": "te6cckEBAQEAJAAAQ4AbDx4hiRECJb/HfX5EO068EScMTpip587P/qbzXmB3NrC52xUX",
+            "object": {
+              "data": {
+                "b64": "gBsPHiGJEQIlv8d9fkQ7TrwRJwxOmKnnzs/+pvNeYHc2sA==",
+                "len": 267
+              },
+              "refs": [],
+              "special": false
+            }
+          }
+        ],
+        [
+          "cell",
+          {
+            "bytes": "te6cckEBAQEAJAAAQ4ATU5cBW/eizF6iEOza5mq1hYBmCftDpLSPLOHGnfmuVnBsuIXu",
+            "object": {
+              "data": {
+                "b64": "gBNTlwFb96LMXqIQ7NrmarWFgGYJ+0OktI8s4cad+a5WcA==",
+                "len": 267
+              },
+              "refs": [],
+              "special": false
+            }
+          }
+        ],
+        [
+          "num",
+          "0x6aa7f49f"
+        ],
+        [
+          "num",
+          "0x0"
+        ]
+      ],
+      "exit_code": 0,
+      "block_id": {
+        "@type": "ton.blockIdExt",
+        "workchain": -1,
+        "shard": "-9223372036854775808",
+        "seqno": 97736561,
+        "root_hash": "235dlFjVUHuKp4ju4bN49TJbFhoj+Vp081eR1f4r/Ss=",
+        "file_hash": "rTdn86Gpq2+08Jrdsc87xRVnKu0S4qo+RDyJuEZRvHc="
+      },
+      "last_transaction_id": {
+        "@type": "internal.transactionId",
+        "lt": "105296563000003",
+        "hash": "MZD68kSYXnBntPkW2jF/3B91v2lqXjFqLOzz5nC8/HA="
+      }
+    },
+    "@extra": "1791470325:10:33.175"
+  }
+}

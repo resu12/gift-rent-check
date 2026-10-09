@@ -1,0 +1,97 @@
+{
+  "evidence_version": "marketapp-rent-history-ui-v1",
+  "observed_at": "2026-10-08T18:21:25Z",
+  "api_source": "https://api.marketapp.org/v1/rent/gifts/history/",
+  "api_schema": "docs/openapi.json",
+  "api_event_source": "Saved authenticated GET responses from 2026-10-08; no credentials included.",
+  "ui_source": "Public Marketapp pages inspected through browser DOM on 2026-10-08.",
+  "history_table": {
+    "url": "https://marketapp.org/rent/?tab=history&subtab=gifts",
+    "columns": [
+      "Status",
+      "NFT",
+      "Full Price",
+      "Rent Period",
+      "Landlord",
+      "Tenant"
+    ]
+  },
+  "interpretation": {
+    "timestamp": "Unix seconds, observed UI match",
+    "duration": "Seconds, observed UI match",
+    "price": "Whole rental event price; UI labels Full Price",
+    "daily_formula": "price * 86400 / duration",
+    "currency": "GRAM; both samples have price == price_nano / 1000000000",
+    "gross_vs_net": "unknown",
+    "extensions": "not verified; both examples have is_extend=false",
+    "event_identity": "No unique event identifier documented; tx_hash alone is not an event ID."
+  },
+  "samples": [
+    {
+      "api_event": {
+        "address": "EQBtr8w0Spmjbe3wIdZfzM1_km1qtyvGEWhdiq5HWoLq3ml-",
+        "collection_address": "EQAOYYJib8K6-91TjeOYRbWEtbtRJHXKoWltnULwdaqd7mR5",
+        "currency": "GRAM",
+        "dst": "EQBPIsNaARcITs6q16HO6rYLr9lUSMyMzruEX1N6M3fSeq36",
+        "duration": 259200,
+        "is_extend": false,
+        "name": "Electric Skull #7334",
+        "price": "0.5997",
+        "price_nano": "599700000",
+        "src": "EQD20cp1Kq1G9fEMgqfjUmEkTXM-ufVdykctrGOU1WGq0L-4",
+        "ts": 1791440387,
+        "tx_hash": "9e3a24cae64bfd8fc82cdff9bf45438360c7fbfb8d50e4823a0b8a7201ff09c3"
+      },
+      "ui": {
+        "url": "https://marketapp.org/nft/EQBtr8w0Spmjbe3wIdZfzM1_km1qtyvGEWhdiq5HWoLq3ml-/?to=rent",
+        "history_tab": "Rents",
+        "columns": [
+          "Price",
+          "Duration",
+          "Date",
+          "Landlord",
+          "Tenant"
+        ],
+        "displayed_price": "0.5997",
+        "displayed_duration": "Days: 3",
+        "time_timestamp_attribute": "1791440387",
+        "transaction_url": "https://tonviewer.com/transaction/9e3a24cae64bfd8fc82cdff9bf45438360c7fbfb8d50e4823a0b8a7201ff09c3",
+        "current_displayed_price_per_day": "0.1999"
+      },
+      "derived_price_per_day": "0.1999"
+    },
+    {
+      "api_event": {
+        "address": "EQACxvSEQaTeNVG2x3rsHO5SeNWfF8goqSYKdc8hEJ6Qnu09",
+        "collection_address": "EQC212djrq0gglQXi8MSFX1bcw4LHw3Es62lKvt1lZzzsYuF",
+        "currency": "GRAM",
+        "dst": "EQCxJi1Oon7EZ1i97ZYFXIUrb0sw07Samf5UhgbpPPIRcqLq",
+        "duration": 604800,
+        "is_extend": false,
+        "name": "Timeless Book #36637",
+        "price": "0.0233373",
+        "price_nano": "23337300",
+        "src": "EQBa-QyNZWjSvr47lDHOn2ln5nujAvQ_4_4U_e2vgEak2b6Q",
+        "ts": 1791471297,
+        "tx_hash": "8c3ed888b398e769d1bf5b6cc52c39046c50575301de473df9dac743e2156ea8"
+      },
+      "ui": {
+        "url": "https://marketapp.org/nft/EQACxvSEQaTeNVG2x3rsHO5SeNWfF8goqSYKdc8hEJ6Qnu09/?to=rent",
+        "history_tab": "Rents",
+        "columns": [
+          "Price",
+          "Duration",
+          "Date",
+          "Landlord",
+          "Tenant"
+        ],
+        "displayed_price": "0.0233373",
+        "displayed_duration": "Days: 7",
+        "time_timestamp_attribute": "1791471297",
+        "transaction_url": "https://tonviewer.com/transaction/8c3ed888b398e769d1bf5b6cc52c39046c50575301de473df9dac743e2156ea8",
+        "current_displayed_price_per_day": "0.0033339"
+      },
+      "derived_price_per_day": "0.0033339"
+    }
+  ]
+}

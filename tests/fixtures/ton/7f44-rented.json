@@ -1,0 +1,48 @@
+{
+  "description": "Selected public on-chain fields from TON Center v3 captured responses; not a full raw response.",
+  "label": "Heart Locket #1767",
+  "wallet_address": "0:b73d7f2b5e6732db69096b332e4925d3cde2084a00787d7068fbfe861fad0439",
+  "code_fixture": "observed-7f44-code.boc.base64",
+  "account_observed_at": "2026-10-08T15:38:31.397317+00:00",
+  "account": {
+    "address": "0:44E32C56735E164F2FB000A3789DEE9E2049421AEE2CC21B317C8B912410CE07",
+    "status": "active",
+    "code_hash": "f0S+rfSRFyQmjXAIxJC+Yn8gMEf+pNMna1G9/VW/I/w=",
+    "data_hash": "GqGDH52SNJQbT/xVMjUv1xVG2wA4M2IHaUSiiS14aFs=",
+    "data_boc": "te6ccgECBQEAAVwABEAIA9+9dsdfFM0XHXiYBURf2nqIG+2Py2V3doXJzqhjqAECAwQA2YAW56/la8zmW20hLWZlySS6ebxBCUAPD64NH3/Qw/WghzAARoS0WRB6eL+AwszF+gNKWWVrjgAZCN/b4qG9cUa7Rw4ATU5cBW/eizF6iEOza5mq1hYBmCftDpLSPLOHGnfmuVmAAAAANWKVerAApyAA0vAAAAAADVl4TqgpuScBADHWUooTp5/XOPY/BMgGmug5NRDYD+NlMLXw3ljtc4bb4ACCQivEfp9NBcccLpcnaU/HcsRgBV0u0rwFCLuOMVuGrAAzgACowAAWaYAgpuScAAAAAAAAAB9AAAAPoEAApYAOgVK3Q5qZTaNBnF3gFkVKvitWzC7W3J3gHVz/kzoqzwAAAABgAAAMkADcYcEiY2MTin2CUJoZGJvQ6B/AUorJakbhzLK9sAWWwAAAAAgAAAGS",
+    "last_transaction_lt": "108223311000009"
+  },
+  "nft_before_observed_at": "2026-10-08T15:38:28.729616+00:00",
+  "nft_before": {
+    "address": "0:11A12D16441E9E2FE030B3317E80D296595AE380064237F6F8A86F5C51AED1C3",
+    "owner_address": "0:44E32C56735E164F2FB000A3789DEE9E2049421AEE2CC21B317C8B912410CE07",
+    "collection_address": "0:B85C4BA5C5BD392DEE6017A7AC32D0D64F95D9EAD97394C05018DB2A7DFC6974",
+    "init": true,
+    "last_transaction_lt": "108222762000010"
+  },
+  "nft_after_observed_at": "2026-10-08T15:38:32.413500+00:00",
+  "nft_after": {
+    "address": "0:11A12D16441E9E2FE030B3317E80D296595AE380064237F6F8A86F5C51AED1C3",
+    "owner_address": "0:44E32C56735E164F2FB000A3789DEE9E2049421AEE2CC21B317C8B912410CE07",
+    "collection_address": "0:B85C4BA5C5BD392DEE6017A7AC32D0D64F95D9EAD97394C05018DB2A7DFC6974",
+    "init": true,
+    "last_transaction_lt": "108222762000010"
+  },
+  "sources": [
+    "https://toncenter.com/api/v3/nft/items",
+    "https://toncenter.com/api/v3/accountStates"
+  ],
+  "expected": {
+    "recorded_owner": "0:b73d7f2b5e6732db69096b332e4925d3cde2084a00787d7068fbfe861fad0439",
+    "decoded_nft": "0:11a12d16441e9e2fe030b3317e80d296595ae380064237f6f8a86f5c51aed1c3",
+    "marketplace": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+    "created_at": 1791306485,
+    "role": 1,
+    "status": 1,
+    "rental_duration": 432000,
+    "rental_until": 1791738485,
+    "renter": "0:c7594a284e9e7f5ce3d8fc13201a6ba0e4d443603f8d94c2d7c37963b5ce1b6f",
+    "counterpart": "0:104845788fd3e9a0b8e385d2e4ed29f8ee588c00aba5da5780a11771c62b70d5",
+    "rental_state": "rented"
+  }
+}

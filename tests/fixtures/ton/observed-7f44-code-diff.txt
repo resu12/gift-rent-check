@@ -1,0 +1,251 @@
+--- known-f3b93
+
++++ new-7f44
+
+@@ -1085,18 +1085,18 @@
+
+             MULDIV
+         }
+         IFELSE
+         DUP
+         GTINT 0
+-        PUSHCONT {
++        PUSHCONT_SHORT {
++            BLKDROP 3
++        }
++        IFREFELSE {
+             OVER
+             SEMPTY
+             NOT
+-            PUSHCONT_SHORT {
+-                NIP
+-            }
+-            IFREFELSE {
++            PUSHCONT {
+                 SWAP
+                 LDDICT
+                 DROP
+                 DUP
+                 ISNULL
+@@ -1104,47 +1104,36 @@
+
+                 PUSHCONT {
+                     CTOS
+                     LDMSGADDR
+                     LDU 32
+                     LDU 32
+-                    ENDS
+-                    PUSH s3
+-                    ROTREV
++                    PUXC2 s4 s2 s-1
+                     DUP
+                     EQINT 0
+                     PUSHCONT_SHORT {
+                         BLKDROP 3
+                         PUSHINT_4 0
+                     }
+                     PUSHCONT_SHORT {
+                         MULDIV
+                     }
+                     IFELSE
+-                    PUSH2 s2 s0
++                    PUSH2 s3 s0
+                     GREATER
+                     OVER
+                     GTINT 0
+                     AND
+                     PUSHCONT {
+-                        XCPU s2 s2
++                        XCPU s3 s3
+                         SUB
+-                        PUSH2 s2 s0
+-                        GREATER
+-                        PUSHCONT_SHORT {
+-                            XCHG_0I s2
+-                        }
+-                        IF
+-                        XCPU s4 s2
++                        XCPU s5 s3
+                         SUB
+                         PUSHINT_4 1
+-                        PUSHINT_4 0
+                         NEWC
+-                        STU 32
+-                        PUSHSLICE_LONG x{4D61726B657461707020726566657272616C20666565}
++                        XCHG2 s0 s3
+                         STSLICER
+-                        XCHG3 s3 s3 s0
+-                        XCHG_1I s1 s4
++                        REVERSE 4 1
+                         PUSHINT_4 0
+                         PUSHINT_8 16
+                         NEWC
+                         STU 6
+                         XCHG2 s0 s4
+@@ -1167,57 +1156,59 @@
+
+                         SWAP
+                         SENDRAWMSG
+                         XCHG_0I s2
+                     }
+                     PUSHCONT_SHORT {
+-                        DROP2
++                        BLKDROP 3
+                     }
+                     IFELSE
+                 }
+                 PUSHCONT_SHORT {
+                     DROP
+                 }
+                 IFELSE
+             }
++            PUSHCONT_SHORT {
++                NIP
++            }
++            IFELSE
+             XCPU s2 s2
+             SUB
+             PUSHINT_4 1
+             PUSHINT_4 0
+             NEWC
+             STU 32
+             PUSHSLICE x{4D61726B657420666565}
+             STSLICER
+             XCHG3 s3 s3 s0
+             XCHG_1I s1 s4
+-            PUSHINT_4 0
+-            PUSHINT_8 16
+-            NEWC
+-            STU 6
+-            XCHG2 s0 s4
+-            STSLICER
+-            ROT
+-            STGRAMS
+-            XCHG_1I s1 s2
+-            STU 107
+-            OVER
+-            ISNULL
+-            PUSHCONT_SHORT {
+-                NIP
+-            }
+-            PUSHCONT_SHORT {
++            ref {
++                PUSHINT_4 0
++                PUSHINT_8 16
++                NEWC
++                STU 6
++                XCHG2 s0 s4
++                STSLICER
++                ROT
++                STGRAMS
++                XCHG_1I s1 s2
++                STU 107
++                OVER
++                ISNULL
++                PUSHCONT_SHORT {
++                    NIP
++                }
++                PUSHCONT_SHORT {
++                    SWAP
++                    STBR
++                }
++                IFELSE
++                ENDC
+                 SWAP
+-                STBR
+-            }
+-            IFELSE
+-            ENDC
+-            SWAP
+-            SENDRAWMSG
+-        }
+-        PUSHCONT_SHORT {
+-            BLKDROP 3
+-        }
+-        IFELSE
++                SENDRAWMSG
++            }
++        }
+         DUP
+         GTINT 0
+         THROWIFNOT 1010
+     }
+     49 => {
+@@ -2011,23 +2002,17 @@
+
+             DUP
+             HASHSU
+             XC2PU s0 s2 s7
+             CHKSIGNU
+             THROWIFNOT 403
+-            LDMSGADDR
+-            MYADDR
+-            XCHG_1I s1 s2
+-            SDEQ
+-            THROWIFNOT 1014
+             LDU 64
+-            SWAP
++            DROP
+             NOW
+             SUB
+             ABS
+-            LESSINT 61
++            LESSINT 121
+             THROWIFNOT 1007
+-            ENDS
+             ACCEPT
+             BLKSWAP 1 4
+             PUSHINT_4 0
+             CALLDICT 47
+         }
+@@ -2062,21 +2047,16 @@
+
+             DUP
+             HASHSU
+             XC2PU s0 s2 s7
+             CHKSIGNU
+             THROWIFNOT 403
+-            LDMSGADDR
+-            MYADDR
+-            XCHG_1I s1 s2
+-            SDEQ
+-            THROWIFNOT 1014
+             LDU 64
+             SWAP
+             NOW
+             SUB
+             ABS
+-            LESSINT 61
++            LESSINT 121
+             THROWIFNOT 1007
+             LDREF
+             DROP
+             CTOS
+             LDMSGADDR
+@@ -2183,23 +2163,17 @@
+
+             DUP
+             HASHSU
+             XC2PU s0 s2 s7
+             CHKSIGNU
+             THROWIFNOT 403
+-            LDMSGADDR
+-            MYADDR
+-            XCHG_1I s1 s2
+-            SDEQ
+-            THROWIFNOT 1014
+             LDU 64
+-            SWAP
++            DROP
+             NOW
+             SUB
+             ABS
+-            LESSINT 61
++            LESSINT 121
+             THROWIFNOT 1007
+-            ENDS
+             ACCEPT
+             BLKSWAP 1 4
+             CALLDICT 44
+         }
+         DROP

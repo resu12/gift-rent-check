@@ -1,0 +1,75 @@
+{
+  "observed_at": "2026-10-08T14:38:48.772770+00:00",
+  "url": "https://toncenter.com/api/v2/runGetMethod",
+  "status": 200,
+  "address": "EQBfCuC_KWEbF8iiMdrcLz5jdO6zNuW2ZgUCS8WDrB168yaN",
+  "method": 86957,
+  "body": {
+    "ok": true,
+    "result": {
+      "@type": "smc.runResult",
+      "gas_used": 1662,
+      "stack": [
+        [
+          "num",
+          "0x1"
+        ],
+        [
+          "num",
+          "0x15180"
+        ],
+        [
+          "num",
+          "0x6ac8ef95"
+        ],
+        [
+          "num",
+          "0x5f5e100"
+        ],
+        [
+          "cell",
+          {
+            "bytes": "te6cckEBAQEAJAAAQ4APtbZltbiP3WJtpYIYVFZXImBVAPOVWKiaL7xv5M3nvjDnpojl",
+            "object": {
+              "data": {
+                "b64": "gA+1tmW1uI/dYm2lghhUVlciYFUA85VYqJovvG/kzee+MA==",
+                "len": 267
+              },
+              "refs": [],
+              "special": false
+            }
+          }
+        ],
+        [
+          "cell",
+          {
+            "bytes": "te6cckEBAQEAJAAAQ4AFJmXyxV79MXGlJCWFxZ1mq2oiCVarO9sGQwr9sq+AE/Ajfd3d",
+            "object": {
+              "data": {
+                "b64": "gAUmZfLFXv0xcaUkJYXFnWaraiIJVqs72wZDCv2yr4AT8A==",
+                "len": 267
+              },
+              "refs": [],
+              "special": false
+            }
+          }
+        ]
+      ],
+      "exit_code": 0,
+      "block_id": {
+        "@type": "ton.blockIdExt",
+        "workchain": -1,
+        "shard": "-9223372036854775808",
+        "seqno": 97736570,
+        "root_hash": "/8isqKi3RkeUyVPpy8BPfYm5kpOT8L70XCrklGH2zq4=",
+        "file_hash": "ZedgTmt2crT+1uYAXbfWH5VXdXSMaNFp5HDMVR+B5zE="
+      },
+      "last_transaction_id": {
+        "@type": "internal.transactionId",
+        "lt": "108624287000048",
+        "hash": "+1YhmGgHDghAoEh+ZEz6wwVXcU/JKkGMvQeXMGuY8Uw="
+      }
+    },
+    "@extra": "1791470328:1:17.37"
+  }
+}

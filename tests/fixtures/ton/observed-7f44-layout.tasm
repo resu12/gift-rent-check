@@ -1,0 +1,72 @@
+// Exact extracted methods from @ton/tasm 0.6.2 offline disassembly.
+    22 => {
+        PUSHCTR c4
+        CTOS
+        LDREF
+        LDREF
+        LDREF
+        LDREF
+        LDU 256
+        DROP
+    }
+
+    67344 => {
+        CALLDICT 22
+        XCHG_1I s1 s4
+        BLKDROP 4
+        CTOS
+        LDMSGADDR
+        LDU 32
+        LDU 32
+        LDMSGADDR
+        LDU 32
+        LDU 32
+        DROP
+    }
+
+    78748 => {
+        CALLDICT 22
+        BLKDROP2 4 1
+    }
+
+    86957 => {
+        CALLDICT 22
+        XCHG_IJ s3 s4
+        BLKDROP 4
+        CTOS
+        LDU 3
+        LDU 32
+        LDU 64
+        LDGRAMS
+        LDMSGADDR
+        LDMSGADDR
+        DROP
+    }
+
+    103798 => {
+        CALLDICT 22
+        XCHG_IJ s2 s4
+        BLKDROP 4
+        CTOS
+        LDU 1
+        LDU 32
+        LDU 32
+        LDGRAMS
+        LDU 32
+        LDU 32
+        LDU 32
+        LDGRAMS
+        DROP
+    }
+
+    124409 => {
+        CALLDICT 22
+        BLKDROP 4
+        CTOS
+        LDMSGADDR
+        LDMSGADDR
+        LDMSGADDR
+        LDU 64
+        LDU 2
+        DROP
+    }

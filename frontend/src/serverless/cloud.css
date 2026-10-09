@@ -1,0 +1,56 @@
+.app-shell.cloud .cloud-note p{font-size:12px;line-height:1.65;max-width:1000px;color:#9db2ca;margin-top:10px}
+.app-shell.cloud .cloud-note{margin:0 0 16px;border:1px solid #2b4051;border-radius:10px;padding:12px 15px;background:#14232d}
+.app-shell.cloud .cloud-note summary,.app-shell.cloud .cloud-pricing-help>summary,.app-shell.cloud .cloud-limits summary{cursor:pointer;color:#b3cbd8;font-size:12px;line-height:1.6}
+.app-shell.cloud .cloud-note summary>span{color:#83a09d}
+.app-shell.cloud .cloud-limits details{margin-top:7px}
+.app-shell.cloud .cloud-limits .cloud-window-error{color:#eac189}
+.app-shell.cloud .cloud-pricing-help{border:1px solid #2c4055;border-radius:10px;padding:11px 15px;margin-bottom:16px}
+.app-shell.cloud .cloud-pricing-help .pricing-guide{border:0;padding:12px 0 0;margin:0;background:none}
+.app-shell.cloud.simple-pricing .page-heading,.app-shell.cloud.simple-pricing .export-button,.app-shell.cloud.simple-pricing .page-footer{display:none}
+.app-shell.cloud.simple-pricing .page-heading{justify-content:flex-end;margin-bottom:12px}
+.app-shell.cloud.simple-pricing .heading-actions{width:auto;margin-top:0}
+.app-shell.cloud.simple-pricing .grid-collection-settings{margin:0 0 14px;color:#a3b8ce;font-size:12px;line-height:1.6}
+.app-shell.cloud.simple-pricing .grid-collection-settings>summary{cursor:pointer;min-height:28px}
+.app-shell.cloud.simple-pricing .grid-collection-content>.heading-actions{margin:8px 0}
+.app-shell.cloud.simple-pricing .grid-collection-settings .cloud-limits{margin-top:8px}
+.app-shell.cloud.simple-pricing .grid-collection-content>p{margin:10px 0}
+.app-shell.cloud.simple-pricing .grid-collection-content>.text-button{font-size:12px;min-height:36px}
+.app-shell.cloud.simple-pricing .grid-collection-summary-state{color:#7ca99c}
+.app-shell.cloud.simple-pricing .grid-collection-content>.active-jobs{margin:12px 0}
+.app-shell.cloud.simple-pricing .grid-collection-running{margin:0 0 14px;border:1px solid #2b4a48;background:#14262b;border-radius:10px;padding:5px 12px}
+.app-shell.cloud.simple-pricing .grid-collection-running>div{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.app-shell.cloud.simple-pricing .grid-collection-running>div>span{display:flex;align-items:center;gap:8px;color:#b4d9cf;font-size:12px}
+.app-shell.cloud.simple-pricing .grid-collection-running .button{min-height:36px}
+@media(max-width:760px){
+  .app-shell.cloud.simple-pricing main{padding:16px 14px 100px}
+  .app-shell.cloud.simple-pricing .topbar{height:58px;padding:0 14px}
+  .app-shell.cloud.simple-pricing .read-only-indicator{display:none}
+  .app-shell.cloud.simple-pricing .page-heading{margin-bottom:10px}
+  .app-shell.cloud.simple-pricing .heading-actions,.app-shell.cloud.simple-pricing .sync-control{width:100%}
+  .app-shell.cloud.simple-pricing .sync-control>.button:first-child{flex:1}
+  .app-shell.cloud.simple-pricing .grid-collection-settings{font-size:11px;margin-bottom:8px}
+  .app-shell.cloud .page-heading p,.app-shell.cloud .notice p{font-size:12px;line-height:1.6}
+  .app-shell.cloud .notice strong,.app-shell.cloud .job-title>strong{font-size:12px}
+  .app-shell.cloud .job-content>p,.app-shell.cloud .job-metrics{font-size:11px;line-height:1.6}
+  .app-shell.cloud .job-card{flex-wrap:wrap}
+  .app-shell.cloud .job-content{min-width:0;flex:1 1 190px}
+  .app-shell.cloud .job-card>.button{min-height:40px;font-size:12px;margin-left:auto}
+  .app-shell.cloud .button{min-height:42px}
+  .app-shell.cloud .sync-menu strong{font-size:12px}
+  .app-shell.cloud .sync-menu small{font-size:11px;line-height:1.5}
+  .app-shell.cloud .page-footer{font-size:10px;line-height:1.6}
+  .app-shell.cloud .page-heading{margin-bottom:18px}
+  .app-shell.cloud .cloud-note,.app-shell.cloud .cloud-pricing-help{padding:10px 12px}
+  .app-shell.cloud .cloud-note summary>span{display:none}
+  .app-shell.cloud .pricing-summary{grid-template-columns:1fr 1fr;gap:9px;margin-bottom:13px}
+  .app-shell.cloud .pricing-summary-card{padding:13px;min-height:108px}
+  .app-shell.cloud .pricing-summary-card>span{font-size:11px;line-height:1.4}
+  .app-shell.cloud .pricing-summary-card>strong{font-size:28px;margin:10px 0 7px}
+  .app-shell.cloud .pricing-summary-card>strong small{font-size:10px}
+  .app-shell.cloud .pricing-summary-card>p{font-size:10px;line-height:1.5}
+  .app-shell.cloud .pricing-summary-card.freshness{grid-column:1/-1;min-height:0;padding:10px 13px;display:flex;flex-direction:row;flex-wrap:wrap;gap:4px 12px;align-items:baseline}
+  .app-shell.cloud .pricing-summary-card.freshness>span{font-size:10px}
+  .app-shell.cloud .pricing-summary-card.freshness>strong{font-size:15px;margin:0}
+  .app-shell.cloud .pricing-summary-card.freshness>p{font-size:10px;margin:0}
+  .app-shell.cloud .mobile-nav{padding-bottom:max(9px,env(safe-area-inset-bottom),var(--tg-safe-area-inset-bottom,0px))}
+}
