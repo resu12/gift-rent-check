@@ -11,6 +11,7 @@ from . import history_refresh
 from .api import ApiClient
 from .addresses import address_key, canonical_address, preferred_address
 from .config import Settings
+from .collection_schedule import collection_key, next_stream, scheduling
 from .domain import ApiError, AuthError, BudgetExceeded, ValidationError
 from .history_refresh import (ORDER_UNVERIFIED, SCOPE_UNVERIFIED, build_history_refresh_plan,
                               stream_cutoff, stream_refresh_mode, validate_saved_plan)
@@ -224,6 +225,7 @@ def collect(
         saved = run["settings"]
         validate_saved_plan(saved)
         validate_listing_plan(saved)
+        scheduling(saved)
         if history_since is not None and saved.get("history_since") != history_since:
             raise ValueError("Cannot change history cutoff on resume; start a fresh collection")
         history_since = saved.get("history_since")
@@ -299,6 +301,7 @@ def collect(
         # Persist intended work before creating stream rows so an interrupted
         # initialization can recover every scope on the next invocation.
         stream_settings["streams"] = manifest
+        stream_settings["scheduling"] = "round_robin"
         if history_since is not None:
             stream_settings["history_refresh"] = build_history_refresh_plan(store, manifest, history_since)
         run_id = store.create_run(stream_settings, scopes, skipped)
@@ -319,70 +322,87 @@ def collect(
         }})
 
     store.finish_run(run_id, "running")
+    adaptive_listings = saved_settings.get("listing_refresh") == LISTING_POLICY
+
+    def reuse_covered_listings(scope=None):
+        if not adaptive_listings:
+            return
+        current = store.streams(run_id)
+        if not any(stream["kind"] == "listing" and stream["state"] == "complete" and stream["pages"] > 0 for stream in current):
+            return
+        for target in current:
+            if target["state"] == "complete" or target["kind"] != "listing" or (scope is not None and collection_key(target) != scope):
+                continue
+            covering = covering_listing_stream(store, run_id, target)
+            if covering is not None:
+                store.set_stream_state(target["id"], "complete", f"{COVERED_REASON}{covering['id']}")
+
     try:
+        # A process can stop after the broader page commits but before logical
+        # child coverage is saved. Recover that no-network work first.
+        reuse_covered_listings()
         with client_factory(
             settings.token, timeout=settings.timeout, requests_per_second=settings.requests_per_second,
             max_attempts=settings.max_attempts, retry_attempts=settings.retry_attempts,
             run_seconds=settings.run_seconds, observer=observe, not_before=store.retry_not_before(),
         ) as client:
-            for stream in store.streams(run_id):
-                if stream["state"] == "complete":
-                    continue
+            page_counts: dict[int, int] = {}
+            excluded: set[int] = set()
+            while (stream := next_stream(store.streams(run_id), scheduling(saved_settings), excluded=excluded,
+                                         broad_first=adaptive_listings)) is not None:
                 stream_id = stream["id"]
                 if saved_settings.get("listing_refresh") == LISTING_POLICY:
                     covering = covering_listing_stream(store, run_id, stream)
                     if covering is not None:
                         store.set_stream_state(stream_id, "complete", f"{COVERED_REASON}{covering['id']}")
                         continue
+                if page_counts.get(stream_id, 0) >= settings.max_pages:
+                    store.set_stream_state(stream_id, "partial", "page_limit")
+                    excluded.add(stream_id)
+                    continue
                 cursor = stream["next_cursor"]
                 history_scan_since = stream_cutoff(saved_settings, stream)
                 refresh_mode = stream_refresh_mode(saved_settings, stream)
                 window_reason = ("incremental_history_covered" if refresh_mode == "incremental"
                                  else "timeframe_covered")
                 store.set_stream_state(stream_id, "running")
-                for _ in range(settings.max_pages):
-                    params = dict(stream["params"])
-                    if cursor is not None:
-                        params["cursor"] = cursor
-                    try:
-                        response = client.get(stream["path"], params)
-                        parsed = parse_page(stream["kind"], response.body)
-                        next_cursor = parsed.next_cursor
-                        if next_cursor is not None and (
-                            next_cursor == cursor or store.has_cursor(stream_id, next_cursor)
-                        ):
-                            raise ValidationError("Pagination cursor cycle detected; start a fresh collection")
-                        window_complete = (stream["kind"] == "history" and history_scan_since is not None
-                                           and stream["params"].get("order_by") == "new_to_old"
-                                           and _history_window_complete(store, run_id, stream_id, parsed, history_scan_since,
-                                                                        stream["params"].get("collection_address"),
-                                                                        maximum_timestamp=history_refresh.utc_seconds() + 300 if refresh_mode else None))
-                        completion_reason = window_reason if window_complete and next_cursor is not None else None
-                        if store.commit_page(stream_id, cursor, response, parsed, completion_reason=completion_reason):
-                            pages += 1
-                        cursor = next_cursor
-                        if cursor is None or window_complete:
-                            break
-                    except BudgetExceeded as exc:
-                        stop_reason = str(exc)
-                        store.set_stream_state(stream_id, "partial", stop_reason)
-                        store.record_issue(run_id, stream_id, "budget", stop_reason)
-                        break
-                    except (ApiError, ValidationError) as exc:
-                        reason = str(exc)
-                        if isinstance(exc, ApiError) and exc.status_code in (400, 404, 410, 422) and cursor is not None:
-                            reason += "; saved cursor may be invalid: start a fresh collection"
-                        store.set_stream_state(stream_id, "failed", reason)
-                        store.record_issue(run_id, stream_id, getattr(exc, "reason", "invalid_response"), reason)
-                        failed = True
-                        if isinstance(exc, AuthError):
-                            auth_failed = True
-                            stop_reason = reason
-                        break
-                else:
-                    store.set_stream_state(stream_id, "partial", "page_limit")
-                if stop_reason:
+                params = dict(stream["params"])
+                if cursor is not None:
+                    params["cursor"] = cursor
+                try:
+                    response = client.get(stream["path"], params)
+                    parsed = parse_page(stream["kind"], response.body)
+                    next_cursor = parsed.next_cursor
+                    if next_cursor is not None and (next_cursor == cursor or store.has_cursor(stream_id, next_cursor)):
+                        raise ValidationError("Pagination cursor cycle detected; start a fresh collection")
+                    window_complete = (stream["kind"] == "history" and history_scan_since is not None
+                                       and stream["params"].get("order_by") == "new_to_old"
+                                       and _history_window_complete(store, run_id, stream_id, parsed, history_scan_since,
+                                                                    stream["params"].get("collection_address"),
+                                                                    maximum_timestamp=history_refresh.utc_seconds() + 300 if refresh_mode else None))
+                    completion_reason = window_reason if window_complete and next_cursor is not None else None
+                    if store.commit_page(stream_id, cursor, response, parsed, completion_reason=completion_reason):
+                        pages += 1
+                    page_counts[stream_id] = page_counts.get(stream_id, 0) + 1
+                    if stream["kind"] == "listing" and next_cursor is None:
+                        reuse_covered_listings(collection_key(stream))
+                except BudgetExceeded as exc:
+                    stop_reason = str(exc)
+                    store.set_stream_state(stream_id, "partial", stop_reason)
+                    store.record_issue(run_id, stream_id, "budget", stop_reason)
                     break
+                except (ApiError, ValidationError) as exc:
+                    reason = str(exc)
+                    if isinstance(exc, ApiError) and exc.status_code in (400, 404, 410, 422) and cursor is not None:
+                        reason += "; saved cursor may be invalid: start a fresh collection"
+                    store.set_stream_state(stream_id, "failed", reason)
+                    store.record_issue(run_id, stream_id, getattr(exc, "reason", "invalid_response"), reason)
+                    failed = True
+                    excluded.add(stream_id)
+                    if isinstance(exc, AuthError):
+                        auth_failed = True
+                        stop_reason = reason
+                        break
     except KeyboardInterrupt:
         store.finish_run(run_id, "partial", "interrupted")
         raise

@@ -89,6 +89,17 @@ def test_complete_broad_scan_reuses_model_and_black_without_fabricated_targeted_
         assert subject["pricing"]["model_black"]["mean"] == "0.1"
 
 
+def test_broad_second_page_finishes_before_any_optional_model_or_black_request():
+    api = Market({(None, None, None): page("end", listing()),
+                  (None, None, "end"): page(None, listing("0:" + "55" * 32))})
+    with Store(":memory:") as store:
+        result = collect(store, api)
+        assert result.state == "complete" and len(api.listings) == 2
+        assert [request.url.params.get("model") for request in api.listings] == [None, None]
+        assert [request.url.params.get("cursor") for request in api.listings] == [None, "end"]
+        assert [stream["pages"] for stream in streams(store, result)] == [2, 0, 0]
+
+
 def test_partial_broad_never_skips_model_but_complete_model_can_cover_black_without_biasing_collection():
     api = Market({(None, None, None): page("more", listing("0:" + "55" * 32, model="B", nano="300000000")),
                   ("A", None, None): page(None, listing())})

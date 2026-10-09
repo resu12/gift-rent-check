@@ -109,6 +109,14 @@ if (readOnlyPreview) {
 if (readOnlyPreview && process.env.MOCK_SAVED_JOB === '1') {
   await engine.startJob(context, {kind: 'rental_prices', timeframe: '30d'});
 }
+// Synthetic legacy checkpoint for testing the explicit efficient-refresh action.
+if (!readOnlyPreview && process.env.MOCK_LEGACY_JOB === '1') {
+  await engine.startJob(context, {kind: 'prices', timeframe: '30d'});
+  const repository = createCloudRepository(db), {revision, state} = await repository.read();
+  state.job.page_size = 10; state.job.state = 'partial'; state.job.reason = 'daily_limit';
+  delete state.job.schedule; delete state.job.market_cache_version;
+  await repository.append(revision, {key: 'mock:legacy-job', state, job: state.job, records: [], observed_at: new Date().toISOString()});
+}
 const bridge = `window.Telegram={WebApp:{ready(){},expand(){},colorScheme:'dark',Serverless:{call(name,input,callback){fetch('/mock-api/'+name,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input||{})}).then(async r=>{const data=await r.json();if(!r.ok)callback({type:'ENDPOINT_ERROR',message:data.error});else callback(null,data);}).catch(()=>callback({message:'Mock service unavailable'}));}}}};`;
 const types = {'.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml'};
 const server = createServer(async (request, response) => {

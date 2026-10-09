@@ -77,7 +77,8 @@ export function createLocalDashboardAdapter(): DashboardAdapter & { ownedPriceTr
       return data;
     },
     getJobs: async (signal) => (await request<{ jobs: Job[] }>('/api/jobs', { signal })).jobs,
-    startJob: (kind, csrf, selection) => {
+    startJob: (kind, csrf, selection, options) => {
+      if (options?.forceRefresh) throw new Error('Force refresh of the Telegram comparison cache is available in Telegram only.');
       const body: NewJobRequest = { kind };
       if ((kind === 'prices' || kind === 'rental_prices' || kind === 'collect') && selection) {
         pricingQuery(selection); // Validate the same window used by saved-data views.

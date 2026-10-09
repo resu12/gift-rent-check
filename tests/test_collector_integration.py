@@ -189,7 +189,8 @@ def test_process_failure_after_page_commit_resumes_at_saved_cursor(store, settin
     api = MockAPI(finish_page)
     resumed = collect(store, settings, resume_id=run["id"], client_factory=api.factory)
     assert resumed.state == "complete"
-    assert [request.url.path for request in api.requests] == [LISTINGS_PATH, HISTORY_PATH]
+    # The first history page completed in the initial round, before listings deepened.
+    assert [request.url.path for request in api.requests] == [LISTINGS_PATH]
     assert len(store.observations("listing")) == 2
     assert len(store.observations("collection")) == 1
 

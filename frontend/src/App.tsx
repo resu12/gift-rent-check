@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons';
-import type { Dashboard, DashboardAdapter, DataRecord, Gift, Job, JobKind, PricingSelection } from './data/types';
+import type { Dashboard, DashboardAdapter, DataRecord, Gift, Job, JobKind, JobStartOptions, PricingSelection } from './data/types';
 import { dateTime, filterGifts, formatAmount, giftGroup, humanize, isActiveJob, relativeTime, safeExternalUrl, shorten } from './data/helpers';
 import type { GiftFilter, PricingFilters } from './data/helpers';
 import { telegramBridge } from './data/telegram';
@@ -14,6 +14,7 @@ import { useOwnedPriceRefresh } from './useOwnedPriceRefresh';
 import { OwnedPriceStatus } from './OwnedPriceStatus';
 import { SyncProgress } from './SyncProgress';
 import { presentJobSync } from './data/syncPresentation';
+import { efficientRefreshSelection, presentCollectionEfficiency, visibleDashboardJobs } from './data/collectionEfficiency';
 
 type Page = 'pricing' | 'overview' | 'gifts' | 'activity';
 const NAV: { id: Page; label: string; icon: 'overview' | 'gift' | 'pricing' | 'activity' }[] = [
@@ -96,8 +97,9 @@ function Empty({ title, children, icon = 'gift' }: { title: string; children: Re
   return <div className="empty-state"><span className="empty-icon"><Icon name={icon} size={30} /></span><h3>{title}</h3><p>{children}</p></div>;
 }
 
-function JobCard({ job, onResume, disabled, onStop, stopping, stopDisabled }: {
+function JobCard({ job, onResume, onEfficient, disabled, onStop, stopping, stopDisabled }: {
   job: Job; onResume: (job: Job) => void; disabled: boolean;
+  onEfficient: (job: Job) => void;
   onStop: (job: Job) => void; stopping: boolean; stopDisabled: boolean;
 }) {
   const requiresResume = job.progress?.requires_resume === true;
@@ -110,6 +112,7 @@ function JobCard({ job, onResume, disabled, onStop, stopping, stopDisabled }: {
   const history = job.progress?.history_refresh;
   const listing = job.progress?.listing_refresh;
   const cache = job.progress?.market_cache;
+  const efficiency = presentCollectionEfficiency(job);
   const metrics = [['pages', 'Pages read'], ['observations', 'Records saved'], ['streams_complete', 'Checks completed'], ['streams_total', 'Checks planned']] as const;
   return <article className={`job-card sync-card job-${job.state} sync-${view.state}`} aria-label={view.title}>
     <div className="sync-card-header">
@@ -119,6 +122,9 @@ function JobCard({ job, onResume, disabled, onStop, stopping, stopDisabled }: {
     <p className="sync-purpose">{view.objective}</p>
     <SyncProgress progress={view.progress} moving={active && !isStopping && view.state !== 'waiting'} />
     <p className="sync-message" role="status">{view.message}</p>
+    {efficiency.sampled && <p className="sync-sampled">{efficiency.sampled}</p>}
+    {view.cacheNote && <p className="sync-cache-note">{view.cacheNote}</p>}
+    {efficiency.warning && <p className="sync-efficiency-warning">{efficiency.warning}</p>}
     <div className="sync-card-footer">
       <details className="sync-details"><summary>Details</summary><div>
         <p>Progress counts completed collections or gift checks, not time remaining. Collections can take different amounts of time.</p>
@@ -128,11 +134,14 @@ function JobCard({ job, onResume, disabled, onStop, stopping, stopDisabled }: {
         {history && <p>History: {history.incremental_streams} incremental and {history.full_streams} full-window plans. Incremental checks reread {history.overlap_seconds / 3600} hours of overlap.</p>}
         {listing && listing.reused_streams > 0 && <p>{listing.reused_streams} listing groups use completed broader scans.</p>}
         {cache && cache.reused_streams > 0 && <p>{cache.reused_streams} scans use the Telegram cache, without new comparison requests.{cache.oldest_observed_at && <> Original observations from {dateTime(cache.oldest_observed_at)}.</>}</p>}
+        {efficiency.pageSize && <p>Items per request: {efficiency.pageSize}. {job.progress.efficiency?.scheduling === 'round_robin' ? 'Collections are visited in turns so each can receive a first sample before deeper pages.' : 'This saved scan finishes one stream before moving to the next.'}</p>}
+        {efficiency.legacy && <p>An efficient refresh creates a new scan using {efficiency.recommendedPageSize} items per request and the same period. Relative periods start from now; custom dates stay fixed. Existing records and the older scan are kept. No saved cursor is changed.</p>}
         {view.rawReason && <p>Saved status: {view.rawReason}</p>}
         <time dateTime={job.updated_at}>Updated {dateTime(job.updated_at, true)}{job.run_id != null ? ` · Run ${job.run_id}` : ''}</time>
       </div></details>
       <div className="sync-actions">
-        {(job.state === 'partial' || requiresResume) && <button className="button small secondary" disabled={disabled} onClick={() => onResume(job)}>{view.actionLabel || 'Continue'}<Icon name="arrow" size={15} /></button>}
+        {efficiency.legacy && <button className="button small primary" disabled={disabled || !efficiency.canStart} onClick={() => onEfficient(job)}>Start efficient refresh<Icon name="refresh" size={15} /></button>}
+        {(job.state === 'partial' || requiresResume) && <button className="button small secondary" disabled={disabled} onClick={() => onResume(job)}>{efficiency.legacy ? 'Continue older scan' : view.actionLabel || 'Continue'}<Icon name="arrow" size={15} /></button>}
         {isActiveJob(job) && <button className="button small secondary" disabled={stopDisabled || isStopping} onClick={() => onStop(job)} aria-label={`Stop ${JOB_LABEL[job.kind] || humanize(job.kind)}`}>{isStopping ? 'Stopping…' : 'Stop'}</button>}
       </div>
     </div>
@@ -204,12 +213,12 @@ function Overview({ data, onFilter, onSelect }: { data: Dashboard; onFilter: (fi
   </>;
 }
 
-function Activity({ records, jobs, onResume, disabled, onStop, stoppingJobs, stopDisabled }: {
-  records: DataRecord[]; jobs: Job[]; onResume: (job: Job) => void; disabled: boolean;
+function Activity({ records, jobs, onResume, onEfficient, disabled, onStop, stoppingJobs, stopDisabled }: {
+  records: DataRecord[]; jobs: Job[]; onResume: (job: Job) => void; onEfficient: (job: Job) => void; disabled: boolean;
   onStop: (job: Job) => void; stoppingJobs: Set<number>; stopDisabled: boolean;
 }) {
   return <div className="activity-layout"><section className="panel"><div className="section-heading"><div><span className="eyebrow">COLLECTION ACTIVITY</span><h2>Sync history</h2></div><span className="count-label">{jobs.length} jobs</span></div>
-    {jobs.length ? <div className="jobs-list">{[...jobs].sort((a, b) => b.id - a.id).map(job => <JobCard key={job.id} job={job} onResume={onResume} disabled={disabled} onStop={onStop} stopping={stoppingJobs.has(job.id)} stopDisabled={stopDisabled} />)}</div> : <Empty title="No sync jobs yet" icon="activity">Manual refresh jobs will appear here.</Empty>}
+    {jobs.length ? <div className="jobs-list">{[...jobs].sort((a, b) => b.id - a.id).map(job => <JobCard key={job.id} job={job} onResume={onResume} onEfficient={onEfficient} disabled={disabled} onStop={onStop} stopping={stoppingJobs.has(job.id)} stopDisabled={stopDisabled} />)}</div> : <Empty title="No sync jobs yet" icon="activity">Manual refresh jobs will appear here.</Empty>}
   </section><section className="panel"><div className="section-heading"><div><span className="eyebrow">SAVED EVIDENCE</span><h2>Recent observations</h2></div></div>
     {records.length ? <div className="activity-list">{records.slice(0, 30).map((record, index) => {
       const title = stringField(record, 'title', 'message', 'kind', 'type') || 'Observation recorded';
@@ -282,8 +291,7 @@ export default function App({ adapter, walletControl }: {
   const [refreshOpen, setRefreshOpen] = useState(false);
   const simplePricing = page === 'pricing' && pricingView === 'grid';
   const activeJobs = jobs.filter(job => isActiveJob(job) && job.progress?.requires_resume !== true);
-  const latestJobId = Math.max(0, ...jobs.map(job => job.id));
-  const visibleJobs = jobs.filter(job => isActiveJob(job) || job.state === 'partial' || (job.id === latestJobId && job.state === 'failed')).sort((a, b) => Number(isActiveJob(b)) - Number(isActiveJob(a)) || b.id - a.id).slice(0, 3);
+  const visibleJobs = visibleDashboardJobs(jobs);
   const busy = submitting || activeJobs.length > 0;
   const closeDetails = useCallback(() => setSelected(null), []);
   const changePricing = (next: PricingSelection) => { setSelected(null); setPricingSelection(next); };
@@ -323,18 +331,23 @@ export default function App({ adapter, walletControl }: {
     ? data.review.warnings.filter((value): value is string => typeof value === 'string') : [];
   const supportsJob = (kind: JobKind) => !data?.capabilities.supported_jobs || data.capabilities.supported_jobs.includes(kind);
   const canSync = Boolean(data?.capabilities.network_enabled && (cloud ? data.gifts.some(gift => gift.is_portfolio && gift.collection_address) : data.capabilities.wallet_configured) && data.capabilities.marketapp_configured && !error);
-  const launch = async (kind: JobKind, job?: Job) => {
+  const launch = async (kind: JobKind, job?: Job, options?: JobStartOptions, selection = pricingSelection) => {
     if (!data || busy) return;
     setSubmitting(true); setJobError(null); setSyncMenu(false);
     try {
       const changed = job ? await adapter.resumeJob(job.id, data.capabilities.csrf_token)
-        : await adapter.startJob(kind, data.capabilities.csrf_token, pricingSelection);
+        : await adapter.startJob(kind, data.capabilities.csrf_token, selection, options);
       updateJob(changed);
       await reload();
     } catch (problem) { setJobError(problem instanceof Error ? problem.message : 'The sync could not be started.'); }
     finally { setSubmitting(false); }
   };
   const onResume = (job: Job) => { void launch(job.kind, job); };
+  const onEfficient = (job: Job) => {
+    if (!presentCollectionEfficiency(job).canStart || busy || !canSync) return;
+    try { void launch(job.kind, undefined, undefined, efficientRefreshSelection(job, pricingSelection)); }
+    catch (problem) { setJobError(problem instanceof Error ? problem.message : 'Choose a recent period before starting a new refresh.'); }
+  };
   const stop = async (job: Job) => {
     // Stopping must remain available while collection is busy. The ref also
     // prevents repeated clicks before React has rendered the disabled button.
@@ -354,9 +367,9 @@ export default function App({ adapter, walletControl }: {
   const goFilter = (value: GiftFilter) => { setFilter(value); setPage('gifts'); setSearch(''); setCollection(''); };
   const nav = <>{NAV.map(item => <button key={item.id} aria-current={page === item.id ? 'page' : undefined} className={`nav-item ${page === item.id ? 'active' : ''}`} onClick={() => setPage(item.id)}><Icon name={item.icon} size={20} /><span>{item.label}</span>{item.id === 'gifts' && data && <b>{data.summary.portfolio_count}</b>}</button>)}</>;
 
-  const jobCards = visibleJobs.length > 0 && <div className="active-jobs">{visibleJobs.map(job => <JobCard key={job.id} job={job} onResume={onResume} disabled={busy || !canSync} onStop={onStop} stopping={stoppingJobs.has(job.id)} stopDisabled={!data} />)}</div>;
+  const jobCards = visibleJobs.length > 0 && <div className="active-jobs">{visibleJobs.map(job => <JobCard key={job.id} job={job} onResume={onResume} onEfficient={onEfficient} disabled={busy || !canSync} onStop={onStop} stopping={stoppingJobs.has(job.id)} stopDisabled={!data} />)}</div>;
 
-  const headingActions = <div className="heading-actions"><a className="button secondary export-button" href={data && !adapter.exportCsv ? adapter.exportUrl(pricingSelection) : undefined} role={adapter.exportCsv ? 'button' : undefined} onClick={event => { if (adapter.exportCsv && data) { event.preventDefault(); adapter.exportCsv(data, pricingSelection); } }} onKeyDown={event => { if (adapter.exportCsv && data && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); adapter.exportCsv(data, pricingSelection); } }} aria-disabled={!data} tabIndex={data ? 0 : -1}><Icon name="download" size={16} />Export</a><div className="sync-control"><button className="button primary" onClick={() => { void launch(priceJob); }} disabled={!canSync || busy} title={!canSync ? cloud ? 'Configure the private server token and import your portfolio to collect comparison prices.' : 'Configure your wallet and local Marketapp API token, and enable network collection to sync.' : pricingSelection.source === 'rentals' ? 'Collect recorded rentals for your gift collections' : 'Collect observed asking prices for your gift collections'}><Icon name={busy ? 'refresh' : 'pricing'} size={17} className={busy ? 'spinning' : ''} />{busy ? 'Sync in progress' : simplePricing ? 'Refresh prices' : pricingSelection.source === 'rentals' ? 'Collect actual rentals' : 'Collect comparison prices'}</button><button className="button primary sync-more" disabled={!canSync || busy} aria-label="More sync options" aria-expanded={syncMenu} onClick={() => setSyncMenu(!syncMenu)}><span>⌄</span></button>{syncMenu && <div className="sync-menu">{supportsJob('refresh') && <button onClick={() => { void launch('refresh'); }}><Icon name="refresh" size={18} /><span><strong>Refresh gift status</strong><small>Update ownership, traits and configured asking prices</small></span></button>}{supportsJob('discover') && <button onClick={() => { void launch('discover'); }} disabled={!data?.capabilities.marketapp_configured}><Icon name="discover" size={18} /><span><strong>Discover wallet gifts</strong><small>Search holdings and transfer history</small></span></button>}<button onClick={() => { void launch('collect'); }} disabled={!data?.capabilities.marketapp_configured}><Icon name="layers" size={18} /><span><strong>Collect market listings</strong><small>{cloud ? 'Refresh public listings and bounded rental history' : 'Read public listings; rented-gift prices use Refresh gift status'}</small></span></button></div>}</div></div>;
+  const headingActions = <div className="heading-actions"><a className="button secondary export-button" href={data && !adapter.exportCsv ? adapter.exportUrl(pricingSelection) : undefined} role={adapter.exportCsv ? 'button' : undefined} onClick={event => { if (adapter.exportCsv && data) { event.preventDefault(); adapter.exportCsv(data, pricingSelection); } }} onKeyDown={event => { if (adapter.exportCsv && data && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); adapter.exportCsv(data, pricingSelection); } }} aria-disabled={!data} tabIndex={data ? 0 : -1}><Icon name="download" size={16} />Export</a><div className="sync-control"><button className="button primary" onClick={() => { void launch(priceJob); }} disabled={!canSync || busy} title={!canSync ? cloud ? 'Configure the private server token and import your portfolio to collect comparison prices.' : 'Configure your wallet and local Marketapp API token, and enable network collection to sync.' : pricingSelection.source === 'rentals' ? 'Collect recorded rentals for your gift collections' : 'Collect observed asking prices for your gift collections'}><Icon name={busy ? 'refresh' : 'pricing'} size={17} className={busy ? 'spinning' : ''} />{busy ? 'Sync in progress' : simplePricing ? 'Refresh prices' : pricingSelection.source === 'rentals' ? 'Collect actual rentals' : 'Collect comparison prices'}</button><button className="button primary sync-more" disabled={!canSync || busy} aria-label="More sync options" aria-expanded={syncMenu} onClick={() => setSyncMenu(!syncMenu)}><span>⌄</span></button>{syncMenu && <div className="sync-menu">{cloud && <button onClick={() => { void launch(priceJob, undefined, { forceRefresh: true }); }}><Icon name="refresh" size={18} /><span><strong>Force fresh comparison data</strong><small>Bypass the 60-minute comparison cache. Request limits still apply.</small></span></button>}{supportsJob('refresh') && <button onClick={() => { void launch('refresh'); }}><Icon name="refresh" size={18} /><span><strong>Refresh gift status</strong><small>Update ownership, traits and configured asking prices</small></span></button>}{supportsJob('discover') && <button onClick={() => { void launch('discover'); }} disabled={!data?.capabilities.marketapp_configured}><Icon name="discover" size={18} /><span><strong>Discover wallet gifts</strong><small>Search holdings and transfer history</small></span></button>}<button onClick={() => { void launch('collect'); }} disabled={!data?.capabilities.marketapp_configured}><Icon name="layers" size={18} /><span><strong>Collect market listings</strong><small>{cloud ? 'Refresh public listings and bounded rental history' : 'Read public listings; rented-gift prices use Refresh gift status'}</small></span></button></div>}</div></div>;
 
   return <div className={`app-shell${cloud ? ' cloud' : ''}${simplePricing ? ' simple-pricing' : ''}`}><a href="#main" className="skip-link">Skip to dashboard</a>
     <aside className="sidebar"><a className="brand" href="#" onClick={event => { event.preventDefault(); setPage('pricing'); }} aria-label="Giftfolio pricing"><span className="brand-symbol"><Icon name="gift" size={24} /></span><span>giftfolio<span className="brand-dot">.</span></span></a><div className="workspace-label"><span />PERSONAL WORKSPACE</div><nav aria-label="Main navigation">{nav}</nav>
@@ -390,7 +403,7 @@ export default function App({ adapter, walletControl }: {
           {filtered.length ? <GiftTable gifts={filtered.slice(0, giftList.visibleCount)} onSelect={setSelected} /> : <Empty title={data.gifts.length ? 'No gifts match this view' : 'No gifts to show yet'} icon={data.gifts.length ? 'search' : 'gift'}>{data.gifts.length ? 'Try a different search, collection, or status filter.' : 'Discover your wallet or import a portfolio to get started.'}</Empty>}
           <ListFooter {...giftList} total={filtered.length} />
         </section>}
-        {page === 'activity' && <Activity records={data.activity || []} jobs={jobs} onResume={onResume} disabled={busy || !canSync} onStop={onStop} stoppingJobs={stoppingJobs} stopDisabled={!data} />}
+        {page === 'activity' && <Activity records={data.activity || []} jobs={jobs} onResume={onResume} onEfficient={onEfficient} disabled={busy || !canSync} onStop={onStop} stoppingJobs={stoppingJobs} stopDisabled={!data} />}
       </> : !loading && <Empty title="Your dashboard is waiting" icon="alert">{cloud ? 'Open this Mini App from the private bot to load your saved portfolio.' : 'Start the local dashboard service to inspect your saved portfolio. Your data stays on this device.'}</Empty>}
       <footer className="page-footer"><span><Icon name="shield" size={14} />Price guidance only. No transactions or automatic price changes.</span><span>Powered by TON & Marketapp data</span></footer>
       </main>

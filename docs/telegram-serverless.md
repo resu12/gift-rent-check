@@ -71,9 +71,9 @@ Without `VITE_TONCONNECT_APP_URL`, builds leave wallet connections disabled, whi
 
 Retries and catalog requests count. Counters and provider retry deadlines survive reopening, new jobs, resumes, and deployments. The upgrade conservatively inherits recent prototype attempts. The old prototype's collection entrypoints are disabled so they cannot bypass the ledger. These are conservative application limits, not a published Marketapp quota or a guarantee against restriction.
 
-Only authenticated GET requests to `/v1/collections/gifts/`, `/v1/rent/gifts/`, and `/v1/rent/gifts/history/` are constructed. Collections come from imported portfolio addresses, in stable address order. Coverage is partial until the saved streams complete. Fresh collection starts at the head; Resume freezes the original scopes, page size, and timeframe. History stops after a valid descending page crosses the selected lower boundary; empty continuation pages continue, equality retains ties, and ordering anomalies disable the cutoff shortcut. Requests are bounded even if ordering is unreliable.
+Only authenticated GET requests to `/v1/collections/gifts/`, `/v1/rent/gifts/`, and `/v1/rent/gifts/history/` are constructed. Collections come from imported portfolio addresses, in stable address order. New runs fetch the catalog first, then rotate among collections after each committed page before reading deeper. Retries stay with their original request. The saved schedule and cursors survive interruption; older runs retain their original sequential schedule. An initial sample does not mean the collection is fully checked. Coverage is partial until the saved streams complete. Fresh collection starts at the head; Resume freezes the original scopes, page size, and timeframe. History stops after a valid descending page crosses the selected lower boundary; empty continuation pages continue, equality retains ties, and ordering anomalies disable the cutoff shortcut. Requests are bounded even if ordering is unreliable.
 
-New Telegram jobs request 100 records per page, matching desktop pricing jobs. Existing paused jobs retain their original page size (including 10); use a new refresh for the larger pages. The one-request-per-second pace and all attempt, daily, and response-size caps remain unchanged. Larger pages reduce request overhead; they do not raise your allowance.
+New Telegram jobs request 100 records per page, matching desktop pricing jobs. Existing paused jobs retain their original page size (including 10). The legacy-run notice offers **Start efficient refresh**, which starts a new run from the head using the saved timeframe choice and current defaults; it retains existing observations. **Continue** still resumes the original traversal. The one-request-per-second pace and all attempt, daily, and response-size caps remain unchanged. Larger pages reduce request overhead; they do not raise your allowance.
 
 ### Incremental rental history
 
@@ -87,7 +87,7 @@ Each run freezes its per-collection plan and baseline provenance. Resume preserv
 
 ### Shared market cache
 
-New Telegram jobs can reuse completed listing and compatible history traversals for **five minutes**, measured from the source stream's first actual provider observation. Completion and cache reuse do not extend expiry. A traversal that already exceeds five minutes is not reusable. The catalog is fetched afresh once per new job, even if every market stream uses cached coverage.
+New Telegram jobs can reuse completed listing and compatible history traversals for **one hour**, measured from the source stream's first actual provider observation. Completion and cache reuse do not extend expiry. A traversal that already exceeds one hour is not reusable. The status shows when recent saved scans are reused and their age; original observation timestamps remain unchanged. **Force fresh comparison data** starts a new job that bypasses cache reuse, while retaining normal request limits and cooldowns. It can populate the cache with newly completed scans. The catalog is fetched afresh once per new job, even if every market stream uses cached coverage.
 
 The cache index contains public request scopes, source references, original observation times, and coverage bounds. Personal wallet settings, portfolio membership, labels, and TON ownership evidence are excluded. Existing provider records remain the comparison source; reuse creates no duplicate pages or observations and never makes old data appear newly observed. Public listing owners and history parties remain in the original provider records. The cache stays behind private Telegram authorization; this change does not enable public users.
 
@@ -98,6 +98,17 @@ Cache decisions and source references freeze when a new job starts. Resume keeps
 The cache is **Telegram-only**, as selected for this release. Desktop remains separate and cannot share Telegram's allowance. Leave desktop `--allow-network` off while using Telegram for Marketapp collection; `--allow-price-refresh` still enables the separate TON-only owned-price check.
 
 `Retry-After` applies across jobs. Authentication failures, malformed pages, cursor cycles, and rejected cursors stop collection without advancing that page. A rejected cursor requires a new collection. An in-flight lease prevents overlap; after an interruption, allow up to two minutes for it to expire before resuming. The current SDK does not document a configurable network timeout or cancellation primitive; the five-minute allowance prevents starting further requests, and the lease fences late results. It cannot force an already-sent SDK request to finish at exactly 30 seconds.
+
+### Explicit one-day allowance reset
+
+There is no recurring reset or reset button in the Mini App. When the owner explicitly requests a one-off reset, the private administrative tool can exclude the requests already made from allowance accounting until midnight **Europe/Berlin**. This is an application allowance reset, not a change to Marketapp's provider limits. The append-only request history, per-start limit, request pace, and provider cooldown remain intact. New requests count normally; the normal rolling 24-hour calculation resumes at midnight, including any prior requests still within that window. The reset starts no collection.
+
+```powershell
+node serverless/tools/reset-market-budget.mjs --app-id YOUR_APP_ID --owner-id YOUR_TELEGRAM_USER_ID `
+  --reset-id YOUR_UNIQUE_RESET_ID --confirm-reset-today
+```
+
+The tool validates the Telegram destination, requires owner authorization and no active request lease, and appends an idempotent event. Retry an uncertain result only with the same reset ID. A second distinct reset for the same date is rejected. The operation is not deployed as a callable Mini App endpoint.
 
 Production timing uses SQLite wall time refreshed around database commits and provider responses. This prevents the runtime's JavaScript clock behavior from shortening retry delays or accepting an expired lease. Failure to read trusted time stops new provider requests. Lease fencing protects committed state; it cannot cancel an old transport request if the platform leaves it running.
 

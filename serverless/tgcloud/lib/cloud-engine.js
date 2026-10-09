@@ -2,6 +2,8 @@ import {validatePage} from './engine.js';
 import {buildCloudDashboard, resolveCloudWindow, validateSavedCloudWindow, addressKey} from './cloud-pricing.js';
 import {planHistoryRefresh, validHistoryPlan, completedHistoryCoverage, historyRefreshProgress} from './history-refresh.js';
 import {MARKET_CACHE_POLICY, pruneMarketCache, cachedMarketStream, completedMarketStream, marketCacheKey, marketCacheProgress} from './market-cache.js';
+import {newCollectionSchedule, validCollectionSchedule, nextCollectionStream, commitCollectionTurn, collectionEfficiency} from './collection-schedule.js';
+import {effectiveMarketAttempts} from './market-budget.js';
 
 export const CLOUD_LIMITS = Object.freeze({page_size: 100, invocation_attempts: 100, daily_attempts: 500, duration_ms: 300000, interval_ms: 1000, retry_attempts: 4, lease_ms: 120000, response_bytes: 1048576, import_bytes: 524288, import_records: 250});
 export class CloudRequestError extends Error {}
@@ -30,6 +32,7 @@ const messages = {
   response_too_large: 'The provider response exceeded the page safety limit.',
   invalid_retry_after: 'The provider returned an unsupported retry deadline.',
   incompatible_history_plan: 'The saved history refresh plan is incompatible. Start a fresh collection; saved records are retained.',
+  incompatible_schedule: 'The saved collection schedule is incompatible. Start a fresh collection; saved records are retained.',
 };
 
 function validateHistory(item) {
@@ -84,7 +87,7 @@ export function cloudSyncProgress(job) {
   }
   const total = groups.has(null) ? null : groups.size;
   const completed = [...groups].filter(([key, streams]) => key !== null && streams.every(stream => stream.complete)).length;
-  const current = job.streams.find(stream => !stream.complete);
+  const current = job.streams[nextCollectionStream(job)];
   const preparing = job.streams.some(stream => stream.kind === 'collection' && !stream.complete);
   const phase = preparing ? 'preparing' : !current ? 'complete' : current.kind === 'listing' ? 'listings' : current.kind === 'history' ? 'rentals' : 'preparing';
   const name = !preparing && current?.scope ? job.scope_names?.[stableKey(current.scope)] : null;
@@ -116,7 +119,7 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
   };
   const cleanAttempts = state => state.attempts = state.attempts.filter(at => at > now() - 86400000);
   const budget = state => {
-    const used = state.attempts.filter(at => at > now() - 86400000);
+    const used = effectiveMarketAttempts(state, now());
     return {max_attempts: cap.invocation_attempts, rolling_24h_attempts: cap.daily_attempts, run_seconds: cap.duration_ms / 1000, requests_per_second: 1000 / cap.interval_ms, used_24h: used.length, remaining_24h: Math.max(0, cap.daily_attempts - used.length), resets_at: used.length ? iso(used[0] + 86400000) : null};
   };
   const project = (job, state, readonly = false) => ({
@@ -126,9 +129,11 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       provider: 'marketapp', pages: job.pages, observations: job.observations, streams_complete: job.streams.filter(s => s.complete).length, streams_total: job.streams.length,
       scopes: job.scopes.length, unresolved_collections: job.unresolved_collections, warnings: job.warnings,
       history_refresh: historyRefreshProgress(job.streams),
-      market_cache: marketCacheProgress(job.streams),
+      market_cache: marketCacheProgress(job.streams, now()),
+      efficiency: collectionEfficiency(job),
       sync: cloudSyncProgress(job),
       next_allowed_at: Math.max(state.next_allowed_at, job.lease_until || 0), server_time: now(),
+      lease_until: job.lease_until || 0,
       requires_resume: readonly && isActive(job) && (job.lease_until || 0) <= now(),
       marketapp_budget: {invocation_used: job.invocation_used, invocation_limit: cap.invocation_attempts, rolling_24h_used: budget(state).used_24h, rolling_24h_limit: cap.daily_attempts, resets_at: budget(state).resets_at, run_seconds: cap.duration_ms / 1000},
     },
@@ -157,7 +162,7 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
   const finish = (job, status, reason = null) => {job.state = status; job.reason = reason; job.lease = null; job.lease_until = 0; job.updated_at = iso(now());};
   const pauseBudget = (state, job) => {
     if (!isActive(job)) return false;
-    const reason = state.attempts.length >= cap.daily_attempts ? 'daily_limit' : job.invocation_used >= cap.invocation_attempts ? 'invocation_limit' : now() >= job.invocation_deadline || state.next_allowed_at >= job.invocation_deadline ? 'duration_limit' : null;
+    const reason = effectiveMarketAttempts(state, now()).length >= cap.daily_attempts ? 'daily_limit' : job.invocation_used >= cap.invocation_attempts ? 'invocation_limit' : now() >= job.invocation_deadline || state.next_allowed_at >= job.invocation_deadline ? 'duration_limit' : null;
     if (reason) {finish(job, 'partial', reason); return true;}
     return false;
   };
@@ -179,6 +184,7 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
     await refreshClock();
     if (!secret.trim()) throw new CloudRequestError('Configure the private Marketapp token before collecting.');
     if (!['prices', 'rental_prices', 'collect'].includes(input.kind)) throw new CloudRequestError('This Telegram release supports listing and rental-price collection.');
+    if (Object.hasOwn(input, 'force_refresh') && typeof input.force_refresh !== 'boolean') throw new CloudRequestError('force_refresh must be a boolean.');
     let window;
     try {window = resolveCloudWindow(input, now(), {collectHistory: input.kind !== 'prices'});} catch (error) {throw new CloudRequestError(error.message);}
     const {scopes, unresolved} = scopedCollections(await repository.records());
@@ -188,12 +194,13 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       const kinds = input.kind === 'prices' ? ['listing'] : input.kind === 'rental_prices' ? ['history'] : ['listing', 'history'];
       state.market_cache = pruneMarketCache(state.market_cache, now());
       state.job = {id: state.next_job_id++, kind: input.kind, state: 'running', created_at: iso(now()), updated_at: iso(now()), reason: null,
-        collection_window: window, scopes, unresolved_collections: unresolved, page_size: cap.page_size, market_cache_version: MARKET_CACHE_POLICY.version,
+        collection_window: window, scopes, unresolved_collections: unresolved, page_size: cap.page_size, market_cache_version: MARKET_CACHE_POLICY.version, force_refresh: input.force_refresh === true,
         streams: [{kind: 'collection', scope: null}, ...scopes.flatMap(scope => kinds.map(kind => ({kind, scope})))].map(s => ({...s, cursor: null, started: false, complete: false, cursors: [], retry: 0, pages: 0, last_timestamp: null, ordered: true, scope_verified: true,
           ...(s.kind === 'history' ? {history_plan: planHistoryRefresh(state.history_coverage?.[stableKey(s.scope)], Math.floor(Date.parse(window.window_from) / 1000), Math.floor(now() / 1000))} : {}),
         })),
         pages: 0, observations: 0, market_observations: 0, scope_names: {}, warnings: [], invocation_used: 0, invocation_deadline: now() + cap.duration_ms, invocation: 1, lease: null, lease_until: 0};
-      for (const stream of state.job.streams) if (stream.kind !== 'collection') {
+      state.job.schedule = newCollectionSchedule(state.job.streams);
+      for (const stream of state.job.streams) if (stream.kind !== 'collection' && !state.job.force_refresh) {
         const cached = cachedMarketStream(state.market_cache, stream, state.job.page_size, now());
         if (cached) {stream.complete = true; stream.completion_reason = 'shared_market_cache'; stream.cache_source = cached;}
       }
@@ -221,9 +228,10 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       const job = state.job?.id === id ? state.job : await repository.job(id);
       if (!job || !['partial', 'running', 'queued'].includes(job.state)) throw new CloudRequestError('This traversal cannot resume. Start a fresh collection.');
       try {validateSavedCloudWindow(job.collection_window);} catch (error) {throw new CloudRequestError(error.message);}
+      if (!validCollectionSchedule(job)) throw new CloudRequestError(messages.incompatible_schedule);
       if (job.streams.some(stream => Object.hasOwn(stream, 'history_plan') && !validHistoryPlan(stream.history_plan, Math.floor(Date.parse(job.collection_window.window_from) / 1000), Math.floor(Date.parse(job.created_at) / 1000)))) throw new CloudRequestError(messages.incompatible_history_plan);
       // The stored window and stream parameters are immutable on Resume.
-      for (const field of ['kind', 'timeframe', 'date_from', 'date_to', 'page_size']) if (Object.hasOwn(input, field)) throw new CloudRequestError('Resume uses the saved collection parameters.');
+      for (const field of ['kind', 'timeframe', 'date_from', 'date_to', 'page_size', 'force_refresh', 'schedule', 'scheduling']) if (Object.hasOwn(input, field)) throw new CloudRequestError('Resume uses the saved collection parameters.');
       job.state = 'running'; job.reason = null; job.updated_at = iso(now()); job.invocation++; job.invocation_used = 0; job.invocation_deadline = now() + cap.duration_ms; job.lease = null; job.lease_until = 0; state.job = job;
       pauseBudget(state, job);
     });
@@ -247,7 +255,8 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       if (!isActive(job) || job.lease_until > now()) return {skip: true};
       if (pauseBudget(state, job)) return {};
       if (state.next_allowed_at > now()) return {skip: true};
-      const streamIndex = job.streams.findIndex(s => !s.complete);
+      if (!validCollectionSchedule(job)) {finish(job, 'failed', 'incompatible_schedule'); return {};}
+      const streamIndex = nextCollectionStream(job);
       if (streamIndex < 0) {finish(job, 'complete'); return {};}
       const stream = job.streams[streamIndex];
       if (Object.hasOwn(stream, 'history_plan') && !validHistoryPlan(stream.history_plan, Math.floor(Date.parse(job.collection_window.window_from) / 1000), Math.floor(Date.parse(job.created_at) / 1000))) {finish(job, 'failed', 'incompatible_history_plan'); return {};}
@@ -341,6 +350,7 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       if (cached) {
         state.market_cache = pruneMarketCache({...state.market_cache, [marketCacheKey(current, job.page_size)]: cached}, now());
       }
+      commitCollectionTurn(job, streamIndex);
       job.pages++; job.observations += parsed.records.length;
       finish(job, job.streams.every(s => s.complete) ? 'complete' : 'running');
       pauseBudget(state, job);

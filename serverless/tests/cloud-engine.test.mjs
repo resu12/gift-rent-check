@@ -507,7 +507,7 @@ test('fresh completed listing and history traversals are reused without records,
     assert.equal(planned.streams[0].complete, false, 'catalog is always refreshed');
     for (const stream of planned.streams.slice(1)) {assert.equal(stream.complete, true); assert.equal(stream.pages, 0); assert.equal(stream.started, false); assert.equal(stream.completion_reason, 'shared_market_cache'); assert.equal(stream.cache_source.job_id, first);}
     const result = await step(t, next); assert.equal(result.state, 'complete'); assert.equal(result.progress.pages, 1); assert.equal(result.progress.marketapp_budget.invocation_used, 1);
-    assert.deepEqual(result.progress.market_cache, {reused_streams: 2, total_streams: 2, ttl_seconds: 300, oldest_observed_at: observed[0]});
+    assert.deepEqual(result.progress.market_cache, {reused_streams: 2, total_streams: 2, ttl_seconds: 3600, oldest_observed_at: observed[0], oldest_age_seconds: Math.floor((t.now() - Date.parse(observed[0])) / 1000)});
     const state = (await t.repository.read()).state; assert.equal(JSON.stringify(state.market_cache), originalCache); assert.equal(JSON.stringify(state.history_coverage), originalCoverage);
     assert.deepEqual((await t.repository.records()).filter(row => ['listing', 'history'].includes(row.kind)), records);
   }
@@ -515,10 +515,10 @@ test('fresh completed listing and history traversals are reused without records,
   const indexText = JSON.stringify(before.market_cache); assert.equal(indexText.includes('nft-a'), false); assert.equal(indexText.includes('owner'), false);
 });
 
-test('market cache TTL begins at its first actual provider page and expires at exactly five minutes', async () => {
+test('market cache TTL begins at its first actual provider page and expires at exactly sixty minutes', async () => {
   const responses = [response(catalog), page('next'), page(null)], t = setup(responses); await seed(t); const first = await start(t);
   await step(t, first); await advanceStep(t, first); const firstObserved = t.now(); t.advance(30000); await step(t, first);
-  t.advance(firstObserved + 300000 - 1 - t.now()); const cached = await start(t); assert.equal((await t.repository.job(cached)).streams[1].cache_source.job_id, first);
+  t.advance(firstObserved + 3600000 - 1 - t.now()); const cached = await start(t); assert.equal((await t.repository.job(cached)).streams[1].cache_source.job_id, first);
   await t.engine.stopJob(ctx, {job_id: cached}); t.advance(1); const expired = await start(t);
   assert.equal((await t.repository.job(expired)).streams[1].cache_source, undefined); assert.deepEqual((await t.repository.read()).state.market_cache, {});
 });
@@ -526,7 +526,7 @@ test('market cache TTL begins at its first actual provider page and expires at e
 test('slow resumed traversals and partially collected streams never publish a completed market cache', async () => {
   const responses = [response(catalog), page('next'), page(null)], t = setup(responses); await seed(t); const first = await start(t);
   await step(t, first); await advanceStep(t, first); assert.deepEqual((await t.repository.read()).state.market_cache, {});
-  await t.engine.stopJob(ctx, {job_id: first}); t.advance(300000); await t.engine.resumeJob(ctx, {job_id: first}); await step(t, first);
+  await t.engine.stopJob(ctx, {job_id: first}); t.advance(3600000); await t.engine.resumeJob(ctx, {job_id: first}); await step(t, first);
   assert.deepEqual((await t.repository.read()).state.market_cache, {});
   const next = await start(t); assert.equal((await t.repository.job(next)).streams[1].cache_source, undefined);
 });
@@ -552,7 +552,105 @@ test('cached history cannot substitute for the full reconciliation due after sev
 test('market cache keys freeze page size and cache reuse survives saved-job resume without renewal', async () => {
   const responses = [response(catalog), page(null)], t = setup(responses); await seed(t); const first = await start(t); await step(t, first); await advanceStep(t, first);
   const cached = await start(t); const source = (await t.repository.job(cached)).streams[1].cache_source; await t.engine.stopJob(ctx, {job_id: cached});
-  t.advance(400000); await t.engine.resumeJob(ctx, {job_id: cached}); assert.deepEqual((await t.repository.job(cached)).streams[1].cache_source, source);
+  t.advance(4000000); await t.engine.resumeJob(ctx, {job_id: cached}); assert.deepEqual((await t.repository.job(cached)).streams[1].cache_source, source);
   responses.push(response(catalog)); assert.equal((await step(t, cached)).state, 'complete');
   t.engine = createCloudEngine({...t.deps, limits: {page_size: 10}}); const different = await start(t); assert.equal((await t.repository.job(different)).streams[1].cache_source, undefined);
+});
+
+const secondScope = `0:${'cd'.repeat(32)}`;
+const seedTwoScopes = t => seed(t, [{kind: 'portfolio', key: 'second-gift', observed_at: new Date(t.now()).toISOString(), record: {nft_address: 'second-gift', collection_address: secondScope, is_portfolio: true}}]);
+const twoCatalog = [{address: scope, name: 'Alpha Gifts', extra_data: {}}, {address: secondScope, name: 'Beta Gifts', extra_data: {}}];
+const requestedScopes = t => t.requests.slice(1).map(request => new URL(request.url).searchParams.get('collection_address'));
+
+test('new collection schedules rotate pages among scopes before revisiting a collection', async () => {
+  const ts = Math.floor(Date.parse('2026-10-09T12:00:00Z') / 1000);
+  const t = setup([response(twoCatalog), page('a-list'), page('b-list'), historyResponse('a-history', [ts - 1]), historyResponse('b-history', [history(ts - 1, {collection_address: secondScope})]), page('a-list-next')]);
+  await seedTwoScopes(t); const id = await start(t, 'collect');
+  assert.deepEqual((await t.repository.job(id)).schedule, {version: 1, mode: 'round_robin', order: [1, 3, 2, 4], next_index: 0});
+  await step(t, id); const afterFirst = await advanceStep(t, id);
+  assert.equal(afterFirst.progress.sync.current_collection, 'Beta Gifts'); assert.equal(afterFirst.progress.sync.phase, 'listings');
+  const afterSecond = await advanceStep(t, id); assert.equal(afterSecond.progress.sync.current_collection, 'Alpha Gifts'); assert.equal(afterSecond.progress.sync.phase, 'rentals');
+  await advanceStep(t, id); const sampled = await advanceStep(t, id);
+  assert.equal(sampled.state, 'running'); assert.equal(sampled.progress.sync.completed, 0, 'initial samples are not complete coverage');
+  assert.deepEqual(sampled.progress.efficiency, {page_size: 100, recommended_page_size: 100, scheduling: 'round_robin', collections_started: 2, collections_total: 2});
+  await advanceStep(t, id); assert.deepEqual(requestedScopes(t), [scope, secondScope, scope, secondScope, scope]);
+  assert.equal(new URL(t.requests.at(-1).url).searchParams.get('cursor'), 'a-list');
+});
+
+test('a retry stays on the same scheduled stream and preserves global cooldown and request accounting', async () => {
+  const t = setup([response(twoCatalog), response({}, 429, '3'), page('a'), page('b')]); await seedTwoScopes(t); const id = await start(t);
+  await step(t, id); await advanceStep(t, id); let saved = await t.repository.job(id);
+  assert.equal(saved.schedule.next_index, 0); assert.equal(saved.streams[1].pages, 0);
+  assert.equal((await t.engine.getJobs(ctx)).jobs[0].progress.sync.current_collection, 'Alpha Gifts');
+  await advanceStep(t, id); assert.equal(t.requests.length, 2);
+  t.advance(2000); await step(t, id); assert.equal((await t.repository.job(id)).schedule.next_index, 1);
+  await advanceStep(t, id); assert.deepEqual(requestedScopes(t), [scope, scope, secondScope]);
+  assert.equal((await t.repository.read()).state.attempts.length, 4);
+});
+
+test('the schedule cursor commits with its valid page and survives a crash after commit', async () => {
+  const t = setup([response(twoCatalog), page('a'), page('b')]); await seedTwoScopes(t); const id = await start(t); await step(t, id);
+  const append = t.repository.append; let crash = true;
+  t.repository.append = async (revision, event) => {const saved = await append(revision, event); if (crash && event.raw_body && event.job?.streams[1].pages === 1) {crash = false; throw new Error('simulated crash after commit');} return saved;};
+  await assert.rejects(advanceStep(t, id), /simulated crash/);
+  const row = t.database.prepare('SELECT * FROM cloud_events ORDER BY sequence DESC LIMIT 1').get();
+  assert.equal(JSON.parse(row.job_json).schedule.next_index, 1); assert.equal(JSON.parse(row.job_json).streams[1].cursor, 'a'); assert.equal(JSON.parse(row.records_json).length, 1); assert.ok(row.raw_body);
+  t.repository.append = append; t.engine = createCloudEngine(t.deps); await t.engine.resumeJob(ctx, {job_id: id}); await advanceStep(t, id);
+  assert.deepEqual(requestedScopes(t), [scope, secondScope]);
+});
+
+test('legacy resumes preserve sequential scheduling and their original ten-item pages', async () => {
+  const t = setup([response(twoCatalog), page('a'), page(null), page('b')]); await seedTwoScopes(t); const id = await start(t);
+  await editState(t, state => {delete state.job.schedule; state.job.page_size = 10;});
+  await step(t, id); await advanceStep(t, id); await t.engine.stopJob(ctx, {job_id: id}); await t.engine.resumeJob(ctx, {job_id: id});
+  await advanceStep(t, id); const result = await advanceStep(t, id);
+  assert.deepEqual(requestedScopes(t), [scope, scope, secondScope]); assert.equal(result.progress.efficiency.scheduling, 'sequential'); assert.equal(result.progress.efficiency.page_size, 10);
+  assert.ok(t.requests.slice(1).every(request => new URL(request.url).searchParams.get('limit') === '10'));
+});
+
+test('force refresh bypasses a sixty-minute comparison cache but can populate new source evidence', async () => {
+  const responses = [response(catalog), page(null)], t = setup(responses); await seed(t); const first = await start(t); await step(t, first); await advanceStep(t, first);
+  t.advance(1800000); const cached = await start(t); let saved = await t.repository.job(cached); assert.equal(saved.streams[1].cache_source.job_id, first);
+  const projected = (await t.engine.getJobs(ctx)).jobs[0]; assert.equal(projected.progress.market_cache.ttl_seconds, 3600); assert.equal(projected.progress.market_cache.oldest_age_seconds, 1800);
+  await t.engine.stopJob(ctx, {job_id: cached}); responses.push(response(catalog), page(null, [listing({price_per_day: '190000000'})]));
+  const fresh = await start(t, 'prices', {force_refresh: true}); saved = await t.repository.job(fresh);
+  assert.equal(saved.force_refresh, true); assert.equal(saved.streams[1].cache_source, undefined); assert.equal(saved.streams[1].complete, false);
+  await step(t, fresh); await advanceStep(t, fresh);
+  assert.equal(Object.values((await t.repository.read()).state.market_cache)[0].job_id, fresh);
+  const prices = (await t.repository.records()).filter(record => record.kind === 'listing'); assert.equal(prices.length, 2); assert.equal(prices[0].record.source_json.price_per_day, '170000000'); assert.equal(prices[1].record.source_json.price_per_day, '190000000');
+});
+
+test('force refresh input is strictly boolean and cannot change an existing traversal on resume', async () => {
+  const t = setup(); await seed(t);
+  for (const force_refresh of ['true', 1, null, {}]) await assert.rejects(start(t, 'prices', {force_refresh}), /boolean/);
+  const id = await start(t, 'prices', {force_refresh: true}); await t.engine.stopJob(ctx, {job_id: id});
+  for (const input of [{force_refresh: false}, {schedule: {}}, {scheduling: 'sequential'}]) await assert.rejects(t.engine.resumeJob(ctx, {job_id: id, ...input}), /saved collection parameters/);
+  await t.engine.resumeJob(ctx, {job_id: id}); assert.equal((await t.repository.job(id)).force_refresh, true); assert.equal(t.requests.length, 0);
+});
+
+test('malformed saved schedule fails closed on resume and before provider access', async () => {
+  const t = setup(); await seed(t); const id = await start(t);
+  await editState(t, state => {state.job.schedule.order = [999];});
+  await t.engine.stopJob(ctx, {job_id: id}); await assert.rejects(t.engine.resumeJob(ctx, {job_id: id}), /schedule is incompatible/);
+  await editState(t, state => {state.job.state = 'running';}); assert.equal((await step(t, id)).state, 'failed'); assert.equal(t.requests.length, 0);
+});
+
+test('an expiring administrative allowance reset retains history and still stops at 500 new provider attempts', async () => {
+  const responses = [response(catalog), ...Array.from({length: 499}, (_, index) => page(`new-${index}`, []))], t = setup(responses);
+  await seed(t); const resetAt = t.now(), expiresAt = resetAt + 3600000;
+  await editState(t, state => {
+    state.attempts = Array.from({length: 500}, (_, index) => resetAt - 500 + index);
+    state.marketapp_budget_reset = {id: 'test-reset-20261009', at: resetAt, expires_at: expiresAt, local_date: '2026-10-09', time_zone: 'Europe/Berlin', excluded_attempts: [...state.attempts]};
+  });
+  const id = await start(t); let result;
+  for (let index = 0; index < 500; index++) {
+    result = await step(t, id);
+    if (result.state === 'partial' && index < 499) await t.engine.resumeJob(ctx, {job_id: id});
+    t.advance(1000);
+  }
+  assert.equal(result.state, 'partial'); assert.equal(result.progress.marketapp_budget.rolling_24h_used, 500);
+  let state = (await t.repository.read()).state; assert.equal(state.job.reason, 'daily_limit'); assert.equal(state.attempts.length, 1000);
+  await t.engine.resumeJob(ctx, {job_id: id}); await step(t, id); assert.equal(t.requests.length, 500);
+  t.advance(expiresAt - t.now()); const expired = (await t.engine.getJobs(ctx)).jobs[0]; assert.equal(expired.progress.marketapp_budget.rolling_24h_used, 1000);
+  await t.engine.resumeJob(ctx, {job_id: id}); await step(t, id); assert.equal(t.requests.length, 500); state = (await t.repository.read()).state; assert.equal(state.attempts.length, 1000);
 });

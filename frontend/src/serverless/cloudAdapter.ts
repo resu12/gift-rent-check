@@ -93,12 +93,14 @@ export function createCloudDashboardAdapter(transport: CloudTransport, options: 
       if (!Array.isArray(response.jobs)) throw new Error('The server returned an unexpected collection list. Reload saved data.');
       return response.jobs.map(job => decorate(readJob({ job })));
     },
-    startJob(kind, _csrf, selection) {
+    startJob(kind, _csrf, selection, options) {
       if (!CLOUD_JOB_KINDS.includes(kind)) return Promise.reject(new Error('Wallet discovery and ownership refresh are not available in Telegram yet.'));
       const chosen = selection ?? { source: 'listings', timeframe: '30d' };
+      if (options?.forceRefresh !== undefined && typeof options.forceRefresh !== 'boolean') return Promise.reject(new Error('Force refresh must be enabled or disabled.'));
       pricingQuery(chosen);
       if (kind !== 'prices') { const error = historyCollectionError(chosen); if (error) return Promise.reject(new Error(error)); }
       return launch('startJob', { kind, timeframe: chosen.timeframe,
+        ...(options?.forceRefresh === true ? { force_refresh: true } : {}),
         ...(chosen.timeframe === 'custom' ? { date_from: chosen.dateFrom, date_to: chosen.dateTo } : {}),
       });
     },

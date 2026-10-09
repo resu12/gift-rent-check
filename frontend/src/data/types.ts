@@ -175,6 +175,13 @@ export interface Job {
     total_streams: number;
     ttl_seconds: number;
     oldest_observed_at: string | null;
+    oldest_age_seconds?: number | null;
+  }; efficiency?: {
+    page_size: number;
+    recommended_page_size: number;
+    scheduling: 'round_robin' | 'sequential';
+    collections_started: number;
+    collections_total: number | null;
   } };
   stop_requested: boolean;
   collection_window?: {
@@ -187,6 +194,8 @@ export interface Job {
   } | null;
 }
 
+export interface JobStartOptions { forceRefresh?: boolean }
+
 export interface DashboardAdapter {
   readonly mode?: 'local' | 'serverless';
   readonly ownedPriceTransport?: import('./ownedPriceRefresh.ts').OwnedPriceTransport;
@@ -195,7 +204,7 @@ export interface DashboardAdapter {
   exportCsv?(dashboard: Dashboard, selection: PricingSelection): void;
   getDashboard(selection: PricingSelection, signal?: AbortSignal): Promise<Dashboard>;
   getJobs(signal?: AbortSignal): Promise<Job[]>;
-  startJob(kind: JobKind, csrf: string, selection?: PricingSelection): Promise<Job>;
+  startJob(kind: JobKind, csrf: string, selection?: PricingSelection, options?: JobStartOptions): Promise<Job>;
   resumeJob(id: number, csrf: string): Promise<Job>;
   stopJob(id: number, csrf: string): Promise<Job>;
   exportUrl(selection: PricingSelection): string;

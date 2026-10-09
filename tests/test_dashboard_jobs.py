@@ -312,6 +312,7 @@ def test_collection_job_uses_only_selected_wallet_scopes_including_unknown(jobs,
     def fake_collect(store, settings, **kwargs):
         calls.append(kwargs)
         assert settings.max_collections >= len(expected)
+        assert settings.page_size == 100
         return CollectionResult(1, "complete", None, 0)
     monkeypatch.setattr(jobs_module, "collect", fake_collect)
     job, _ = jobs.enqueue("collect", WALLET)
@@ -388,6 +389,8 @@ def test_rental_price_progress_uses_history_stream_checkpoints(jobs):
         "pages": 2, "streams_complete": 1, "streams_total": 2,
         "sync": {"phase": "rentals", "completed": 0, "total": 1, "unit": "collections",
                  "current_collection": None, "processed_items": 0},
+        "efficiency": {"page_size": None, "recommended_page_size": 100, "scheduling": "sequential",
+                       "collections_started": 1, "collections_total": 1},
     }
 
 

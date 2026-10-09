@@ -128,6 +128,19 @@ test('new cloud job freezes selected window and driver starts only on explicit a
   assert.equal(calls[1].name, 'stepJob');
 });
 
+test('forced comparison refresh is explicit on new cloud jobs and never carried into Resume', async () => {
+  const calls: {name: string; input: unknown}[] = [];
+  const adapter = createCloudDashboardAdapter(mockTransport((name, input) => {calls.push({name, input}); return {job: saved('complete')};}));
+  await adapter.startJob('rental_prices', '', {source: 'rentals', timeframe: '60d'}, {forceRefresh: true});
+  await adapter.startJob('prices', '', {source: 'listings', timeframe: '30d'});
+  await adapter.resumeJob(7, '');
+  assert.deepEqual(calls, [
+    {name: 'startJob', input: {kind: 'rental_prices', timeframe: '60d', force_refresh: true}},
+    {name: 'startJob', input: {kind: 'prices', timeframe: '30d'}},
+    {name: 'resumeJob', input: {job_id: 7}},
+  ]);
+});
+
 test('hiding while Start is pending prevents the first step and allows manual recovery', async () => {
   const pending = deferred<{ job: Job }>(); const calls: string[] = [];
   const adapter = createCloudDashboardAdapter(mockTransport(name => { calls.push(name); return pending.promise; }));

@@ -98,10 +98,17 @@ function jobProgress(job: Job): SyncProgress {
   return progress(job.progress?.streams_complete, job.progress?.streams_total, 'checks', terminal);
 }
 
-function cacheNote(job: Job): string | null {
+function cacheNote(job: Job, now: number): string | null {
   const cache = object(job.progress?.market_cache), reused = count(cache?.reused_streams), total = count(cache?.total_streams);
   if (reused === null || total === null || reused <= 0 || reused > total) return null;
-  return `${number(reused)} comparison scan${reused === 1 ? '' : 's'} reused from recent saved data.`;
+  const storedAge = cache?.oldest_age_seconds;
+  const observed = typeof cache?.oldest_observed_at === 'string' ? Date.parse(cache.oldest_observed_at) : NaN;
+  const age = typeof storedAge === 'number' && Number.isFinite(storedAge) && storedAge >= 0 ? storedAge
+    : Number.isFinite(observed) && observed <= now ? (now - observed) / 1000 : null;
+  const ageText = age === null ? 'original observation time retained' : age < 60 ? 'oldest data under a minute old'
+    : age < 3600 ? `oldest data ${Math.floor(age / 60)} min old` : `oldest data ${Math.floor(age / 3600)} h old`;
+  const ttl = count(cache?.ttl_seconds);
+  return `${number(reused)} comparison scan${reused === 1 ? '' : 's'} reused · ${ageText}${ttl && ttl <= 3600 ? ` · cache up to ${Math.ceil(ttl / 60)} min` : ''}.`;
 }
 
 function pausedMessage(reason: Reason): string {
@@ -132,7 +139,11 @@ export function presentJobSync(job: Job, options: SyncOptions = {}): SyncPresent
   } else if (job.state === 'failed') {
     state = 'failed'; message = failedMessage(reason);
   } else if (job.state === 'partial' || requiresResume) {
-    state = 'paused'; message = pausedMessage(reason);
+    state = 'paused';
+    const budget = object(job.progress?.marketapp_budget), used = count(budget?.rolling_24h_used), limit = count(budget?.rolling_24h_limit);
+    message = reason === 'daily' && used !== null && limit !== null && limit > 0 && used < limit
+      ? 'Your request allowance is available again. Continue from your saved progress.'
+      : pausedMessage(reason);
   } else if (reason === 'retry') {
     state = 'waiting'; message = 'Waiting for the data provider before retrying. Your progress is saved.';
   } else if (job.state === 'queued' || detail?.phase === 'preparing') {
@@ -149,7 +160,7 @@ export function presentJobSync(job: Job, options: SyncOptions = {}): SyncPresent
   return {
     title: (['paused', 'complete', 'failed'].includes(state) ? savedTitles[job.kind] : titles[job.kind]) || 'Saved data', objective: objective(job, options.timeframeLabel), state, stateLabel: labels[state], message,
     progress: jobProgress(job), actionLabel: state === 'paused' ? 'Continue' : state === 'failed' ? reason === 'cursor' ? 'Start again' : 'Retry' : null,
-    rawReason: job.reason, cacheNote: cacheNote(job),
+    rawReason: job.reason, cacheNote: cacheNote(job, options.now ?? Date.now()),
   };
 }
 

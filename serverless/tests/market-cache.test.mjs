@@ -21,7 +21,7 @@ test('cache keys use canonical collection identity and exact fixed traversal par
 test('partial, legacy, cached, unordered and wrong-collection streams cannot seed the index', () => {
   for (const stream of [{...listing, complete: false}, {...listing, started: false}, {...listing, pages: 0}, {...listing, cursor: 'pending'}, {...listing, cache_source: {job_id: 4}}, {...history, ordered: false}, {...history, scope_verified: false}, {...history, history_plan: undefined}]) assert.equal(completedMarketStream(job(stream), 1, now), null);
   assert.equal(completedMarketStream({...job(listing), market_cache_version: undefined}, 1, now), null);
-  assert.equal(completedMarketStream(job({...listing, first_observed_at: at(-300000)}), 1, now), null);
+  assert.equal(completedMarketStream(job({...listing, first_observed_at: at(-3600000)}), 1, now), null);
 });
 
 test('history cache accepts only sufficient requested-window and scan coverage', () => {
@@ -34,7 +34,7 @@ test('history cache accepts only sufficient requested-window and scan coverage',
 
 test('cache cleanup rejects future, expired, malformed or mismatched entries and caps its public index', () => {
   const entry = completedMarketStream(job(listing), 1, now), key = marketCacheKey(listing, 100);
-  for (const bad of [{...entry, first_observed_at: at(-300000)}, {...entry, last_observed_at: at(1)}, {...entry, first_observed_at: at(0)}, {...entry, version: 2}, {...entry, job_id: '1'}, {...entry, complete: false}]) assert.deepEqual(pruneMarketCache({[key]: bad}, now), {});
+  for (const bad of [{...entry, first_observed_at: at(-3600000)}, {...entry, last_observed_at: at(1)}, {...entry, first_observed_at: at(0)}, {...entry, version: 2}, {...entry, job_id: '1'}, {...entry, complete: false}]) assert.deepEqual(pruneMarketCache({[key]: bad}, now), {});
   assert.deepEqual(pruneMarketCache({wrongKey: entry}, now), {});
   const many = Object.fromEntries(Array.from({length: MARKET_CACHE_POLICY.max_entries + 1}, (_, i) => {
     const collection = `collection-${i}`; return [marketCacheKey({...listing, scope: collection}, 100), {...entry, collection_address: collection, first_observed_at: at(-2000 - i)}];

@@ -3,7 +3,7 @@ import {validHistoryPlan} from './history-refresh.js';
 
 // Reuse completed public comparison traversals, never personal portfolio data.
 // Records remain in their original events, with their original observed times.
-export const MARKET_CACHE_POLICY = Object.freeze({version: 1, ttl_seconds: 300, max_entries: 1000});
+export const MARKET_CACHE_POLICY = Object.freeze({version: 1, ttl_seconds: 3600, max_entries: 1000});
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const timestamp = value => typeof value === 'string' && /Z$/.test(value) ? Date.parse(value) : NaN;
 const kind = value => ['listing', 'history'].includes(value);
@@ -57,8 +57,9 @@ export function completedMarketStream(job, streamIndex, now) {
   return usable(entry, now) ? entry : null;
 }
 
-export function marketCacheProgress(streams) {
+export function marketCacheProgress(streams, now = NaN) {
   const eligible = streams.filter(stream => kind(stream.kind)), cached = eligible.filter(stream => stream.cache_source);
   const oldest = cached.map(stream => stream.cache_source.first_observed_at).sort((a, b) => timestamp(a) - timestamp(b))[0] ?? null;
-  return {reused_streams: cached.length, total_streams: eligible.length, ttl_seconds: MARKET_CACHE_POLICY.ttl_seconds, oldest_observed_at: oldest};
+  return {reused_streams: cached.length, total_streams: eligible.length, ttl_seconds: MARKET_CACHE_POLICY.ttl_seconds, oldest_observed_at: oldest,
+    oldest_age_seconds: oldest && Number.isFinite(now) ? Math.max(0, Math.floor((now - timestamp(oldest)) / 1000)) : null};
 }

@@ -8,6 +8,12 @@ import type { OwnedPriceEndpoint } from './ownedPriceRefresh.ts';
 
 const localAdapter = createLocalDashboardAdapter();
 
+test('Telegram cache bypass cannot be submitted to the local dashboard', context => {
+  const calls = mockRequests(context);
+  assert.throws(() => localAdapter.startJob('prices', 'csrf', {source: 'listings', timeframe: '30d'}, {forceRefresh: true}), /Telegram only/);
+  assert.equal(calls.length, 0);
+});
+
 const fixture = { id: 7, kind: 'rental_prices', state: 'queued' } as Job;
 
 function mockRequests(context: TestContext) {

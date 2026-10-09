@@ -13,11 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
 from typing import Callable
-from urllib.parse import unquote
 
 from .addresses import address_key, canonical_address, preferred_address
 from .api import ApiClient, RETRY_STATUSES
 from .collector import collect
+from .collection_schedule import collection_key, efficiency_progress, next_stream, scheduling
 from .price_collection import collect_prices, collect_rental_prices
 from .pricing_window import dashboard_window, validate_new_history_window, validate_saved_dashboard_window, window_metadata
 from .discovery import discover
@@ -300,17 +300,13 @@ def _market_sync_progress(store, job, settings, streams):
     saved = {signature(stream): stream for stream in streams}
     manifest = settings.get("streams")
     planned = manifest if isinstance(manifest, list) else streams
-    work = [{**spec, "state": saved.get(signature(spec), {}).get("state", "pending")} for spec in planned]
+    work = [{**spec, "state": saved.get(signature(spec), {}).get("state", "pending"),
+             "pages": saved.get(signature(spec), {}).get("pages", 0)} for spec in planned]
     groups = {}
     for stream in work:
         if stream["kind"] == "collection":
             continue
-        scope = stream.get("params", {}).get("collection_address")
-        if scope is None and stream["kind"] == "attribute":
-            path = stream["path"]
-            if path.startswith("/v1/collections/") and path.endswith("/attributes/"):
-                scope = unquote(path[len("/v1/collections/"):-len("/attributes/")])
-        stream["scope"] = address_key(scope)
+        stream["scope"] = collection_key(stream)
         groups.setdefault(stream["scope"], []).append(stream)
     # Unfiltered scans cannot truthfully claim a known collection denominator.
     total = None if None in groups else len(groups)
@@ -319,7 +315,7 @@ def _market_sync_progress(store, job, settings, streams):
     processed = store.connection.execute("""SELECT count(*) FROM observations o JOIN pages p ON p.id=o.page_id
         JOIN streams s ON s.id=p.stream_id WHERE s.run_id=? AND s.kind IN ('listing','history')""", (job["run_id"],)).fetchone()[0]
     running = next((stream for stream in work if stream["state"] == "running"), None)
-    current = running or next((stream for stream in work if stream["state"] != "complete"), None)
+    current = running or next_stream(work, scheduling(settings), broad_first=bool(settings.get("listing_refresh")))
     if ((running is None or running["kind"] == "collection")
             and any(stream["kind"] == "collection" and stream["state"] != "complete" for stream in work)):
         return _sync_progress("preparing", total=total, processed_items=processed)
@@ -356,6 +352,7 @@ def progress_for(database, job):
             if listing:
                 progress["listing_refresh"] = listing
             progress["sync"] = _market_sync_progress(store, job, settings, streams)
+            progress["efficiency"] = efficiency_progress(settings, streams)
             return progress
         discovery = DiscoveryStore(store)
         run = discovery.get_run(job["run_id"])
@@ -553,7 +550,9 @@ def execute_job(job, jobs, settings, discovery_settings, review_path=None, cance
                 scopes = sorted({preferred_address(gift["collection_address"]) for gift in portfolio if gift.get("collection_address")})
                 if any(not gift.get("collection_address") for gift in portfolio):
                     scopes.append(None)
-                configured = replace(settings, max_collections=max(settings.max_collections, len(scopes)))
+                # Fresh dashboard work uses the API's full supported page size.
+                # The collector keeps the saved manifest's limit on resume.
+                configured = replace(settings, page_size=100, max_collections=max(settings.max_collections, len(scopes)))
                 return collect(store, configured, resume_id=resume_id, scope_manifest=scopes if resume_id is None else None, on_run_created=callback, client_factory=GuardedMarket, history_since=history_since)
             seeds = []
             if job["kind"] == "refresh":
