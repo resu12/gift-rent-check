@@ -50,7 +50,7 @@ async function main() {
 
   if (action === 'publish') {
     if (!existsSync(join(project, 'dist/index.html'))) throw new Error('Build with scripts/build-serverless.ps1 first.');
-    const status = run(join(project, 'tools/preflight.mjs'), [], env);
+    const status = run(join(project, 'tools/preflight.mjs'), ['--app-id', String(appId)], env);
     if (status !== 0) return status;
   }
   // Prevent the CLI from finding a different project's .tgcloud in an ancestor.

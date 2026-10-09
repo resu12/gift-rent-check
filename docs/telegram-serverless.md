@@ -40,6 +40,24 @@ node serverless/tools/verify-owned-prices.mjs --app-id YOUR_APP_ID --owner-id YO
 node serverless/tools/verify-owned-prices.mjs --app-id YOUR_APP_ID --owner-id YOUR_TELEGRAM_USER_ID --smoke
 ```
 
+## Connect and disconnect a wallet
+
+The wallet control can open **TON Connect** to approve a read-only connection in your wallet app, including compatible wallets launched through Telegram. It supports TON mainnet. Disconnect removes that connection from this browser; it keeps the saved portfolio and its refresh behavior. Reconnecting does not import gifts, change portfolio membership, or start a wallet scan. The saved dashboard remains tied to the wallet in its imported dataset, and a different connected wallet is identified separately so its address cannot relabel those gifts.
+
+Telegram's verified owner ID still controls access to backend data. The app requests no transaction, message signature, or `ton_proof`; the connected address is informational and grants no backend authorization. Do not treat this optional connection as proof that a visitor owns the saved portfolio. A device may restore its previous TON Connect session when the app opens.
+
+Set these **public** frontend settings before building for your deployment. Existing environment values override `frontend/.env.local`. A sample is in `frontend/.env.example`; never put API keys in any `VITE_` setting.
+
+```powershell
+$env:VITE_TONCONNECT_APP_URL = 'https://appYOUR_APP_ID.tgcloud.ai'
+$env:VITE_TELEGRAM_RETURN_URL = 'https://t.me/YOUR_BOT?startapp'
+& .\scripts\build-serverless.ps1 -Pnpm 'C:\path\to\pnpm.cmd'
+```
+
+Use the app's HTTPS origin with no path, query, credentials, or fragment. The optional return URL must be a `https://t.me/YOUR_BOT?startapp` Mini App link; omit it if the bot has no configured Main Mini App. Configured builds emit a public `/tonconnect-manifest.json` and a 180 × 180 PNG icon. Both must be reachable over HTTPS without authentication and allow cross-origin reads. The manifest identifies **Gift Rent Check**, the deployed origin, and its icon. The publish guard rejects a manifest for any app other than the explicit `-AppId` target.
+
+Without `VITE_TONCONNECT_APP_URL`, builds leave wallet connections disabled, which keeps fresh checkouts and CI portable. The local Python dashboard continues to use its configured saved wallet. TON Connect does not add cloud wallet discovery or change the read-only provider API restrictions. See the official [TON Connect manifest requirements](https://docs.ton.org/applications/ton-connect/core-concepts#manifest).
+
 ## Marketapp request limits
 
 | Limit | Default |

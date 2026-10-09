@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { Component, lazy, Suspense, useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import App from '../App';
 import { createCloudDashboardAdapter } from './cloudAdapter';
 import { createCloudTransport } from './cloudTransport';
@@ -10,6 +11,17 @@ import './cloud.css';
 
 // One key for this page opening, including React's development remount checks.
 const pageSessionId = crypto.randomUUID();
+const CloudWalletControl = lazy(() => import('./CloudWalletControl').then(module => ({default: module.CloudWalletControl})));
+
+// Isolate wallet bundle, SDK and storage failures from the saved dashboard.
+class WalletConnectionBoundary extends Component<{children: ReactNode}, {failed: boolean}> {
+  state = {failed: false};
+  static getDerivedStateFromError() { return {failed: true}; }
+  render() {
+    if (this.state.failed) return <span className="wallet-chip" role="status" title="Reload the app to retry. Saved portfolio is still available.">Wallet connection unavailable</span>;
+    return this.props.children;
+  }
+}
 
 export default function CloudApp() {
   const [{ adapter, refresh, startup }] = useState(() => {
@@ -36,5 +48,8 @@ export default function CloudApp() {
       queueMicrotask(() => { if (effectGeneration.current === generation) leave(); });
     };
   }, [adapter, startup]);
-  return <App adapter={adapter} ownedPriceStatus={<OwnedPriceStatus driver={refresh} />} />;
+  return <App adapter={adapter} ownedPriceStatus={<OwnedPriceStatus driver={refresh} />}
+    walletControl={__TON_CONNECT_CONFIG__ ? data => <WalletConnectionBoundary><Suspense fallback={<button className="button secondary" disabled>Loading wallet…</button>}>
+      <CloudWalletControl savedWallet={data?.wallet ?? null} dashboardReady={Boolean(data)} />
+    </Suspense></WalletConnectionBoundary> : undefined} />;
 }

@@ -110,6 +110,19 @@ test('publication still blocks secrets in the static bundle and propagates CLI f
   assert.equal(f.run(['--action', 'publish', '--app-id', '54321'], {TEST_CLI_EXIT: '7'}).status, 7);
 });
 
+test('publication passes its guarded app ID to the TON Connect manifest check', t => {
+  const f = fixture(t);
+  const path = join(f.project, 'dist/tonconnect-manifest.json');
+  const manifest = {url: 'https://app65432.tgcloud.ai', name: 'Gift Rent Check', iconUrl: 'https://app65432.tgcloud.ai/wallet-icon.png'};
+  writeFileSync(join(f.project, 'dist/wallet-icon.png'), readFileSync(new URL('../../frontend/public/wallet-icon.png', import.meta.url)));
+  writeFileSync(path, JSON.stringify(manifest));
+  rejected(f.run(['--action', 'publish', '--app-id', '54321']));
+  assert.equal(f.calls().some(c => c.stage === 'cli'), false);
+  writeFileSync(path, JSON.stringify({...manifest, url: 'https://app54321.tgcloud.ai', iconUrl: 'https://app54321.tgcloud.ai/wallet-icon.png'}));
+  assert.equal(f.run(['--action', 'publish', '--app-id', '54321']).status, 0);
+  assert.equal(f.calls().filter(c => c.stage === 'cli').length, 1);
+});
+
 test('login rejects environment tokens and passes interactive control to the official CLI', t => {
   const f = fixture(t);
   rejected(f.run(['--action', 'login'], {TGCLOUD_TOKEN: token}));

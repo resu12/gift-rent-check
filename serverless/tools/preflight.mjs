@@ -21,8 +21,24 @@ try {
   await check(root);
   const html = await readFile(join(root, 'index.html'), 'utf8');
   if (!html.includes('https://telegram.org/js/telegram-web-app.js?64')) throw new Error();
-  console.log('Private owner, provider configuration, and credential-free static build verified.');
+  // A wallet receives this public manifest. Never publish a build that asks it
+  // to connect to a different deployment from the explicitly guarded target.
+  let manifest;
+  try { manifest = JSON.parse(await readFile(join(root, 'tonconnect-manifest.json'), 'utf8')); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (manifest !== undefined) {
+    const args = process.argv.slice(2);
+    if (args.length !== 2 || args[0] !== '--app-id' || !/^[1-9]\d*$/.test(args[1])) throw new Error();
+    const expectedOrigin = `https://app${args[1]}.tgcloud.ai`;
+    if (manifest?.url !== expectedOrigin || manifest?.name !== 'Gift Rent Check' ||
+        manifest?.iconUrl !== `${expectedOrigin}/wallet-icon.png` ||
+        Object.keys(manifest).sort().join(',') !== 'iconUrl,name,url') throw new Error();
+    const icon = await readFile(join(root, 'wallet-icon.png'));
+    if (icon.length < 24 || !icon.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ||
+        icon.toString('ascii', 12, 16) !== 'IHDR' || icon.readUInt32BE(16) !== 180 || icon.readUInt32BE(20) !== 180) throw new Error();
+  }
+  console.log('Private owner, provider configuration, credential-free static build, and wallet manifest destination verified.');
 } catch {
-  console.error('Preflight failed. Verify the private owner/provider configuration and rebuild the Serverless frontend. No values were logged.');
+  console.error('Preflight failed. Verify the private owner/provider configuration and rebuild the Serverless frontend for the explicit app ID. No values were logged.');
   process.exitCode = 1;
 }

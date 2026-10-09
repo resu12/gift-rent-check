@@ -5,7 +5,7 @@ import {resolve, join, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 
-test('deployment preflight rejects secret and mock content without printing either', t => {
+function fixture(t) {
   const taskRoot = fileURLToPath(new URL('../../.tmp/', import.meta.url));
   mkdirSync(taskRoot, {recursive: true});
   const directory = mkdtempSync(join(taskRoot, 'serverless-preflight-'));
@@ -16,7 +16,12 @@ test('deployment preflight rejects secret and mock content without printing eith
   const fakeSecret = 'test-secret-not-real';
   writeFileSync(join(directory, 'tgcloud/lib/private-config.js'), `export const ownerTelegramId=42; export const marketappToken=${JSON.stringify(fakeSecret)};`);
   writeFileSync(join(directory, 'dist/index.html'), '<script src="https://telegram.org/js/telegram-web-app.js?64"></script>');
-  const run = () => spawnSync(process.execPath, ['tools/preflight.mjs'], {cwd: directory, encoding: 'utf8'});
+  const run = (args = []) => spawnSync(process.execPath, ['tools/preflight.mjs', ...args], {cwd: directory, encoding: 'utf8'});
+  return {directory, run, fakeSecret};
+}
+
+test('deployment preflight rejects secret and mock content without printing either', t => {
+  const {directory, run, fakeSecret} = fixture(t);
   assert.equal(run().status, 0);
   for (const invalid of [fakeSecret, 'mock-only-token', '/mock-api/']) {
     writeFileSync(join(directory, 'dist/assets/app.js'), `const bad=${JSON.stringify(invalid)}`);
@@ -28,4 +33,25 @@ test('deployment preflight rejects secret and mock content without printing eith
   writeFileSync(join(directory, 'dist/assets/app.js'), '//safe');
   writeFileSync(join(directory, 'tgcloud/lib/private-config.js'), "export const ownerTelegramId=null; export const marketappToken='';");
   assert.equal(run().status, 1);
+});
+
+test('a TON Connect manifest requires the explicit matching app and its public PNG', t => {
+  const {directory, run} = fixture(t);
+  const path = join(directory, 'dist/tonconnect-manifest.json');
+  const valid = {url: 'https://app54321.tgcloud.ai', name: 'Gift Rent Check', iconUrl: 'https://app54321.tgcloud.ai/wallet-icon.png'};
+  writeFileSync(path, JSON.stringify(valid));
+  assert.equal(run().status, 1);
+  assert.equal(run(['--app-id', '54321']).status, 1, 'missing icon must block publication');
+  writeFileSync(join(directory, 'dist/wallet-icon.png'), readFileSync(new URL('../../frontend/public/wallet-icon.png', import.meta.url)));
+  assert.equal(run(['--app-id', '54321']).status, 0);
+  for (const args of [[], ['--app-id', '65432'], ['--app-id', '0'], ['--app-id', '54321', '--app-id', '54321']]) assert.equal(run(args).status, 1);
+  for (const invalid of [{...valid, url: 'https://app65432.tgcloud.ai'}, {...valid, iconUrl: 'https://unrelated.invalid/icon.png'}, {...valid, name: 'Another app'}, {...valid, termsOfUseUrl: 'https://unreviewed.invalid'}, null]) {
+    writeFileSync(path, JSON.stringify(invalid));
+    assert.equal(run(['--app-id', '54321']).status, 1);
+  }
+  writeFileSync(path, '{broken');
+  assert.equal(run(['--app-id', '54321']).status, 1);
+  writeFileSync(path, JSON.stringify(valid));
+  writeFileSync(join(directory, 'dist/wallet-icon.png'), '<svg>not a PNG</svg>');
+  assert.equal(run(['--app-id', '54321']).status, 1);
 });

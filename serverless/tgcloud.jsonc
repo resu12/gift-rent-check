@@ -5,7 +5,9 @@
     "spa": true,
     "immutable": ["/assets/*"],
     "headers": [
-      { "path": "/*", "set": { "Referrer-Policy": "no-referrer" } }
+      { "path": "/*", "set": { "Referrer-Policy": "no-referrer" } },
+      { "path": "/tonconnect-manifest.json", "set": { "Access-Control-Allow-Origin": "*" } },
+      { "path": "/wallet-icon.png", "set": { "Access-Control-Allow-Origin": "*" } }
     ]
   }
 }

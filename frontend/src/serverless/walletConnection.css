@@ -1,0 +1,22 @@
+.wallet-connection{position:relative;max-width:100%;color:var(--text)}
+.wallet-connection-controls{display:flex;align-items:stretch;border:1px solid #324052;border-radius:9px;background:#151e2a}
+.wallet-connection-main,.wallet-connection-toggle{display:flex;align-items:center;justify-content:center;gap:8px;min-height:40px;background:transparent;color:#c3d8ed;padding:8px 10px;font-size:12px}
+.wallet-connection-main{border-radius:8px 0 0 8px;white-space:nowrap}
+.wallet-connection-main>span{display:block;text-align:left}
+.wallet-connection-main small{display:block;font-size:10px;color:var(--amber);margin-top:2px}
+.wallet-connection-toggle{border-left:1px solid #324052;border-radius:0 8px 8px 0;padding:8px;min-width:32px}
+.wallet-connection-toggle[aria-expanded=true]>svg{transform:rotate(180deg)}
+.wallet-connection-main:not(:disabled):hover,.wallet-connection-toggle:hover{background:#223244}
+.wallet-connection-dot{display:block;width:6px;height:6px;background:var(--teal);border-radius:50%}
+.wallet-connection.has-warning .wallet-connection-dot{background:var(--amber)}
+.wallet-connection-panel{position:absolute;z-index:60;right:0;top:calc(100% + 10px);width:min(360px,calc(100vw - 32px));padding:16px;background:#172230;border:1px solid #3a4b60;border-radius:12px;box-shadow:0 18px 55px #0009;font-size:13px;line-height:1.55;text-align:left}
+.wallet-connection-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px}
+.wallet-connection-heading strong{font-size:15px;font-weight:600}
+.wallet-connection-panel p{margin:0 0 12px}
+.wallet-connection-address{margin:12px 0}
+.wallet-connection-address>span{display:block;color:#9dafc3;font-size:11px;margin-bottom:5px}
+.wallet-connection-address code{display:block;overflow-wrap:anywhere;font-family:Consolas,monospace;font-size:11px;color:#c8d8e8;background:#101925;border-radius:6px;padding:8px}
+.wallet-connection-note{color:#a1b2c5;font-size:12px}
+.wallet-connection-warning{color:#efc693}
+.wallet-connection-panel .wallet-connection-action{width:100%;font-size:13px;min-height:42px;margin-top:3px}
+@media(max-width:480px){.wallet-connection-main{font-size:11px;padding:7px 8px;gap:6px}.wallet-connection-toggle{padding:7px;min-width:28px}.wallet-connection-main>svg{width:16px}.wallet-connection-panel{padding:14px}}

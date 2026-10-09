@@ -15,6 +15,8 @@ pnpm --dir frontend build:serverless
 
 Both builds include strict TypeScript checking. The local build writes `frontend/dist/`; the Telegram build writes `serverless/dist/`. Generated bundles are ignored by Git. Run `scripts/build-dashboard.ps1` to build and copy local assets into the Python package before launching the dashboard or packaging a wheel. Run `scripts/build-serverless.ps1` for the complete frontend/backend check and Telegram build; it does not publish.
 
+For Telegram wallet connections, copy `frontend/.env.example` to `frontend/.env.local` and set `VITE_TONCONNECT_APP_URL` to your deployed HTTPS origin. Optionally set `VITE_TELEGRAM_RETURN_URL` to your bot's `https://t.me/YOUR_BOT?startapp` Main Mini App link. Process environment values take precedence. These settings are public and must contain no credentials. Without an app URL, the build disables TON Connect. Configured builds emit the public manifest and PNG icon; deployment validates the manifest against its explicit app ID. See the [wallet setup and limitations](../docs/telegram-serverless.md#connect-and-disconnect-a-wallet).
+
 For local UI development, start the Python dashboard on port 8765, then run `pnpm --dir frontend dev`. Vite binds to loopback and proxies `/api` to Python. Use the Python server's production URL for normal operation and mutation/CSRF checks.
 
 For the Telegram UI with synthetic data, build the serverless bundle and run `node serverless/tools/mock-server.mjs`, then open `http://127.0.0.1:8766`. This uses local SQLite and a mock Telegram identity. The mock SDK and tools are never included in the deployment.
@@ -24,6 +26,8 @@ For the Telegram UI with synthetic data, build the serverless bundle and run `no
 Components use the `DashboardAdapter` interface. `src/data/local.ts` reads the local Python API and starts manual jobs with its server-issued CSRF token. `src/serverless/cloudAdapter.ts` calls Telegram endpoints; the backend checks Telegram's verified human user ID against its private allowlist. Browser-supplied identity is not authorization. See the [Telegram guide](../docs/telegram-serverless.md) for configuration and deployment.
 
 Provider credentials and deployment snapshots stay outside the frontend. Production assets use self-hosted JavaScript, CSS, and system fonts. Gift images use backend-approved HTTPS URLs without a referrer. API failures preserve previous data with an error/stale indication; they do not substitute a demo dataset.
+
+An optional mainnet TON Connect session exposes a connected address separately from the saved portfolio wallet. It requests no transaction or signed ownership proof and grants no backend access. Disconnect retains saved data and refresh behavior; connecting another wallet never reassigns the imported gifts. The pinned SDK is bundled locally, while its wallet list and connection bridges use the SDK's external services.
 
 ## Behavior
 

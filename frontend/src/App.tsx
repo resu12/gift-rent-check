@@ -234,7 +234,11 @@ function GiftDetails({ gift, selection, close }: { gift: Gift; selection: Pricin
   </dialog>;
 }
 
-export default function App({ adapter, ownedPriceStatus }: { adapter: DashboardAdapter; ownedPriceStatus?: React.ReactNode }) {
+export default function App({ adapter, ownedPriceStatus, walletControl }: {
+  adapter: DashboardAdapter;
+  ownedPriceStatus?: React.ReactNode;
+  walletControl?: (dashboard: Dashboard | null) => React.ReactNode;
+}) {
   const cloud = adapter.mode === 'serverless';
   const viewPreferenceKey = `giftfolio.${cloud ? 'telegram' : 'local'}.pricing-view`;
   const [pricingView, setPricingView] = useState<'grid' | 'detailed'>(() => {
@@ -343,7 +347,7 @@ export default function App({ adapter, ownedPriceStatus }: { adapter: DashboardA
     <aside className="sidebar"><a className="brand" href="#" onClick={event => { event.preventDefault(); setPage('pricing'); }} aria-label="Giftfolio pricing"><span className="brand-symbol"><Icon name="gift" size={24} /></span><span>giftfolio<span className="brand-dot">.</span></span></a><div className="workspace-label"><span />PERSONAL WORKSPACE</div><nav aria-label="Main navigation">{nav}</nav>
       <div className="sidebar-bottom"><div className="network-label"><span className="network-dot" />TON mainnet<Icon name="shield" size={15} /></div><p>Your collection.<br />A clearer view.</p><span className="local-label"><i />{cloud ? 'TELEGRAM · PRIVATE' : 'LOCAL & PRIVATE'}</span></div>
     </aside>
-    <div className="main-shell"><header className="topbar"><span className="breadcrumb">Workspace <span>/</span> <strong>{NAV.find(item => item.id === page)?.label}</strong></span><div className="topbar-right"><span className="read-only-indicator"><Icon name="shield" size={14} />Read only</span><div className="wallet-chip" title={data?.wallet || 'No wallet configured'}><span className="wallet-avatar"><Icon name="wallet" size={15} /></span><span>{data?.wallet ? shorten(data.wallet) : 'Wallet not configured'}</span><span className={`connection-dot ${error ? 'offline' : ''}`} /></div></div></header>
+    <div className="main-shell"><header className="topbar"><span className="breadcrumb">Workspace <span>/</span> <strong>{NAV.find(item => item.id === page)?.label}</strong></span><div className="topbar-right"><span className="read-only-indicator"><Icon name="shield" size={14} />Read only</span>{walletControl ? walletControl(data) : <div className="wallet-chip" title={data?.wallet || 'No wallet configured'}><span className="wallet-avatar"><Icon name="wallet" size={15} /></span><span>{data?.wallet ? shorten(data.wallet) : 'Wallet not configured'}</span><span className={`connection-dot ${error ? 'offline' : ''}`} /></div>}</div></header>
       <main id="main"><div className="page-heading"><div><span className="eyebrow">{page === 'pricing' ? 'RENTAL PRICE INTELLIGENCE' : 'YOUR PERSONAL COLLECTION'}</span><h1>{page === 'pricing' ? 'A clearer price for every gift.' : page === 'overview' ? 'Your gifts, in view.' : page === 'gifts' ? 'A place for every gift.' : 'Every observation, recorded.'}</h1><p>{page === 'pricing' ? 'Compare listing prices or actual rental records by collection, model, and exact Black backdrop.' : page === 'overview' ? 'Wallet ownership and rental observations, together in one place.' : page === 'gifts' ? 'Explore your portfolio and the evidence behind each gift.' : 'Follow your syncs and inspect the saved evidence as it arrives.'}</p></div>
         {!simplePricing && headingActions}
       </div>
