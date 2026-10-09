@@ -1,6 +1,7 @@
 import {validatePage} from './engine.js';
 import {buildCloudDashboard, resolveCloudWindow, validateSavedCloudWindow, addressKey} from './cloud-pricing.js';
 import {planHistoryRefresh, validHistoryPlan, completedHistoryCoverage, historyRefreshProgress} from './history-refresh.js';
+import {MARKET_CACHE_POLICY, pruneMarketCache, cachedMarketStream, completedMarketStream, marketCacheKey, marketCacheProgress} from './market-cache.js';
 
 export const CLOUD_LIMITS = Object.freeze({page_size: 100, invocation_attempts: 100, daily_attempts: 500, duration_ms: 300000, interval_ms: 1000, retry_attempts: 4, lease_ms: 120000, response_bytes: 1048576, import_bytes: 524288, import_records: 250});
 export class CloudRequestError extends Error {}
@@ -102,6 +103,7 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       provider: 'marketapp', pages: job.pages, observations: job.observations, streams_complete: job.streams.filter(s => s.complete).length, streams_total: job.streams.length,
       scopes: job.scopes.length, unresolved_collections: job.unresolved_collections, warnings: job.warnings,
       history_refresh: historyRefreshProgress(job.streams),
+      market_cache: marketCacheProgress(job.streams),
       next_allowed_at: Math.max(state.next_allowed_at, job.lease_until || 0), server_time: now(),
       requires_resume: readonly && isActive(job) && (job.lease_until || 0) <= now(),
       marketapp_budget: {invocation_used: job.invocation_used, invocation_limit: cap.invocation_attempts, rolling_24h_used: budget(state).used_24h, rolling_24h_limit: cap.daily_attempts, resets_at: budget(state).resets_at, run_seconds: cap.duration_ms / 1000},
@@ -160,12 +162,17 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
     const result = await mutate(state => {
       if (isActive(state.job) || (state.job?.lease_until || 0) > now()) throw new CloudRequestError('Stop or complete the current collection before starting another.');
       const kinds = input.kind === 'prices' ? ['listing'] : input.kind === 'rental_prices' ? ['history'] : ['listing', 'history'];
+      state.market_cache = pruneMarketCache(state.market_cache, now());
       state.job = {id: state.next_job_id++, kind: input.kind, state: 'running', created_at: iso(now()), updated_at: iso(now()), reason: null,
-        collection_window: window, scopes, unresolved_collections: unresolved, page_size: cap.page_size,
+        collection_window: window, scopes, unresolved_collections: unresolved, page_size: cap.page_size, market_cache_version: MARKET_CACHE_POLICY.version,
         streams: [{kind: 'collection', scope: null}, ...scopes.flatMap(scope => kinds.map(kind => ({kind, scope})))].map(s => ({...s, cursor: null, started: false, complete: false, cursors: [], retry: 0, pages: 0, last_timestamp: null, ordered: true, scope_verified: true,
           ...(s.kind === 'history' ? {history_plan: planHistoryRefresh(state.history_coverage?.[stableKey(s.scope)], Math.floor(Date.parse(window.window_from) / 1000), Math.floor(now() / 1000))} : {}),
         })),
         pages: 0, observations: 0, warnings: [], invocation_used: 0, invocation_deadline: now() + cap.duration_ms, invocation: 1, lease: null, lease_until: 0};
+      for (const stream of state.job.streams) if (stream.kind !== 'collection') {
+        const cached = cachedMarketStream(state.market_cache, stream, state.job.page_size, now());
+        if (cached) {stream.complete = true; stream.completion_reason = 'shared_market_cache'; stream.cache_source = cached;}
+      }
       pauseBudget(state, state.job);
     });
     return {job: project(result.state.job, result.state)};
@@ -253,8 +260,9 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
     // Retry-After starts when the response was received, never at the request's
     // frozen V8 timestamp. Fresh SQL wall time also fences an expired lease.
     await refreshClock();
+    const providerObservedAt = iso(now());
     if (!failure) {try {
-      parsed = parseCloudPage(stream.kind, body, stream.scope, iso(now()), `${id}:${streamIndex}:${stream.pages}`);
+      parsed = parseCloudPage(stream.kind, body, stream.scope, providerObservedAt, `${id}:${streamIndex}:${stream.pages}`);
       // Bound stored/projected payloads too: normalized wrappers may make an
       // otherwise legal raw response exceed a safe host serialization size.
       if (size(JSON.stringify(parsed.records)) > cap.response_bytes) failure = 'response_too_large';
@@ -277,6 +285,8 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       }
       if (parsed.cursor !== null && current.cursors.includes(parsed.cursor)) {finish(job, 'failed', 'cursor_cycle'); return event;}
       current.started = true; current.cursor = parsed.cursor; current.complete = parsed.cursor === null; current.retry = 0; current.pages++;
+      current.first_observed_at ??= providerObservedAt;
+      current.last_observed_at = providerObservedAt;
       if (parsed.cursor !== null) current.cursors.push(parsed.cursor);
       if (current.kind === 'history') {
         const timestamps = parsed.items.map(item => item.ts);
@@ -296,6 +306,10 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
           state.history_coverage ||= {};
           state.history_coverage[key] = coverage;
         }
+      }
+      const cached = completedMarketStream(job, streamIndex, now());
+      if (cached) {
+        state.market_cache = pruneMarketCache({...state.market_cache, [marketCacheKey(current, job.page_size)]: cached}, now());
       }
       job.pages++; job.observations += parsed.records.length;
       finish(job, job.streams.every(s => s.complete) ? 'complete' : 'running');

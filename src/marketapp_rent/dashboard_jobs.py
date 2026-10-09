@@ -293,11 +293,16 @@ def progress_for(database, job):
     with Store(database) as store:
         if job["kind"] in {"collect", "prices", "rental_prices"}:
             from .history_refresh import history_refresh_summary
+            from .listing_plan import listing_refresh_summary
             streams = store.streams(job["run_id"])
             progress = {"pages": sum(row["pages"] for row in streams), "streams_complete": sum(row["state"] == "complete" for row in streams), "streams_total": len(streams)}
-            history = history_refresh_summary(store.get_run(job["run_id"])["settings"])
+            settings = store.get_run(job["run_id"])["settings"]
+            history = history_refresh_summary(settings)
             if history:
                 progress["history_refresh"] = history
+            listing = listing_refresh_summary(settings, streams)
+            if listing:
+                progress["listing_refresh"] = listing
             return progress
         discovery = DiscoveryStore(store)
         candidates = discovery.candidates(job["run_id"])

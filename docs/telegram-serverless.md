@@ -85,6 +85,18 @@ After **seven days** from the last full scan's start, the next requested refresh
 
 Each run freezes its per-collection plan and baseline provenance. Resume preserves that plan even if the seven-day interval passes or the displayed dates change. An unfinished or failed stream cannot advance reusable coverage. Saved job details show how many collections use recent updates and how many require a full-window scan. Existing observations, rental counts, selected timeframes, and membership are retained.
 
+### Shared market cache
+
+New Telegram jobs can reuse completed listing and compatible history traversals for **five minutes**, measured from the source stream's first actual provider observation. Completion and cache reuse do not extend expiry. A traversal that already exceeds five minutes is not reusable. The catalog is fetched afresh once per new job, even if every market stream uses cached coverage.
+
+The cache index contains public request scopes, source references, original observation times, and coverage bounds. Personal wallet settings, portfolio membership, labels, and TON ownership evidence are excluded. Existing provider records remain the comparison source; reuse creates no duplicate pages or observations and never makes old data appear newly observed. Public listing owners and history parties remain in the original provider records. The cache stays behind private Telegram authorization; this change does not enable public users.
+
+Only fully committed, valid traversals qualify. Incomplete scans and unordered or scope-conflicting history cannot populate the cache. Cached history must cover the new scan's required lower boundary and selected window. Incremental coverage cannot replace a wider or weekly full scan. Cache reuse never advances `checked_through` or `full_scan_at`; the original history baseline remains unchanged.
+
+Cache decisions and source references freeze when a new job starts. Resume keeps that evidence even if the cache later expires. Job details show reused streams and their original observation time. Reused streams consume no provider requests or allowance; fresh requests and retries retain the existing shared Telegram ledger, pacing, and cooldowns. No scheduler is introduced.
+
+The cache is **Telegram-only**, as selected for this release. Desktop remains separate and cannot share Telegram's allowance. Leave desktop `--allow-network` off while using Telegram for Marketapp collection; `--allow-price-refresh` still enables the separate TON-only owned-price check.
+
 `Retry-After` applies across jobs. Authentication failures, malformed pages, cursor cycles, and rejected cursors stop collection without advancing that page. A rejected cursor requires a new collection. An in-flight lease prevents overlap; after an interruption, allow up to two minutes for it to expire before resuming. The current SDK does not document a configurable network timeout or cancellation primitive; the five-minute allowance prevents starting further requests, and the lease fences late results. It cannot force an already-sent SDK request to finish at exactly 30 seconds.
 
 Production timing uses SQLite wall time refreshed around database commits and provider responses. This prevents the runtime's JavaScript clock behavior from shortening retry delays or accepting an expired lease. Failure to read trusted time stops new provider requests. Lease fencing protects committed state; it cannot cancel an old transport request if the platform leaves it running.

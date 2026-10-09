@@ -14,6 +14,7 @@ from .config import Settings
 from .domain import ApiError, AuthError, BudgetExceeded, ValidationError
 from .history_refresh import (ORDER_UNVERIFIED, SCOPE_UNVERIFIED, build_history_refresh_plan,
                               stream_cutoff, stream_refresh_mode, validate_saved_plan)
+from .listing_plan import COVERED_REASON, POLICY as LISTING_POLICY, covering_listing_stream, ordered_targets, validate_listing_plan
 from .models import parse_page
 from .storage import Store
 
@@ -222,6 +223,7 @@ def collect(
         run = store.get_run(resume_id)
         saved = run["settings"]
         validate_saved_plan(saved)
+        validate_listing_plan(saved)
         if history_since is not None and saved.get("history_since") != history_since:
             raise ValueError("Cannot change history cutoff on resume; start a fresh collection")
         history_since = saved.get("history_since")
@@ -276,7 +278,8 @@ def collect(
                 }})
         elif comparison_targets is not None:
             scopes, skipped = _scopes([target["collection_address"] for target in comparison_targets]), []
-            for target in comparison_targets:
+            stream_settings["listing_refresh"] = dict(LISTING_POLICY)
+            for target in ordered_targets(comparison_targets):
                 manifest.append({"kind": "listing", "path": "/v1/rent/gifts/", "params": {
                     **target, "sort_by": settings.sort_by, "limit": settings.page_size,
                 }})
@@ -326,6 +329,11 @@ def collect(
                 if stream["state"] == "complete":
                     continue
                 stream_id = stream["id"]
+                if saved_settings.get("listing_refresh") == LISTING_POLICY:
+                    covering = covering_listing_stream(store, run_id, stream)
+                    if covering is not None:
+                        store.set_stream_state(stream_id, "complete", f"{COVERED_REASON}{covering['id']}")
+                        continue
                 cursor = stream["next_cursor"]
                 history_scan_since = stream_cutoff(saved_settings, stream)
                 refresh_mode = stream_refresh_mode(saved_settings, stream)

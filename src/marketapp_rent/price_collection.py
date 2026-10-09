@@ -11,7 +11,7 @@ from .storage import Store
 
 
 def build_price_targets(gifts: list[dict]) -> list[dict]:
-    """Prioritize precise Black cohorts, then models and collection baselines.
+    """Plan collection baselines, then model and exact Black fallback cohorts.
 
     Unknown models still permit a collection comparison. Unknown or conflicting
     collection identities never create an unfiltered market scan.
@@ -36,9 +36,9 @@ def build_price_targets(gifts: list[dict]) -> list[dict]:
         if isinstance(backdrop, str) and backdrop.strip().casefold() == "black":
             own_black.add(pair)
     return (
-        [{"collection_address": collection, "model": model, "backdrop": "Black"} for collection, model in sorted(own_black)]
+        [{"collection_address": collection} for collection in sorted(collections)]
         + [{"collection_address": collection, "model": model} for collection, model in sorted(models)]
-        + [{"collection_address": collection} for collection in sorted(collections)]
+        + [{"collection_address": collection, "model": model, "backdrop": "Black"} for collection, model in sorted(own_black)]
         + [{"collection_address": collection, "model": model, "backdrop": "Black"} for collection, model in sorted(models - own_black)]
     )
 

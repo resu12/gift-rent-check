@@ -159,6 +159,15 @@ export interface Job {
     full_streams: number;
     overlap_seconds: number;
     full_scan_interval_seconds: number;
+  }; listing_refresh?: {
+    planned_streams: number;
+    reused_streams: number;
+    provider_streams: number;
+  }; market_cache?: {
+    reused_streams: number;
+    total_streams: number;
+    ttl_seconds: number;
+    oldest_observed_at: string | null;
   } };
   stop_requested: boolean;
   collection_window?: {

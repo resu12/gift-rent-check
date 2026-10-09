@@ -491,3 +491,65 @@ test('ordinary in-flight timestamps newer than scan start are accepted without a
   await step(t, id); t.advance(30000); assert.equal((await step(t, id)).state, 'complete');
   const state = (await t.repository.read()).state; assert.equal(state.job.streams[1].ordered, true); assert.equal(state.history_coverage[scope].checked_through, started);
 });
+
+test('fresh completed listing and history traversals are reused without records, timestamps or coverage promotion', async () => {
+  const responses = [response(catalog), page(null), historyResponse(null, [Math.floor(Date.parse('2026-10-09T12:00:00Z') / 1000) - 1])], t = setup(responses); await seed(t);
+  const first = await start(t, 'collect'); await step(t, first); await advanceStep(t, first); await advanceStep(t, first);
+  const before = (await t.repository.read()).state, records = (await t.repository.records()).filter(row => ['listing', 'history'].includes(row.kind));
+  const originalCache = JSON.stringify(before.market_cache), originalCoverage = JSON.stringify(before.history_coverage);
+  const observed = records.map(row => row.observed_at);
+  for (let i = 0; i < 2; i++) {
+    t.advance(1000); responses.push(response(catalog)); const next = await start(t, 'collect');
+    const planned = await t.repository.job(next);
+    assert.equal(planned.streams[0].complete, false, 'catalog is always refreshed');
+    for (const stream of planned.streams.slice(1)) {assert.equal(stream.complete, true); assert.equal(stream.pages, 0); assert.equal(stream.started, false); assert.equal(stream.completion_reason, 'shared_market_cache'); assert.equal(stream.cache_source.job_id, first);}
+    const result = await step(t, next); assert.equal(result.state, 'complete'); assert.equal(result.progress.pages, 1); assert.equal(result.progress.marketapp_budget.invocation_used, 1);
+    assert.deepEqual(result.progress.market_cache, {reused_streams: 2, total_streams: 2, ttl_seconds: 300, oldest_observed_at: observed[0]});
+    const state = (await t.repository.read()).state; assert.equal(JSON.stringify(state.market_cache), originalCache); assert.equal(JSON.stringify(state.history_coverage), originalCoverage);
+    assert.deepEqual((await t.repository.records()).filter(row => ['listing', 'history'].includes(row.kind)), records);
+  }
+  assert.equal(t.requests.length, 5, 'three original calls plus two catalog refreshes, with no duplicate comparison calls');
+  const indexText = JSON.stringify(before.market_cache); assert.equal(indexText.includes('nft-a'), false); assert.equal(indexText.includes('owner'), false);
+});
+
+test('market cache TTL begins at its first actual provider page and expires at exactly five minutes', async () => {
+  const responses = [response(catalog), page('next'), page(null)], t = setup(responses); await seed(t); const first = await start(t);
+  await step(t, first); await advanceStep(t, first); const firstObserved = t.now(); t.advance(30000); await step(t, first);
+  t.advance(firstObserved + 300000 - 1 - t.now()); const cached = await start(t); assert.equal((await t.repository.job(cached)).streams[1].cache_source.job_id, first);
+  await t.engine.stopJob(ctx, {job_id: cached}); t.advance(1); const expired = await start(t);
+  assert.equal((await t.repository.job(expired)).streams[1].cache_source, undefined); assert.deepEqual((await t.repository.read()).state.market_cache, {});
+});
+
+test('slow resumed traversals and partially collected streams never publish a completed market cache', async () => {
+  const responses = [response(catalog), page('next'), page(null)], t = setup(responses); await seed(t); const first = await start(t);
+  await step(t, first); await advanceStep(t, first); assert.deepEqual((await t.repository.read()).state.market_cache, {});
+  await t.engine.stopJob(ctx, {job_id: first}); t.advance(300000); await t.engine.resumeJob(ctx, {job_id: first}); await step(t, first);
+  assert.deepEqual((await t.repository.read()).state.market_cache, {});
+  const next = await start(t); assert.equal((await t.repository.job(next)).streams[1].cache_source, undefined);
+});
+
+test('market cache publication and the final source page share one atomic event', async () => {
+  const t = setup([response(catalog), page(null)]); await seed(t); const id = await start(t); await step(t, id); await advanceStep(t, id);
+  const event = t.database.prepare('SELECT * FROM cloud_events ORDER BY sequence DESC LIMIT 1').get();
+  const state = JSON.parse(event.state_json), cached = Object.values(state.market_cache)[0];
+  assert.equal(cached.job_id, id); assert.equal(cached.stream_index, 1); assert.equal(JSON.parse(event.job_json).streams[1].complete, true);
+  assert.equal(JSON.parse(event.records_json).filter(row => row.kind === 'listing').length, 1); assert.equal(JSON.parse(event.raw_body).endpoint, '/v1/rent/gifts/');
+});
+
+test('cached history cannot substitute for the full reconciliation due after seven days', async () => {
+  const responses = [response(catalog), historyResponse(null, [])], t = setup(responses); await seed(t); const firstAt = Math.floor(t.now() / 1000);
+  const full = await start(t, 'rental_prices'); await step(t, full); await advanceStep(t, full);
+  t.advance((firstAt + 7 * daySeconds - 60) * 1000 - t.now()); responses.push(response(catalog), historyResponse(null, []));
+  const increment = await start(t, 'rental_prices'); assert.equal((await t.repository.job(increment)).streams[1].history_plan.mode, 'incremental'); await step(t, increment); await advanceStep(t, increment);
+  assert.equal(Object.values((await t.repository.read()).state.market_cache).length, 1);
+  t.advance((firstAt + 7 * daySeconds) * 1000 - t.now()); const due = await start(t, 'rental_prices');
+  const stream = (await t.repository.job(due)).streams[1]; assert.equal(stream.history_plan.mode, 'full'); assert.equal(stream.cache_source, undefined); assert.equal(stream.complete, false);
+});
+
+test('market cache keys freeze page size and cache reuse survives saved-job resume without renewal', async () => {
+  const responses = [response(catalog), page(null)], t = setup(responses); await seed(t); const first = await start(t); await step(t, first); await advanceStep(t, first);
+  const cached = await start(t); const source = (await t.repository.job(cached)).streams[1].cache_source; await t.engine.stopJob(ctx, {job_id: cached});
+  t.advance(400000); await t.engine.resumeJob(ctx, {job_id: cached}); assert.deepEqual((await t.repository.job(cached)).streams[1].cache_source, source);
+  responses.push(response(catalog)); assert.equal((await step(t, cached)).state, 'complete');
+  t.engine = createCloudEngine({...t.deps, limits: {page_size: 10}}); const different = await start(t); assert.equal((await t.repository.job(different)).streams[1].cache_source, undefined);
+});

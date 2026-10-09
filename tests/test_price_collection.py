@@ -55,7 +55,7 @@ class MockMarket:
                          sleep=self.sleep, monotonic=lambda: self.now)
 
 
-def test_targets_deduplicate_aliases_and_prioritize_exact_black_cohorts():
+def test_targets_deduplicate_aliases_and_plan_broad_cohorts_before_exact_black():
     targets = build_price_targets([
         gift(OTHER, "A model", "Onyx Black"),
         gift(model="Z model"), gift(preferred_address(COLLECTION), "Z model"),
@@ -63,11 +63,11 @@ def test_targets_deduplicate_aliases_and_prioritize_exact_black_cohorts():
         gift(OTHER, None),
     ])
     assert targets == [
-        {"collection_address": COLLECTION, "model": "Z model", "backdrop": "Black"},
+        {"collection_address": COLLECTION}, {"collection_address": OTHER},
         {"collection_address": COLLECTION, "model": "A model"},
         {"collection_address": COLLECTION, "model": "Z model"},
         {"collection_address": OTHER, "model": "A model"},
-        {"collection_address": COLLECTION}, {"collection_address": OTHER},
+        {"collection_address": COLLECTION, "model": "Z model", "backdrop": "Black"},
         {"collection_address": COLLECTION, "model": "A model", "backdrop": "Black"},
         {"collection_address": OTHER, "model": "A model", "backdrop": "Black"},
     ]
@@ -93,18 +93,17 @@ def test_price_collection_uses_only_documented_catalog_and_listing_parameters():
                                 client_factory=api.factory, on_run_created=linked.append)
         assert result.state == "complete"
         assert linked == [result.run_id]
-        assert len(api.requests) == 4
+        assert len(api.requests) == 2
         common = {"collection_address": preferred_address(COLLECTION), "sort_by": "recently_touch", "limit": "100"}
         assert [dict(request.url.params) for request in api.requests[1:]] == [
-            {**common, "model": "Nightmare", "backdrop": "Black"},
-            {**common, "model": "Nightmare"}, common,
+            common,
         ]
         run = store.get_run(result.run_id)
         assert run["settings"]["mode"] == "pricing"
         assert run["settings"]["requested_comparison_targets"] == [
-            {"collection_address": preferred_address(COLLECTION), "model": "Nightmare", "backdrop": "Black"},
-            {"collection_address": preferred_address(COLLECTION), "model": "Nightmare"},
             {"collection_address": preferred_address(COLLECTION)},
+            {"collection_address": preferred_address(COLLECTION), "model": "Nightmare"},
+            {"collection_address": preferred_address(COLLECTION), "model": "Nightmare", "backdrop": "Black"},
         ]
         assert {stream["kind"] for stream in store.streams(result.run_id)} == {"collection", "listing"}
 
@@ -159,7 +158,7 @@ def test_bounded_price_resume_keeps_filters_cursors_and_page_size_despite_change
                                 gifts=[gift(OTHER, "Different", "Red")], resume_id=first.run_id,
                                 client_factory=api.factory)
         assert result.state == "complete"
-        assert len(api.requests[before:]) == 3
+        assert len(api.requests[before:]) == 1
         for request in api.requests[before:]:
             assert request.url.path == LISTINGS_PATH
             assert request.url.params["collection_address"] == preferred_address(COLLECTION)
@@ -171,26 +170,26 @@ def test_bounded_price_resume_keeps_filters_cursors_and_page_size_despite_change
 def test_attempt_budget_retains_unstarted_targets_for_resume():
     with Store(":memory:") as store:
         api = MockMarket()
-        settings = Settings(token="mock", max_attempts=2)
+        settings = Settings(token="mock", max_attempts=1)
         first = collect_prices(store, settings, gifts=[gift()], client_factory=api.factory)
         assert first.state == "partial"
-        assert len(api.requests) == 2
+        assert len(api.requests) == 1
         assert len(store.streams(first.run_id)) == 4
         result = collect_prices(store, replace(settings, max_attempts=25), resume_id=first.run_id, client_factory=api.factory)
         assert result.state == "complete"
-        assert len(api.requests) == 4
+        assert len(api.requests) == 2
 
 
 def test_comparison_replay_preserves_occurrences_and_fresh_snapshots():
     with Store(":memory:") as store:
         api = MockMarket(items=True)
         first = collect_prices(store, Settings(token="mock"), gifts=[gift()], client_factory=api.factory)
-        assert store.connection.execute("SELECT count(*) FROM observations").fetchone()[0] == 3
+        assert store.connection.execute("SELECT count(*) FROM observations").fetchone()[0] == 1
         collect_prices(store, Settings(token="mock"), resume_id=first.run_id, client_factory=api.factory)
-        assert len(api.requests) == 4
+        assert len(api.requests) == 2
         fresh = collect_prices(store, Settings(token="mock"), gifts=[gift()], client_factory=api.factory)
         assert fresh.run_id != first.run_id
-        assert store.connection.execute("SELECT count(*) FROM observations").fetchone()[0] == 6
+        assert store.connection.execute("SELECT count(*) FROM observations").fetchone()[0] == 2
         assert store.connection.execute("SELECT count(*) FROM records WHERE kind='listing'").fetchone()[0] == 1
 
 

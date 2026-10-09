@@ -105,6 +105,8 @@ function JobCard({ job, onResume, disabled, onStop, stopping, stopDisabled }: {
   const budget = job.progress?.marketapp_budget as { invocation_used: number; invocation_limit: number; rolling_24h_used: number; rolling_24h_limit: number } | undefined;
   const window = job.collection_window;
   const historyRefresh = job.progress?.history_refresh;
+  const listingRefresh = job.progress?.listing_refresh;
+  const marketCache = job.progress?.market_cache;
   const incremental = (historyRefresh?.incremental_streams ?? 0) > 0;
   const reason = job.reason === 'timeframe_covered' ? 'Selected timeframe covered. Older pages were not requested.' : job.reason === 'incremental_history_covered' ? 'Recent rentals checked. Older records use the saved completed scan.' : job.reason;
   return <article className={`job-card job-${job.state}`}>
@@ -113,7 +115,9 @@ function JobCard({ job, onResume, disabled, onStop, stopping, stopDisabled }: {
       <p>{isStopping ? 'Stopping after the current request. Saved progress can be resumed.' : requiresResume ? 'The app is not collecting. Continue from the saved checkpoint when you are ready.' : reason || (job.state === 'running' ? 'Reading records and saving progress as it arrives.' : job.state === 'queued' ? 'Waiting to start.' : job.state === 'complete' ? 'Completed. The latest saved observations are ready.' : 'Saved progress is available to inspect.')}</p>
       {active && !isStopping && <p>Continues through batches within its limits. At a safety limit, progress is saved for manual Resume.</p>}
       {window && <p>Saved pricing window: {timeframeLabel({ source: job.kind === 'rental_prices' ? 'rentals' : 'listings', timeframe: window.timeframe, dateFrom: window.date_from || undefined, dateTo: window.date_to || undefined })}.{window.window_from && <> From {dateTime(window.window_from)}{window.window_to ? ` to ${dateTime(window.window_to)}` : ''}.</>} Resume keeps this window.</p>}
-      {historyRefresh && <p>History plan: {historyRefresh.incremental_streams} collection{historyRefresh.incremental_streams === 1 ? '' : 's'} with recent updates; {historyRefresh.full_streams} with a full window scan.{incremental && <> Recent updates recheck a {historyRefresh.overlap_seconds / 3600}-hour overlap and reuse older saved records.</>}</p>}
+      {historyRefresh && <p>History plan: {historyRefresh.incremental_streams} incremental; {historyRefresh.full_streams} full-window.{incremental && <> Recent updates recheck a {historyRefresh.overlap_seconds / 3600}-hour overlap and reuse older saved records.</>}</p>}
+      {listingRefresh && listingRefresh.reused_streams > 0 && <p>{listingRefresh.reused_streams} listing group{listingRefresh.reused_streams === 1 ? '' : 's'} covered by completed broader scans. No extra requests or duplicate observations for those groups.</p>}
+      {marketCache && marketCache.reused_streams > 0 && <p>Telegram cache: {marketCache.reused_streams} of {marketCache.total_streams} market scans reused without provider requests. The cache accepts scans less than {marketCache.ttl_seconds / 60} minutes old when this job starts.{marketCache.oldest_observed_at && <> Original observations from {dateTime(marketCache.oldest_observed_at)}.</>}</p>}
       {budget && <div className="job-metrics"><span>Marketapp requests <b>{budget.invocation_used} / {budget.invocation_limit}</b> this start/resume</span><span>Last 24 hours <b>{budget.rolling_24h_used} / {budget.rolling_24h_limit}</b></span></div>}
       {metrics.length > 0 && <div className="job-metrics">{metrics.map(([key, value]) => <span key={key}>{humanize(key)} <b>{String(value)}</b></span>)}</div>}
       <time dateTime={job.updated_at}>{dateTime(job.updated_at, true)}{job.run_id != null ? ` · Run ${job.run_id}` : ''}</time>
