@@ -278,28 +278,63 @@ class Store:
 
     def collection_evidence(self, nft_address: str | None, scope: str | None = None) -> dict[str, Any]:
         """Return provenance without deciding between contradicting address evidence."""
+        index = self._collection_evidence_index([nft_address])
+        return self._resolve_collection_evidence(index.get(address_key(nft_address), {}), scope)
+
+    def _collection_evidence_index(self, nft_addresses) -> dict[str, dict[str, set[str]]]:
+        """Read each evidence source once for this call's requested NFT identities.
+
+        The map is page-local, never retained on Store: the next page and every
+        standalone lookup see newly committed history and membership evidence.
+        Only collections for the requested keys are retained in memory.
+        """
+        keys = {address_key(address) for address in nft_addresses if address}
+        index: dict[str, dict[str, set[str]]] = {key: {} for key in keys}
+        if not keys:
+            return index
+
+        def remember(key, source, collection):
+            if key in index and (collection or source == "ton_verified"):
+                index[key].setdefault(source, set()).add(collection)
+
+        for row in self.connection.execute("SELECT nft_address,collection_address FROM portfolio"):
+            remember(address_key(row["nft_address"]), "portfolio_import", row["collection_address"])
+
+        # TON tables already store canonical NFT keys and have lookup indexes.
+        # Normal API pages contain at most 100 entries. Chunk only oversized
+        # internal callers to stay below this SQLite connection's parameter cap.
+        ordered_keys = sorted(keys)
+        batch_size = self.connection.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+        for start in range(0, len(ordered_keys), batch_size):
+            batch = ordered_keys[start:start + batch_size]
+            placeholders = ",".join("?" for _ in batch)
+            for row in self.connection.execute(
+                f"SELECT nft_key,collection_address FROM ton_memberships WHERE nft_key IN ({placeholders})", batch,
+            ):
+                remember(row["nft_key"], "ton_verified", row["collection_address"])
+            for source, table, column in (("ton_observed", "ownership_observations", "evidence_json"),
+                                           ("ton_candidate_sources", "discovery_candidate_sources", "source_json")):
+                for row in self.connection.execute(
+                    f"SELECT nft_key,{column} FROM {table} WHERE nft_key IN ({placeholders})", batch,
+                ):
+                    remember(row["nft_key"], source, json.loads(row[column]).get("collection_address"))
+
+        for row in self.connection.execute("SELECT identity,data_json FROM records WHERE kind='history'"):
+            key = address_key(row["identity"])
+            if key in index:
+                remember(key, "observed_history", json.loads(row["data_json"]).get("collection_address"))
+        return index
+
+    @staticmethod
+    def _resolve_collection_evidence(sources: dict[str, set[str]], scope: str | None) -> dict[str, Any]:
+        """Use one provenance policy for individual lookups and page commits."""
         evidence: dict[str, Any] = {}
         if scope:
             evidence["filtered_request"] = scope
-        if nft_address:
-            key = address_key(nft_address)
-            imported = {row["collection_address"] for row in self.connection.execute("SELECT * FROM portfolio")
-                        if address_key(row["nft_address"]) == key and row["collection_address"]}
-            if imported:
-                evidence["portfolio_import"] = next(iter(imported)) if len(imported) == 1 else sorted(imported)
-            discovered = {row[0] for row in self.connection.execute("SELECT collection_address FROM ton_memberships WHERE nft_key=?", (key,))}
-            if discovered:
-                evidence["ton_verified"] = sorted(discovered)
-            evidence.update(self._ton_collection_evidence(key))
-            history: set[str] = set()
-            for row in self.connection.execute("SELECT identity,data_json FROM records WHERE kind='history'"):
-                if address_key(row["identity"]) != key:
-                    continue
-                data = json.loads(row["data_json"])
-                if data.get("collection_address"):
-                    history.add(data["collection_address"])
-            if history:
-                evidence["observed_history"] = sorted(history)
+        for source in ("portfolio_import", "ton_verified", "ton_observed", "ton_candidate_sources", "observed_history"):
+            values = sources.get(source)
+            if values:
+                evidence[source] = next(iter(values)) if source == "portfolio_import" and len(values) == 1 else sorted(values)
         addresses: dict[str, str] = {}
         for value in evidence.values():
             for candidate in value if isinstance(value, list) else [value]:
@@ -358,18 +393,29 @@ class Store:
                 (stream_id, request_cursor, _cursor_key(request_cursor), parsed.next_cursor, response.observed_at, response.status_code, body, digest),
             )
             page_id = inserted.lastrowid
+            listing_evidence = self._collection_evidence_index(
+                record.data.get("nft_address") for record in parsed.records if record.kind == "listing"
+            )
             for index, record in enumerate(parsed.records):
                 source_json = record.source_json
                 if not isinstance(source_json, str):
                     source_json = _json(source_json)
                 # The normalizer supplies canonical JSON, preserving missing/null and exact numeric values.
                 fingerprint = hashlib.sha256(source_json.encode("utf-8")).hexdigest()
-                self.connection.execute(
+                record_inserted = self.connection.execute(
                     "INSERT OR IGNORE INTO records(kind,identity,fingerprint,source_json,data_json) VALUES (?,?,?,?,?)",
                     (record.kind, record.identity, fingerprint, source_json, _json(record.data)),
-                )
+                ).rowcount
                 record_id = self.connection.execute("SELECT id FROM records WHERE kind=? AND fingerprint=?", (record.kind, fingerprint)).fetchone()[0]
-                provenance = self.collection_evidence(record.data.get("nft_address"), params.get("collection_address")) if record.kind == "listing" else {
+                if record_inserted and record.kind == "history" and listing_evidence:
+                    # Preserve the previous sequential semantics even for an
+                    # internal mixed-kind page: later listings see this history.
+                    key = address_key(record.identity)
+                    if key in listing_evidence and record.data.get("collection_address"):
+                        listing_evidence[key].setdefault("observed_history", set()).add(record.data["collection_address"])
+                provenance = self._resolve_collection_evidence(
+                    listing_evidence.get(address_key(record.data.get("nft_address")), {}), params.get("collection_address"),
+                ) if record.kind == "listing" else {
                     "collection_address": record.data.get("collection_address") or params.get("collection_address") or path_scope,
                     "collection_source": "api_record" if record.data.get("collection_address") else ("filtered_request" if params.get("collection_address") else ("request_path" if path_scope else "unknown")),
                     "collection_conflict": False, "collection_evidence": {"request_path": path_scope} if path_scope else {},

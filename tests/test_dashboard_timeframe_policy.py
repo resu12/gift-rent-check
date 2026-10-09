@@ -43,6 +43,7 @@ def test_legacy_queued_history_work_pauses_before_provider_attempt(tmp_path, mon
     with jobs.connect() as connection:
         connection.execute("UPDATE dashboard_jobs SET collection_window_json=NULL WHERE id=?", (job["id"],))
     result = execute_job(jobs.get(job["id"]), jobs, Settings(token="unused", db_path=tmp_path / "data.sqlite3"), DiscoverySettings())
+    assert jobs.get(job["id"])["resume_supported"] is False
     assert result["state"] == "partial"
     assert result["pages_committed"] == 0
     assert "fresh 30-day" in result["reason"]
@@ -57,6 +58,46 @@ def test_legacy_listing_only_job_remains_resumable(tmp_path):
     resumed, _ = jobs.enqueue(resume_job_id=job["id"])
     assert resumed["state"] == "queued"
     assert resumed["collection_window"] is None
+    assert resumed["resume_supported"] is True
+    assert resumed["resume_blocked_reason"] is None
+
+
+@pytest.mark.parametrize("kind", ["collect", "rental_prices"])
+@pytest.mark.parametrize("state", ["partial", "failed", "queued", "complete"])
+@pytest.mark.parametrize("window", [None, {}, {"timeframe": "all"},
+                                    {"timeframe": "30d", "window_from": "invalid", "window_to": "invalid", "timezone": "UTC"},
+                                    {"timeframe": "90d", "window_from": "2026-01-01T00:00:00Z", "window_to": "2026-10-09T00:00:00Z", "timezone": "UTC"}])
+def test_job_resume_metadata_marks_unsupported_history_without_changing_saved_work(tmp_path, kind, state, window):
+    jobs = JobStore(tmp_path / "jobs.sqlite3")
+    job, _ = jobs.enqueue(kind, WALLET)
+    with jobs.connect() as connection:
+        connection.execute("UPDATE dashboard_jobs SET state=?,collection_window_json=?,run_id=42,progress_json=? WHERE id=?",
+                           (state, json.dumps(window), json.dumps({"pages_committed": 7, "streams_complete": 3}), job["id"]))
+        before = dict(connection.execute("SELECT * FROM dashboard_jobs WHERE id=?", (job["id"],)).fetchone())
+    reported = jobs.get(job["id"])
+    assert reported["resume_supported"] is False
+    assert reported["resume_blocked_reason"] == "missing_bounded_timeframe"
+    assert reported["collection_window"] == window
+    assert reported["run_id"] == 42
+    assert reported["progress"]["pages_committed"] == 7
+    assert jobs.list()[0] == reported
+    with jobs.connect() as connection:
+        assert dict(connection.execute("SELECT * FROM dashboard_jobs WHERE id=?", (job["id"],)).fetchone()) == before
+
+
+@pytest.mark.parametrize("kind", ["collect", "rental_prices"])
+@pytest.mark.parametrize("timeframe", ["30d", "90d", "custom"])
+def test_job_resume_metadata_keeps_old_bounded_windows_supported(tmp_path, kind, timeframe):
+    jobs = JobStore(tmp_path / "jobs.sqlite3")
+    job, _ = jobs.enqueue(kind, WALLET)
+    window = window_metadata(dashboard_window(timeframe, "2020-01-01" if timeframe == "custom" else None,
+                                             "2020-03-30" if timeframe == "custom" else None, now=NOW))
+    with jobs.connect() as connection:
+        connection.execute("UPDATE dashboard_jobs SET collection_window_json=? WHERE id=?", (json.dumps(window), job["id"]))
+    reported = jobs.get(job["id"])
+    assert reported["resume_supported"] is True
+    assert reported["resume_blocked_reason"] is None
+    assert reported["collection_window"] == window
 
 
 @pytest.mark.parametrize("kind", ["collect", "rental_prices"])

@@ -13,7 +13,7 @@ test('every deployed module imports only existing project JS modules or the supp
       if (!entry.name.endsWith('.js')) continue;
       const relative = path.slice(root.length).replaceAll('\\', '/');
       assert.ok(relative === 'schema.js' || /^(lib|endpoints|handlers)\//.test(relative), 'Only modules in supported directories are deployed');
-      if (entry.name === 'private-config.js') continue;
+      if (['private-config.js', 'private-refresh-key.js'].includes(entry.name)) continue;
       const source = readFileSync(path, 'utf8');
       for (const match of source.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)) {
         const target = match[1];
@@ -22,7 +22,7 @@ test('every deployed module imports only existing project JS modules or the supp
         const resolved = resolve(dirname(path), target);
         assert.ok(resolved.startsWith(resolve(root) + sep), `Import escapes tgcloud in ${relative}`);
         // A clean checkout generates private-config from the ignored example.
-        assert.ok(existsSync(resolved) || resolved === join(root, 'lib/private-config.js'), `Missing dependency ${target} in ${relative}`);
+        assert.ok(existsSync(resolved) || ['private-config.js','private-refresh-key.js'].some(file => resolved === join(root, 'lib', file)), `Missing dependency ${target} in ${relative}`);
       }
     }
   }

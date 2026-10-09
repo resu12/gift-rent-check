@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { efficientRefreshSelection, presentCollectionEfficiency, visibleDashboardJobs } from './collectionEfficiency.ts';
+import { efficientRefreshSelection, presentCollectionEfficiency, presentResumeSupport, visibleDashboardJobs } from './collectionEfficiency.ts';
 import type { Job } from './types.ts';
 
 const job = (overrides: Partial<Job> = {}): Job => ({id: 1, kind: 'rental_prices', state: 'partial', created_at: '', updated_at: '', reason: null, run_id: 1, stop_requested: false,
@@ -66,4 +66,35 @@ test('custom restart preserves valid dates, rejects obsolete history windows and
   assert.deepEqual(efficientRefreshSelection(custom, {source: 'listings', timeframe: '7d'}, new Date('2026-10-09T12:00:00Z')), {source: 'rentals', timeframe: 'custom', dateFrom: '2026-10-01', dateTo: '2026-10-08'});
   assert.throws(() => efficientRefreshSelection(custom, {source: 'listings', timeframe: '7d'}, new Date('2027-10-09T12:00:00Z')), /Choose a recent timeframe/);
   assert.throws(() => efficientRefreshSelection(job({collection_window: {timeframe: 'all'}}), {source: 'listings', timeframe: '7d'}), /90 days/);
+});
+
+test('incompatible saved history offers a new 30-day scan without resuming or reusing UI dates', () => {
+  for (const kind of ['collect', 'rental_prices'] as const) {
+    const older = job({kind, resume_supported: false, resume_blocked_reason: 'missing_bounded_timeframe', collection_window: null,
+      progress: {server_time: 1000, lease_until: 0, efficiency: {page_size: 100, recommended_page_size: 100, scheduling: 'sequential', collections_started: 0, collections_total: 45}}});
+    const before = JSON.stringify(older);
+    assert.deepEqual(presentResumeSupport(older), {blocked: true, message: 'Older scan has no saved timeframe. Start a new 30-day scan; saved records are kept.', actionLabel: 'New 30-day scan', canStart: true});
+    assert.equal(presentCollectionEfficiency(older).canStart, false);
+    for (const fallback of [{source: 'rentals', timeframe: '90d'}, {source: 'rentals', timeframe: 'custom', dateFrom: '2020-01-01', dateTo: '2020-02-01'}] as const) {
+      assert.deepEqual(efficientRefreshSelection(older, fallback), {source: kind === 'rental_prices' ? 'rentals' : 'listings', timeframe: '30d'});
+    }
+    assert.equal(JSON.stringify(older), before);
+    assert.equal(presentResumeSupport({...older, state: 'failed'}).canStart, true);
+    for (const state of ['running', 'queued', 'complete'] as const) {
+      const view = presentResumeSupport({...older, state});
+      assert.equal(view.actionLabel, null); assert.equal(view.canStart, false);
+    }
+    for (const lease_until of [1100, Infinity, NaN]) assert.equal(presentResumeSupport({...older, progress: {...older.progress, lease_until}}).canStart, false);
+  }
+});
+
+test('valid stopped jobs and cloud payloads without the new flag preserve normal resume behavior', () => {
+  for (const resume_supported of [true, undefined]) {
+    const newer = job({id: 5, reason: 'Stopped by you', resume_supported, collection_window: {timeframe: '30d'}});
+    assert.deepEqual(presentResumeSupport(newer), {blocked: false, message: null, actionLabel: null, canStart: false});
+    assert.deepEqual(efficientRefreshSelection(newer, {source: 'listings', timeframe: '90d'}), {source: 'rentals', timeframe: '30d'});
+  }
+  const cloud = job({collection_window: {timeframe: '60d'}});
+  assert.equal(presentResumeSupport(cloud).blocked, false);
+  assert.deepEqual(efficientRefreshSelection(cloud, {source: 'listings', timeframe: '7d'}), {source: 'rentals', timeframe: '60d'});
 });

@@ -1,4 +1,5 @@
-import type { Dashboard, DashboardAdapter, Job, JobKind, PricingSelection } from './types';
+import type { Dashboard, DashboardAdapter, Job, JobKind, PricingSelection, MarketappSettingsAdapter } from './types';
+import { marketappSettingsError, publicMarketappSettings } from './marketappSettings.ts';
 import { historyCollectionError, pricingQuery } from './pricingSelection.ts';
 import type { OwnedPriceEndpoint, OwnedPriceTransport } from './ownedPriceRefresh.ts';
 
@@ -43,6 +44,26 @@ const OWNED_PRICE_ROUTES: Record<OwnedPriceEndpoint, string> = {
 // stay outside the shared price driver and components.
 export function createLocalDashboardAdapter(): DashboardAdapter & { ownedPriceTransport: OwnedPriceTransport } {
   let csrf = '';
+  const settingsRequest = async (method: 'GET' | 'POST' | 'DELETE', token = '', input?: { api_key: string; persist: boolean }, signal?: AbortSignal) => {
+    if (method !== 'GET' && !token) throw new Error('Reload the dashboard before changing API key settings.');
+    let response: Response;
+    try {
+      response = await fetch('/api/settings/marketapp', {
+        method, credentials: 'same-origin', cache: 'no-store', signal,
+        ...(method === 'GET' ? {} : { headers: { 'Content-Type': 'application/json', 'X-Dashboard-CSRF': token } }),
+        ...(input ? { body: JSON.stringify(input) } : {}),
+      });
+    } catch { throw new Error(marketappSettingsError()); }
+    // Do not read server error messages: validation output may contain a secret.
+    if (!response.ok) throw new Error(marketappSettingsError(response.status));
+    try { return publicMarketappSettings(await response.json()); }
+    catch { throw new Error('API key settings returned an invalid response.'); }
+  };
+  const marketappSettings: MarketappSettingsAdapter = {
+    get: signal => settingsRequest('GET', '', undefined, signal),
+    save: (apiKey, persist, token) => settingsRequest('POST', token, { api_key: apiKey, persist }),
+    remove: token => settingsRequest('DELETE', token),
+  };
   const ownedPriceTransport: OwnedPriceTransport = {
     async call<T>(endpoint: OwnedPriceEndpoint, input: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
       const path = OWNED_PRICE_ROUTES[endpoint];
@@ -70,6 +91,16 @@ export function createLocalDashboardAdapter(): DashboardAdapter & { ownedPriceTr
   };
   return {
     mode: 'local',
+    marketappSettings,
+    personalAnalytics: {
+      async importSnapshot(raw, token) {
+        if (!token) throw new Error('Reload the dashboard before importing analytics.');
+        if (new TextEncoder().encode(raw).byteLength > 262144) throw new Error('The analytics snapshot must be no larger than 256 KiB.');
+        return request('/api/personal-analytics', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Dashboard-CSRF': token }, body: raw,
+        });
+      },
+    },
     ownedPriceTransport,
     async getDashboard(selection, signal) {
       const data = await request<Dashboard>(`/api/dashboard?${pricingQuery(selection)}`, { signal });

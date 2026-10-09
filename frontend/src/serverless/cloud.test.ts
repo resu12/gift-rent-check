@@ -4,7 +4,7 @@ import { createCloudTransport, CloudError } from './cloudTransport.ts';
 import type { CloudTransport, CloudEndpoint } from './cloudTransport.ts';
 import { CloudCollectionDriver } from './cloudDriver.ts';
 import { createCloudDashboardAdapter, dashboardCsv } from './cloudAdapter.ts';
-import type { Dashboard, Job, Gift } from '../data/types.ts';
+import type { Dashboard, Job, Gift, PersonalRentalAnalytics } from '../data/types.ts';
 
 const saved = (state: Job['state'] = 'running', progress: Record<string, unknown> = {}): Job => ({
   id: 1, kind: 'prices', state, created_at: '2026-10-09T00:00:00Z', updated_at: '2026-10-09T00:00:00Z',
@@ -47,6 +47,84 @@ test('invalid SDK response and expected backend errors fail without reflecting m
   for (const value of [null, [], 'unsafe', { error: { code: 'CONFIGURATION', message: 'secret' } }]) {
     const transport = createCloudTransport({ call(_n, _i, cb) { cb(null, value); } });
     await assert.rejects(transport.call('getJobs'), (error: CloudError) => !error.message.includes('secret'));
+  }
+});
+
+test('Marketapp connection limits and expiry use safe fixed messages for SDK and backend errors', async () => {
+  for (const code of ['MARKETAPP_LOGIN_RATE_LIMIT', 'MARKETAPP_LOGIN_EXPIRED']) {
+    for (const envelope of [true, false]) {
+      const transport = createCloudTransport({ call(_name, _input, cb) {
+        const privateError = { code, type: code, message: 'Private provider nonce signature address' };
+        if (envelope) cb(null, { error: privateError }); else cb(privateError);
+      } });
+      await assert.rejects(transport.call('startMarketappLoginTest'), (error: CloudError) => {
+        assert.equal(error.code, code);
+        assert.equal(error.message.includes('Private provider'), false);
+        assert.match(error.message, code === 'MARKETAPP_LOGIN_RATE_LIMIT' ? /one minute.*five tests.*hour/ : /expired or was already used/);
+        return true;
+      });
+    }
+  }
+});
+
+test('analytics refresh error envelopes use fixed copy and never echo private session details', async () => {
+  for (const suffix of ['FAILED', 'RATE_LIMIT', 'EXPIRED', 'INVALID_INPUT', 'PRIVATE_ACCESS_DENIED', 'WALLET_REQUIRED', 'AUTH_REJECTED', 'PAGE_CHANGED']) {
+    const code = `MARKETAPP_REFRESH_${suffix}`;
+    const transport = createCloudTransport({ call(_name, _input, cb) { cb(null, { error: { code, message: 'Private cookie proof encrypted-envelope' } }); } });
+    await assert.rejects(transport.call('finishMarketappAnalyticsRefresh'), (error: CloudError) => {
+      assert.equal(error.code, code); assert.equal(error.message.includes('Private cookie'), false); return true;
+    });
+  }
+});
+
+test('refresh rate errors project only validated deadline, duration and static reason metadata', async () => {
+  const metadata = { retry_at: '2026-01-01T12:01:00.000Z', retry_after_seconds: 60, reason: 'hourly', message: 'Private cookie proof', unexpected: 'Private envelope' };
+  const read = async (change: Record<string, unknown> = {}, code = 'MARKETAPP_REFRESH_RATE_LIMIT') => {
+    const transport = createCloudTransport({ call(_name, _input, cb) { cb(null, { error: { code, ...metadata, ...change } }); } });
+    try { await transport.call('startMarketappAnalyticsRefresh'); assert.fail('Expected a rate error'); } catch (error) { return error as CloudError; }
+  };
+  const valid = await read(); assert.equal(valid.retryAt, metadata.retry_at); assert.equal(valid.retryAfterSeconds, 60); assert.equal(valid.limitReason, 'hourly');
+  assert.equal(JSON.stringify(valid).includes('Private'), false); assert.equal((valid as unknown as Record<string, unknown>).unexpected, undefined);
+  for (const change of [{ retry_at: 'private token' }, { retry_at: '2026-02-30T12:01:00Z' }, { retry_at: '2026-01-01T12:01:00+00:00' },
+    { retry_after_seconds: '60' }, { retry_after_seconds: 0 }, { retry_after_seconds: -1 }, { retry_after_seconds: 1.5 }, { retry_after_seconds: 86401 },
+    { reason: 'private cookie' }, { reason: { toString: () => 'hourly' } }, { retry_at: undefined }, { reason: undefined }]) {
+    const invalid = await read(change); assert.equal(invalid.retryAt, undefined); assert.equal(invalid.retryAfterSeconds, undefined); assert.equal(invalid.limitReason, undefined);
+  }
+  const other = await read({}, 'MARKETAPP_REFRESH_FAILED'); assert.equal(other.retryAfterSeconds, undefined);
+  const unsafeCode = await read({}, 'Private cookie proof'); assert.equal(unsafeCode.code, 'SERVER'); assert.equal(JSON.stringify(unsafeCode).includes('Private'), false);
+});
+
+test('analytics finish has a separate deadline and never retries a timed-out login', async () => {
+  let calls = 0;
+  const transport = createCloudTransport({ call(_name, _input, cb) { calls++; setTimeout(() => cb(null, { synthetic: true }), 10); } }, 1, 100);
+  assert.deepEqual(await transport.call('finishMarketappAnalyticsRefresh'), { synthetic: true });
+  await assert.rejects(transport.call('startMarketappAnalyticsRefresh'), (error: CloudError) => error.code === 'TIMEOUT');
+  assert.equal(calls, 2);
+  let finishes = 0;
+  const timeout = createCloudTransport({ call() { finishes++; } }, 100, 1);
+  await assert.rejects(timeout.call('finishMarketappAnalyticsRefresh'), (error: CloudError) => error.code === 'TIMEOUT');
+  assert.equal(finishes, 1);
+});
+
+test('personal analytics imports only the chosen snapshot and announces saved-data change', async () => {
+  const snapshot = {version: 1, daily: []} as unknown as PersonalRentalAnalytics;
+  const calls: unknown[] = []; const changed: unknown[] = [];
+  const adapter = createCloudDashboardAdapter(mockTransport((name, input) => {calls.push({name, input}); return {personal_analytics: snapshot};}));
+  adapter.subscribe!(event => changed.push(event));
+  assert.deepEqual(calls, [], 'creating the adapter never uploads analytics');
+  assert.equal(await adapter.personalAnalytics!.importSnapshot('{"synthetic":true}', 'local-csrf'), snapshot);
+  assert.deepEqual(calls, [{name: 'importPersonalAnalytics', input: {snapshot: '{"synthetic":true}'}}]);
+  assert.deepEqual(changed, [{savedDataChanged: true}]);
+  await assert.rejects(adapter.personalAnalytics!.importSnapshot('🦋'.repeat(70000), ''), /256 KiB/);
+  assert.equal(calls.length, 1, 'oversized data does not reach Telegram');
+});
+
+test('personal analytics imports reject malformed server output without a saved-data notification', async () => {
+  for (const response of [{}, {personal_analytics: {version: 2, daily: []}}, {personal_analytics: {version: 1}}]) {
+    const adapter = createCloudDashboardAdapter(mockTransport(() => response)); let changed = false;
+    adapter.subscribe!(() => {changed = true;});
+    await assert.rejects(adapter.personalAnalytics!.importSnapshot('{}', ''), /unexpected analytics snapshot/);
+    assert.equal(changed, false);
   }
 });
 

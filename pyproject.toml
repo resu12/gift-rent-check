@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "marketapp-rent"
-version = "0.2.0"
+version = "0.3.0"
 description = "Gift Rent Check: read-only TON gift discovery and rental price comparisons"
 readme = "README.md"
 requires-python = ">=3.12"

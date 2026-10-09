@@ -33,6 +33,24 @@ powershell -File scripts\build-dashboard.ps1
 
 Open <http://127.0.0.1:8765>. Stop the foreground server with Ctrl+C. A different local port can be selected with `--port 8766`. The dashboard selects `MARKETAPP_OWNER_ADDRESS`, `--wallet`, or the sole wallet already stored in discovery runs. It requires an explicit wallet when the database contains several wallets.
 
+Overview also supports your own Marketapp rental analytics through a saved browser snapshot: rent volume before fees, rental counts, and daily/weekly/monthly/yearly totals. **Update analytics** captures the signed-in page and imports its JSON. These figures retain their reporting period and capture time, separately from pricing comparisons. No Marketapp session or API requests are imported; desktop and Telegram store their own snapshots. See the [personal analytics workflow](personal-analytics.md).
+
+### Add a Marketapp API key in the desktop UI
+
+Open **API key** in the header and paste the raw Marketapp key into the masked field. Choose session-only use, or enable **Remember on this computer** to save it in Windows Credential Manager for your Windows user and the selected database. Session-only keys last until the desktop service stops, even if the browser closes. Other platforms offer session-only use when secure storage is unavailable.
+
+Saving makes the key available to the running desktop service. It checks the input format locally; it does not contact Marketapp, verify account access, start collection, or change request limits. **Remove key** clears the dashboard-managed configuration and its saved credential. Replacing a remembered key with a session-only key removes the previous saved key. Finish or stop active collection before changing a key.
+
+The UI never returns a saved key to the browser. Keys entered here are not written to browser storage, `.env`, SQLite, exports, or Git. Persistent storage uses the [Windows credential service](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-credwritew). A key already supplied through the environment or `.env` takes precedence and must be changed there. The CLI and Telegram use their own existing configuration; this setting applies only to the local dashboard.
+
+Manual Marketapp collection still requires the service to start with `--allow-network`. If collection is disabled, the UI shows that reason beside paused work. Restart with the same database, wallet, and review options, adding the flag:
+
+```powershell
+& .\.venv\Scripts\python.exe -m marketapp_rent --db data\marketapp.sqlite3 dashboard --allow-network
+```
+
+A remembered key is loaded on restart; re-enter a session-only key afterward. Then use **Continue** or a collection action when ready. Enabling manual collection does not automatically resume paused Marketapp work.
+
 The production frontend is served by Python. Generated assets are excluded from Git, so a fresh clone needs Node 24 and pnpm 11.25.0 for its initial build. Python serves the resulting files without Node at runtime. To rebuild:
 
 ```powershell
@@ -99,7 +117,7 @@ Desktop and Telegram share the same sync cards. Each card explains whether it is
 
 The main view shows one current sync, with other updates linked through **Activity**. Completed sync history and recent observations are expandable. Automatic price checks finish as a compact updated/unresolved summary. Longer explanations stay in **Details**, while failures, pause causes and cached-data age remain visible.
 
-The percentage counts completed collections (all requested scans for each collection) or checked gifts when the gift total is known. It is not an estimate of elapsed time: collections can differ greatly in size. Wallet discovery shows an indeterminate bar until enumeration establishes the total. Unresolved gift checks count as checked, not as successfully updated. Request allowances, saved dates, cache information, and technical reasons are under **Details**. Completed automatic price checks use a compact summary.
+Listing comparisons count finished collection, model, and backdrop checks, including the initial catalog check. A collection with unfinished model checks can still contribute its finished comparisons to progress. Other market jobs count completed collections (all requested scans for each collection), and ownership checks count checked gifts when the gift total is known. Percentages do not estimate elapsed time: checks can differ greatly in size. Wallet discovery shows an indeterminate bar until enumeration establishes the total. Unresolved gift checks count as checked, not as successfully updated. Request allowances, saved dates, cache information, and technical reasons are under **Details**. Completed automatic price checks use a compact summary.
 
 ## Supplemental local review
 

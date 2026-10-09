@@ -14,16 +14,18 @@ function fixture(t) {
   writeFileSync(join(directory, 'package.json'), '{"type":"module"}');
   writeFileSync(join(directory, 'tools/preflight.mjs'), readFileSync(new URL('../tools/preflight.mjs', import.meta.url)));
   const fakeSecret = 'test-secret-not-real';
+  const fakeRefreshKey = 'ab'.repeat(32);
   writeFileSync(join(directory, 'tgcloud/lib/private-config.js'), `export const ownerTelegramId=42; export const marketappToken=${JSON.stringify(fakeSecret)};`);
+  writeFileSync(join(directory, 'tgcloud/lib/private-refresh-key.js'), `export const marketappRefreshKey=${JSON.stringify(fakeRefreshKey)};`);
   writeFileSync(join(directory, 'dist/index.html'), '<script src="https://telegram.org/js/telegram-web-app.js?64"></script>');
   const run = (args = []) => spawnSync(process.execPath, ['tools/preflight.mjs', ...args], {cwd: directory, encoding: 'utf8'});
-  return {directory, run, fakeSecret};
+  return {directory, run, fakeSecret, fakeRefreshKey};
 }
 
 test('deployment preflight rejects secret and mock content without printing either', t => {
-  const {directory, run, fakeSecret} = fixture(t);
+  const {directory, run, fakeSecret, fakeRefreshKey} = fixture(t);
   assert.equal(run().status, 0);
-  for (const invalid of [fakeSecret, 'mock-only-token', '/mock-api/']) {
+  for (const invalid of [fakeSecret, fakeRefreshKey, 'mock-only-token', '/mock-api/']) {
     writeFileSync(join(directory, 'dist/assets/app.js'), `const bad=${JSON.stringify(invalid)}`);
     const result = run();
     assert.equal(result.status, 1);

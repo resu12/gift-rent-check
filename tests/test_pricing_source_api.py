@@ -305,6 +305,9 @@ def test_legacy_unbounded_history_resume_requires_fresh_job(api_setup, kind, old
     with app.state.jobs.connect() as connection:
         connection.execute("UPDATE dashboard_jobs SET collection_window_json=?,state='partial' WHERE id=?", (json.dumps(old_window) if old_window else None, job["id"]))
     with TestClient(app) as client:
+        reported = client.get("/api/jobs").json()["jobs"][0]
+        assert reported["resume_supported"] is False
+        assert reported["resume_blocked_reason"] == "missing_bounded_timeframe"
         response = client.post("/api/jobs", json={"resume_job_id": job["id"]}, headers={"x-dashboard-csrf": app.state.csrf_token})
         assert response.status_code == 409
         assert "fresh 30-day" in response.json()["detail"]
@@ -331,3 +334,4 @@ def test_bounded_resume_keeps_original_dates_after_long_pause(api_setup, monkeyp
         resumed = client.post("/api/jobs", json={"resume_job_id": job["id"]}, headers=headers)
         assert resumed.status_code == 202
         assert resumed.json()["job"]["collection_window"] == job["collection_window"]
+        assert resumed.json()["job"]["resume_supported"] is True

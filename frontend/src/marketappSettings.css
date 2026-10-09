@@ -1,0 +1,23 @@
+.marketapp-settings-dialog{width:480px;max-width:calc(100vw - 28px);max-height:calc(100dvh - 36px);padding:22px;border:1px solid #3a5166;border-radius:14px;background:#142130;color:#d5e5f1;box-shadow:0 20px 80px #0009;overflow-y:auto}
+.marketapp-settings-dialog::backdrop{background:#030710b8;backdrop-filter:blur(3px)}
+.marketapp-settings-heading{display:flex;align-items:center;justify-content:space-between;gap:15px;margin-bottom:12px}
+.marketapp-settings-heading h2{font-size:21px;line-height:1.3;margin:0}
+.marketapp-settings-dialog p{font-size:13px;line-height:1.6;margin:12px 0;color:#adc3d5}
+.marketapp-settings-status{display:flex;flex-direction:column;gap:4px;padding:13px 0;margin:15px 0;border-top:1px solid #304557;border-bottom:1px solid #304557;font-size:14px}
+.marketapp-settings-status small{font-size:12px;color:#a1b8cc}
+.marketapp-key-label{display:block;font-size:13px;margin:16px 0 8px}
+.marketapp-settings-dialog input[type=password]{width:100%;min-height:44px;border:1px solid #456077;border-radius:8px;background:#101b28;color:#dceaf5;padding:10px 12px;font-size:16px}
+.marketapp-persist{display:flex;align-items:flex-start;gap:9px;font-size:13px;line-height:1.5;margin:17px 0 7px}
+.marketapp-persist input{width:17px;height:17px;margin:2px 0 0;accent-color:#72dcbc;flex-shrink:0}
+.marketapp-settings-dialog .marketapp-settings-note{font-size:12px;line-height:1.6;margin:8px 0 14px;color:#9eb6cb}
+.marketapp-settings-actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:16px}
+.marketapp-settings-dialog .marketapp-network-note{padding:12px;border:1px solid #534932;border-radius:8px;background:#2b2a24;color:#d5c394;margin:18px 0 0}
+.marketapp-network-note code{font-size:12px;overflow-wrap:anywhere}
+.marketapp-settings-dialog .marketapp-settings-error{color:#f0b7ad}
+.marketapp-settings-dialog .marketapp-settings-success{color:#9cdec4}
+.app-shell .marketapp-settings-button{min-height:36px;padding:7px 10px;font-size:12px}
+.app-shell .marketapp-setup-notice{flex-wrap:wrap}
+.app-shell .marketapp-setup-notice>div{min-width:180px}
+.app-shell .sync-setup-blocker{color:#e3c895}
+.app-shell .sync-setup-action{margin-top:9px}
+@media(max-width:760px){.app-shell .marketapp-settings-button{font-size:11px;padding:7px 8px}.marketapp-settings-dialog{padding:18px}.app-shell:has(.marketapp-settings-button) .breadcrumb{font-size:11px}.app-shell:has(.marketapp-settings-button) .breadcrumb>span{margin:0 4px}.app-shell:has(.marketapp-settings-button) .topbar-right{gap:7px}.app-shell:has(.marketapp-settings-button) .wallet-chip>span:nth-child(2){max-width:78px}}

@@ -89,6 +89,14 @@ class JobStore:
             value["progress"]["marketapp_budget"] = budget
         value["collection_window"] = json.loads(value.pop("collection_window_json")) if value.get("collection_window_json") else None
         value.pop("collection_window_json", None)
+        value["resume_supported"] = True
+        value["resume_blocked_reason"] = None
+        if value["kind"] in {"collect", "rental_prices"}:
+            try:
+                validate_saved_dashboard_window(value["collection_window"])
+            except ValueError:
+                value["resume_supported"] = False
+                value["resume_blocked_reason"] = "missing_bounded_timeframe"
         value["result"] = json.loads(value.pop("result_json")) if value.get("result_json") else None
         value.pop("result_json", None)
         value.pop("worker", None)
@@ -312,15 +320,23 @@ def _market_sync_progress(store, job, settings, streams):
     total = None if None in groups else len(groups)
     completed = sum(all(stream["state"] == "complete" for stream in values)
                     for scope, values in groups.items() if scope is not None)
+    unit = "collections"
+    if job["kind"] == "prices":
+        # Each collection can have many model/backdrop comparisons. Counting
+        # only fully finished collections hides completed comparisons in older
+        # sequential runs, often showing 0% after most work has finished.
+        unit = "checks"
+        total = len(work)
+        completed = sum(stream["state"] == "complete" for stream in work)
     processed = store.connection.execute("""SELECT count(*) FROM observations o JOIN pages p ON p.id=o.page_id
         JOIN streams s ON s.id=p.stream_id WHERE s.run_id=? AND s.kind IN ('listing','history')""", (job["run_id"],)).fetchone()[0]
     running = next((stream for stream in work if stream["state"] == "running"), None)
     current = running or next_stream(work, scheduling(settings), broad_first=bool(settings.get("listing_refresh")))
     if ((running is None or running["kind"] == "collection")
             and any(stream["kind"] == "collection" and stream["state"] != "complete" for stream in work)):
-        return _sync_progress("preparing", total=total, processed_items=processed)
+        return _sync_progress("preparing", completed if unit == "checks" else 0, total=total, unit=unit, processed_items=processed)
     if current is None:
-        return _sync_progress("complete", completed, total, processed_items=processed)
+        return _sync_progress("complete", completed, total, unit=unit, processed_items=processed)
     phase = {"listing": "listings", "history": "rentals"}.get(current["kind"], "preparing")
     name = None
     if current.get("scope") is not None:
@@ -332,7 +348,7 @@ def _market_sync_progress(store, job, settings, streams):
                 value = collection.get("name")
                 name = value.strip() if isinstance(value, str) and value.strip() else None
                 break
-    return _sync_progress(phase, completed, total, current_collection=name, processed_items=processed)
+    return _sync_progress(phase, completed, total, unit=unit, current_collection=name, processed_items=processed)
 
 
 def progress_for(database, job):
@@ -533,7 +549,11 @@ def execute_job(job, jobs, settings, discovery_settings, review_path=None, cance
 
     with Store(settings.db_path) as store:
         wallet = job["wallet"]
-        view = build_dashboard(store, wallet, review_path)
+        # Pricing resumes use their original saved targets. Rebuilding every
+        # dashboard comparison here cannot change those targets and delays the
+        # first request on databases with substantial rental history.
+        frozen_pricing = job["run_id"] is not None and job["kind"] in {"prices", "rental_prices"}
+        view = {"gifts": []} if frozen_pricing else build_dashboard(store, wallet, review_path)
         def callback(run_id):
             if not jobs.link_run(job["id"], run_id, owner):
                 guard()

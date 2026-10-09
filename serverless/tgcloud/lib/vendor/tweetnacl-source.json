@@ -1,0 +1,7 @@
+{
+  "package": "tweetnacl",
+  "version": "1.0.3",
+  "source": "https://github.com/dchest/tweetnacl-js/tree/v1.0.3",
+  "file": "nacl-fast.js",
+  "sha256": "6bcd37a3b20dce913f82d4b23e4e2b661058b4b953df8a3f8c45d56ac4f72447"
+}

@@ -113,6 +113,8 @@ export interface DashboardSummary {
 }
 
 export interface Capabilities {
+  marketapp_login_test?: boolean;
+  marketapp_analytics_refresh?: boolean;
   owned_price_refresh?: boolean;
   hosting?: 'local' | 'serverless';
   supported_jobs?: JobKind[];
@@ -134,6 +136,33 @@ export interface Capabilities {
 
 export type DataRecord = Record<string, unknown>;
 
+export interface PersonalRentalAnalytics {
+  version: 1;
+  source: 'marketapp_personal_rent_page';
+  source_url: string;
+  wallet: string;
+  captured_at: string;
+  period_start: string;
+  period_end: string;
+  timezone: 'UTC';
+  currency: 'GRAM';
+  volume_basis: 'gross_before_fees';
+  summary: {
+    rent_volume: string;
+    rentals: number;
+    new_rentals: number;
+    extensions: number;
+    items: number | null;
+    price_per_day: string | null;
+    average_duration: string | null;
+    extension_percent: string | null;
+    spent_on_rent: string | null;
+    spending_rentals: number | null;
+  };
+  daily: { date: string; rent_volume: string; new_rentals: number; extensions: number; rentals: number }[];
+  fingerprint: string;
+}
+
 export interface Dashboard {
   wallet: string | null;
   generated_at: string;
@@ -145,6 +174,8 @@ export interface Dashboard {
   review: DataRecord[] | DataRecord;
   capabilities: Capabilities;
   pricing?: DataRecord;
+  personal_analytics?: PersonalRentalAnalytics | null;
+  personal_analytics_snapshots?: PersonalRentalAnalytics[];
 }
 
 export interface Job {
@@ -159,7 +190,7 @@ export interface Job {
     phase: 'preparing' | 'listings' | 'rentals' | 'discovering' | 'verifying' | 'complete';
     completed: number;
     total: number | null;
-    unit: 'collections' | 'gifts';
+    unit: 'collections' | 'gifts' | 'checks';
     current_collection: string | null;
     processed_items: number;
   }; history_refresh?: {
@@ -185,6 +216,8 @@ export interface Job {
     collections_total: number | null;
   } };
   stop_requested: boolean;
+  resume_supported?: boolean;
+  resume_blocked_reason?: 'missing_bounded_timeframe' | null;
   collection_window?: {
     timeframe: PricingTimeframe;
     date_from?: string | null;
@@ -197,8 +230,97 @@ export interface Job {
 
 export interface JobStartOptions { forceRefresh?: boolean }
 
+export interface MarketappSettingsStatus {
+  configured: boolean;
+  source: 'environment' | 'secure_store' | 'session' | 'none';
+  persistent_storage_available: boolean;
+  network_enabled: boolean;
+  can_manage: boolean;
+  restart_required: boolean;
+  reason?: 'external_configuration' | 'active_job' | 'secure_store_unavailable';
+}
+
+export interface MarketappSettingsAdapter {
+  get(signal?: AbortSignal): Promise<MarketappSettingsStatus>;
+  save(apiKey: string, persist: boolean, csrf: string): Promise<MarketappSettingsStatus>;
+  remove(csrf: string): Promise<MarketappSettingsStatus>;
+}
+
+export interface MarketappLoginChallenge {
+  attempt_id: string;
+  challenge: string;
+  manifest_url: string;
+  expires_at: string;
+  wallet: string;
+  domain: 'marketapp.org';
+}
+export interface MarketappLoginAccount {
+  address: string;
+  chain: string;
+  walletStateInit?: string;
+  publicKey?: string;
+}
+export interface MarketappLoginProof {
+  timestamp: number;
+  domain: { lengthBytes: number; value: string };
+  payload: string;
+  signature: string;
+}
+export type MarketappAnalyticsPeriod = 30 | 365;
+export interface MarketappAnalyticsRefreshChallenge extends MarketappLoginChallenge {
+  period_days: MarketappAnalyticsPeriod;
+  session_envelope: string;
+}
+export interface MarketappWalletDevice {
+  platform: string;
+  appName: string;
+  appVersion: string;
+  maxProtocolVersion: number;
+  features: unknown[];
+}
+export interface MarketappAnalyticsRefreshResult {
+  attempt_id: string;
+  authenticated: true;
+  analytics_refreshed: true;
+  snapshot: PersonalRentalAnalytics;
+}
+export interface MarketappAnalyticsRefreshStatus {
+  attempt: {
+    attempt_id: string;
+    state: 'awaiting_approval' | 'updating' | 'saved' | 'failed' | 'expired' | 'cancelled';
+    period_days: MarketappAnalyticsPeriod;
+    updated_at: string;
+    error_code?: string;
+  } | null;
+}
+export interface MarketappAnalyticsRefreshAdapter {
+  getStatus?(signal?: AbortSignal): Promise<MarketappAnalyticsRefreshStatus>;
+  start(periodDays: MarketappAnalyticsPeriod, signal?: AbortSignal): Promise<MarketappAnalyticsRefreshChallenge>;
+  finish(challenge: MarketappAnalyticsRefreshChallenge, account: MarketappLoginAccount & { walletStateInit: string; publicKey: string }, proof: MarketappLoginProof, device: MarketappWalletDevice, signal?: AbortSignal): Promise<MarketappAnalyticsRefreshResult>;
+  cancel(attemptId: string, signal?: AbortSignal): Promise<void>;
+}
+export interface MarketappLoginTestResult {
+  attempt_id: string;
+  compatible: boolean;
+  checks: { wallet_matches: boolean; mainnet: boolean; domain_matches: boolean; challenge_matches: boolean; timestamp_fresh: boolean; signature_present: boolean };
+  signature_verified: false;
+  authenticated: false;
+  analytics_refreshed: false;
+}
+export interface MarketappLoginTestAdapter {
+  start(signal?: AbortSignal): Promise<MarketappLoginChallenge>;
+  finish(attemptId: string, account: MarketappLoginAccount, proof: MarketappLoginProof, signal?: AbortSignal): Promise<MarketappLoginTestResult>;
+  cancel(attemptId: string, signal?: AbortSignal): Promise<void>;
+}
+
 export interface DashboardAdapter {
   readonly mode?: 'local' | 'serverless';
+  readonly marketappSettings?: MarketappSettingsAdapter;
+  readonly marketappLoginTest?: MarketappLoginTestAdapter;
+  readonly marketappAnalyticsRefresh?: MarketappAnalyticsRefreshAdapter;
+  readonly personalAnalytics?: {
+    importSnapshot(raw: string, csrf: string): Promise<PersonalRentalAnalytics>;
+  };
   readonly ownedPriceTransport?: import('./ownedPriceRefresh.ts').OwnedPriceTransport;
   interrupt?(): void;
   subscribe?(listener: (event: { job?: Job; error?: string; savedDataChanged?: boolean }) => void): () => void;

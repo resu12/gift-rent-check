@@ -29,6 +29,8 @@ Provider credentials and deployment snapshots stay outside the frontend. Product
 
 An optional mainnet TON Connect session exposes a connected address separately from the saved portfolio wallet. It requests no transaction or signed ownership proof and grants no backend access. Disconnect retains saved data and refresh behavior; connecting another wallet never reassigns the imported gifts. The pinned SDK is bundled locally, while its wallet list and connection bridges use the SDK's external services.
 
+Telegram's **Refresh analytics** uses a separate, temporary TON Connect session to request a fresh Marketapp login proof for the saved wallet. It saves validated personal analytics without changing the ordinary wallet connection. See the [analytics refresh workflow and limits](../docs/telegram-serverless.md#refresh-marketapp-analytics). Desktop keeps browser capture/import.
+
 ## Behavior
 
 The UI includes grid and detailed pricing views, search, collection/state/Black filters, infinite scrolling with a Load more fallback, gift details, provenance, and resumable refresh jobs. Recommendations come from the backend, require at least three distinct gifts in the applicable cohort, and respect the selected source and timeframe. The Black filter restricts collection averages as well as model averages. Recorded rental rates are not proof of income received by the current owner.

@@ -3,6 +3,7 @@
 !.env.example
 credentials*
 secrets*
+marketapp-rent-analytics*.json
 .codex-remote-attachments/
 .codex/
 portfolio*.csv
@@ -39,6 +40,7 @@ coverage.xml
 node_modules/
 .tgcloud/
 serverless/tgcloud/lib/private-config.js
+serverless/tgcloud/lib/private-refresh-key.js
 serverless/.private-config-*
 .private-config-*
 

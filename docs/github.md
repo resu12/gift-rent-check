@@ -6,11 +6,11 @@ Use **Gift Rent Check** as the project title and **gift-rent-check** as the GitH
 
 The repository contains Python source, React source, Telegram backend modules, tests, dependency locks, API/decoder evidence, and setup scripts. CI runs tests and builds only; it has no deployment credentials and does not collect live market data.
 
-Git excludes `.env`, private backend configuration, `.tgcloud` snapshots, uploaded attachments, local databases, portfolio CSVs, exports, logs, virtual environments, dependencies, and generated bundles. `.env.example`, the blank portfolio template, and `serverless/private-config.example.js` are safe configuration examples. Keep personal backups outside version control; an ignore rule does not protect a file that was already committed.
+Git excludes `.env`, private backend configuration and refresh-encryption keys, personal analytics captures, `.tgcloud` snapshots, uploaded attachments, local databases, portfolio CSVs, exports, logs, virtual environments, dependencies, and generated bundles. `.env.example`, the blank portfolio template, and `serverless/private-config.example.js` are safe configuration examples. Keep personal backups outside version control; an ignore rule does not protect a file that was already committed.
 
 Public blockchain fixtures intentionally contain original contract/NFT addresses and BOCs for reproducible decoder checks. Their provenance is documented in `tests/fixtures/ton/README.md`. They are distinct from the private portfolio, raw discovery database, and credentials, which are excluded.
 
-Do not attach `.env`, `.tgcloud`, raw databases, private exports, or credential-bearing logs to GitHub issues. A project license has not been selected; there is no open-source license grant in this repository.
+Do not attach `.env`, `.tgcloud`, raw databases, private exports, or credential-bearing logs to GitHub issues. A project license has not been selected; there is no open-source license grant for the application. The vendored TweetNaCl code retains its bundled third-party license and pinned source provenance.
 
 ## Fresh-clone checks
 
@@ -36,11 +36,11 @@ GitHub Actions checks Python 3.12, Node 24 tests, and both frontend builds on pu
 
 ## Release preparation
 
-The current application version is **0.2.0**. [CHANGELOG.md](../CHANGELOG.md) contains the release notes and can supply the body of a GitHub release.
+The current application version is **0.3.0**. [CHANGELOG.md](../CHANGELOG.md) contains the release notes and can supply the body of a GitHub release.
 
 Keep `pyproject.toml`, `src/marketapp_rent/__init__.py`, `frontend/package.json`, and `serverless/package.json` on the same application version. Dependency and database schema versions are separate; a UI release does not change them. Add a dated changelog entry, run the fresh-clone checks above, and review the committed paths before pushing. Generated bundles and private operational data must remain ignored.
 
-Preparing a release commit locally does not publish a GitHub release or deploy the app. After pushing an approved release commit and checking GitHub Actions, use its matching version, such as `v0.2.0`, for the release tag.
+Preparing a release commit locally does not publish a GitHub release or deploy the app. After pushing an approved release commit and checking GitHub Actions, use its matching version, such as `v0.3.0`, for the release tag.
 
 ## First GitHub push
 

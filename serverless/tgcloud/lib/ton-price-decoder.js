@@ -56,7 +56,7 @@ const K = new Uint32Array([
   0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
 ]);
 const ror = (n, bits) => (n >>> bits) | (n << (32 - bits));
-function sha256(bytes) {
+export function sha256(bytes) {
   const data = new Uint8Array(Math.ceil((bytes.length + 9) / 64) * 64);
   data.set(bytes); data[bytes.length] = 128;
   const view = new DataView(data.buffer), bitLength = bytes.length * 8;

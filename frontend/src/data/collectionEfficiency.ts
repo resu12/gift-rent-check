@@ -4,6 +4,21 @@ import { historyCollectionError, pricingQuery } from './pricingSelection.ts';
 const count = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 const comparison = (job: Job) => ['prices', 'rental_prices', 'collect'].includes(job.kind);
 
+/** Only an explicit backend incompatibility replaces the saved Resume action. */
+export function presentResumeSupport(job: Job) {
+  const blocked = job.resume_supported === false;
+  const now = typeof job.progress?.server_time === 'number' ? job.progress.server_time : Date.now();
+  const lease = job.progress?.lease_until;
+  const deadline = typeof lease === 'number' ? lease : typeof job.progress?.next_allowed_at === 'number' ? job.progress.next_allowed_at : 0;
+  const idle = Number.isFinite(deadline) && Number.isFinite(now) && deadline <= now;
+  return {
+    blocked,
+    message: blocked ? 'Older scan has no saved timeframe. Start a new 30-day scan; saved records are kept.' : null,
+    actionLabel: blocked && comparison(job) && ['partial', 'failed'].includes(job.state) ? 'New 30-day scan' : null,
+    canStart: blocked && comparison(job) && ['partial', 'failed'].includes(job.state) && idle,
+  };
+}
+
 /** Replaced paused scans stay in Activity; the main view emphasizes current work. */
 export function visibleDashboardJobs(jobs: Job[]): Job[] {
   const latestId = Math.max(0, ...jobs.map(job => job.id));
@@ -38,6 +53,7 @@ export function presentCollectionEfficiency(job: Job) {
 /** A new run keeps the selected period, not the old traversal's absolute bounds. */
 export function efficientRefreshSelection(job: Job, fallback: PricingSelection, now = new Date()): PricingSelection {
   if (!comparison(job)) throw new Error('Only comparison scans support an efficient refresh.');
+  if (job.resume_supported === false) return { source: job.kind === 'rental_prices' ? 'rentals' : 'listings', timeframe: '30d' };
   const window = job.collection_window;
   const chosen: PricingSelection = {
     source: job.kind === 'rental_prices' ? 'rentals' : 'listings',

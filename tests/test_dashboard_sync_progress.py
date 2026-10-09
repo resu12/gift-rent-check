@@ -72,6 +72,28 @@ def test_collection_progress_waits_for_all_required_streams_and_uses_saved_frien
                                            "unit": "collections", "current_collection": None, "processed_items": 0}
 
 
+def test_listing_comparison_progress_counts_finished_models_before_whole_collections(tmp_path):
+    database = tmp_path / "progress.sqlite3"
+    manifest = [catalog(), stream("listing", COLLECTION), stream("listing", COLLECTION, model="A"),
+                stream("listing", COLLECTION, model="B"), stream("listing", OTHER),
+                stream("listing", OTHER, model="C")]
+    with Store(database) as store:
+        run = store.create_run({"streams": manifest}, [COLLECTION, OTHER], [])
+        ids = [store.add_stream(run, **spec) for spec in manifest]
+        commit(store, ids[0], "collection", [])
+        for index in (1, 2, 4):
+            store.set_stream_state(ids[index], "complete")
+        # Neither collection is complete, but four of six fixed checks are.
+        current = sync(database, job(run, "prices"))
+        assert (current["completed"], current["total"], current["unit"]) == (4, 6, "checks")
+        assert current["phase"] == "listings"
+        # Other collection jobs keep their collection coverage denominator.
+        assert sync(database, job(run))["completed"] == 0
+        for stream_id in ids:
+            store.set_stream_state(stream_id, "complete")
+        assert sync(database, job(run, "prices"))["completed"] == 6
+
+
 def test_cached_collection_work_is_not_100_percent_before_catalog_finishes(tmp_path):
     database = tmp_path / "progress.sqlite3"
     manifest = [catalog(), stream("listing", COLLECTION), stream("listing", COLLECTION, model="A")]

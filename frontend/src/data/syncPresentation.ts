@@ -89,7 +89,17 @@ function progress(completedValue: unknown, totalValue: unknown, unit: CountUnit,
 
 function jobProgress(job: Job): SyncProgress {
   const detail = object(job.progress?.sync), terminal = job.state === 'complete';
-  if (detail && ['collections', 'gifts'].includes(String(detail.unit))) {
+  // Older listing jobs saved collection completion even when each collection
+  // contained many model/backdrop checks. Show that committed work accurately
+  // until the worker writes the new explicit checks unit on its next update.
+  if (job.kind === 'prices' && detail?.unit === 'collections') {
+    const collectionsDone = count(detail.completed), collectionsTotal = count(detail.total);
+    const checksDone = count(job.progress?.streams_complete), checksTotal = count(job.progress?.streams_total);
+    if (collectionsDone !== null && collectionsTotal !== null && collectionsTotal > 0 && collectionsDone <= collectionsTotal &&
+        checksDone !== null && checksTotal !== null && checksTotal > collectionsTotal && checksDone <= checksTotal &&
+        (!terminal || checksDone === checksTotal)) return progress(checksDone, checksTotal, 'checks', terminal);
+  }
+  if (detail && ['collections', 'gifts', 'checks'].includes(String(detail.unit))) {
     return progress(detail.completed, detail.total, detail.unit as CountUnit, terminal, detail.phase === 'discovering');
   }
   // Enumeration can reveal more gifts. Its stream count is not a total wallet

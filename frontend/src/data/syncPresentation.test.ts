@@ -32,6 +32,50 @@ test('request allowance is never converted to completion and legacy stream units
   assert.equal(unknown.progress.percent, null); assert.equal(unknown.progress.indeterminate, true);
 });
 
+test('explicit listing-check progress shows completed cohort work before a collection finishes', () => {
+  const model = presentJobSync(job({ kind: 'prices', progress: {
+    sync: { phase: 'listings', completed: 157, total: 274, unit: 'checks', current_collection: 'Low Riders' },
+    streams_complete: 1, streams_total: 5,
+  } }));
+  assert.deepEqual(model.progress, { completed: 157, total: 274, percent: 57, label: '157 of 274 checks finished', indeterminate: false });
+  assert.equal(compactJobMessage(job({kind: 'prices'}), model), 'Checking Low Riders');
+});
+
+test('legacy listing-only saved progress uses validated checks without claiming collection completion', () => {
+  const progress = { sync: { phase: 'listings', completed: 0, total: 45, unit: 'collections' }, streams_complete: 157, streams_total: 274 };
+  for (const state of ['running', 'partial'] as const) {
+    const model = presentJobSync(job({ kind: 'prices', state, progress }));
+    assert.equal(model.progress.percent, 57);
+    assert.equal(model.progress.label, '157 of 274 checks finished');
+    assert.equal(progress.sync.completed, 0);
+  }
+  for (const kind of ['rental_prices', 'collect'] as const) {
+    const model = presentJobSync(job({ kind, progress }));
+    assert.equal(model.progress.percent, 0);
+    assert.equal(model.progress.label, '0 of 45 collections checked');
+  }
+});
+
+test('listing legacy fallback does not replace malformed or unknown progress, or invent final completion', () => {
+  const baseline = { sync: { phase: 'listings', completed: 0, total: 45, unit: 'collections' }, streams_complete: 157, streams_total: 274 };
+  for (const [completed, total] of [[-1, 45], [NaN, 45], [46, 45], [0, null], [0, '45']]) {
+    const model = presentJobSync(job({ kind: 'prices', progress: { ...baseline, sync: { ...baseline.sync, completed, total } } }));
+    assert.equal(model.progress.percent, null);
+  }
+  for (const [streams_complete, streams_total] of [[-1, 274], [275, 274], [1.5, 274], [157, null], [157, '274'], [2, 45]]) {
+    const model = presentJobSync(job({ kind: 'prices', progress: { ...baseline, streams_complete, streams_total } }));
+    assert.equal(model.progress.label, '0 of 45 collections checked');
+  }
+  const unknownTotal = presentJobSync(job({ kind: 'prices', progress: { ...baseline, sync: { ...baseline.sync, total: 0 } } }));
+  assert.equal(unknownTotal.progress.percent, null);
+  const finished = { ...baseline, streams_complete: 274, sync: { ...baseline.sync, completed: 45 } };
+  assert.equal(presentJobSync(job({kind: 'prices', state: 'complete', progress: finished})).progress.percent, 100);
+  assert.equal(presentJobSync(job({kind: 'prices', state: 'complete', progress: finished})).progress.label, '274 of 274 checks finished');
+  assert.equal(presentJobSync(job({kind: 'prices', state: 'running', progress: finished})).progress.percent, 99);
+  const contradictoryFinished = { ...finished, streams_complete: 157 };
+  assert.equal(presentJobSync(job({kind: 'prices', state: 'complete', progress: contradictoryFinished})).progress.label, '45 of 45 collections checked');
+});
+
 test('running, stopped, paused and failed progress cannot claim 100 percent before completion', () => {
   for (const state of ['running', 'partial', 'failed'] as const) {
     const model = presentJobSync(job({state, progress: {sync: {phase: 'rentals', completed: 12, total: 12, unit: 'collections'}}})); assert.equal(model.progress.percent, 99);

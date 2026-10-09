@@ -1,4 +1,4 @@
-import type { Dashboard, DashboardAdapter, Job, JobKind, PricingSelection } from '../data/types.ts';
+import type { Dashboard, DashboardAdapter, Job, JobKind, PricingSelection, PersonalRentalAnalytics, MarketappLoginChallenge, MarketappLoginTestResult, MarketappAnalyticsRefreshChallenge, MarketappAnalyticsRefreshResult, MarketappAnalyticsRefreshStatus } from '../data/types.ts';
 import { historyCollectionError, pricingQuery } from '../data/pricingSelection.ts';
 import { formatAmount } from '../data/helpers.ts';
 import type { CloudTransport } from './cloudTransport.ts';
@@ -77,7 +77,34 @@ export function createCloudDashboardAdapter(transport: CloudTransport, options: 
 
   return {
     mode: 'serverless',
+    marketappLoginTest: {
+      start(signal) { return transport.call<MarketappLoginChallenge>('startMarketappLoginTest', {}, signal); },
+      finish(attempt_id, account, proof, signal) { return transport.call<MarketappLoginTestResult>('finishMarketappLoginTest', { attempt_id, account, proof }, signal); },
+      async cancel(attempt_id, signal) { await transport.call('cancelMarketappLoginTest', { attempt_id }, signal); },
+    },
+    marketappAnalyticsRefresh: {
+      getStatus(signal) { return transport.call<MarketappAnalyticsRefreshStatus>('getMarketappAnalyticsRefreshStatus', {}, signal); },
+      start(period_days, signal) { return transport.call<MarketappAnalyticsRefreshChallenge>('startMarketappAnalyticsRefresh', { period_days }, signal); },
+      finish(challenge, account, proof, device, signal) {
+        return transport.call<MarketappAnalyticsRefreshResult>('finishMarketappAnalyticsRefresh', {
+          attempt_id: challenge.attempt_id, session_envelope: challenge.session_envelope,
+          account: { address: account.address, chain: account.chain, walletStateInit: account.walletStateInit, ...(account.publicKey ? { publicKey: account.publicKey } : {}) },
+          device: { platform: device.platform, appName: device.appName, appVersion: device.appVersion, maxProtocolVersion: device.maxProtocolVersion, features: device.features },
+          proof: { timestamp: proof.timestamp, domain: { lengthBytes: proof.domain.lengthBytes, value: proof.domain.value }, payload: proof.payload, signature: proof.signature },
+        }, signal);
+      },
+      async cancel(attempt_id, signal) { await transport.call('cancelMarketappAnalyticsRefresh', { attempt_id }, signal); },
+    },
     ownedPriceTransport: transport,
+    personalAnalytics: {
+      async importSnapshot(raw, _csrf) {
+        if (new TextEncoder().encode(raw).length > 262144) throw new Error('The analytics snapshot exceeds 256 KiB.');
+        const response = await transport.call<{ personal_analytics: PersonalRentalAnalytics }>('importPersonalAnalytics', { snapshot: raw });
+        if (!response.personal_analytics || response.personal_analytics.version !== 1 || !Array.isArray(response.personal_analytics.daily)) throw new Error('The server returned an unexpected analytics snapshot. Reload saved data.');
+        emit({ savedDataChanged: true });
+        return response.personal_analytics;
+      },
+    },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     savedDataChanged() { emit({ savedDataChanged: true }); },
     interrupt() { generation += 1; driver?.interrupt(); },

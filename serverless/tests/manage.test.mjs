@@ -22,6 +22,7 @@ function fixture(t) {
   writeFileSync(join(project, '.tgcloud/credentials'), JSON.stringify({token}));
   writeFileSync(join(project, 'dist/index.html'), '<script src="https://telegram.org/js/telegram-web-app.js?64"></script>');
   writeFileSync(join(project, 'tgcloud/lib/private-config.js'), `export const ownerTelegramId=42;export const marketappToken=${JSON.stringify(providerToken)};`);
+  writeFileSync(join(project, 'tgcloud/lib/private-refresh-key.js'), `export const marketappRefreshKey='${'ab'.repeat(32)}';`);
   // A synthetic pinned-CLI boundary. All requests are represented by markers;
   // this project has neither a real token nor a network-capable CLI installed.
   writeFileSync(join(project, 'node_modules/@tgcloud/cli/src/core/credentials.js'), `

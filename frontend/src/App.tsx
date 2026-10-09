@@ -14,9 +14,13 @@ import { ListFooter } from './ListFooter';
 import { RentalCount, RentalHistoryDetails } from './RentalCount';
 import { useOwnedPriceRefresh } from './useOwnedPriceRefresh';
 import { OwnedPriceStatus } from './OwnedPriceStatus';
+import { MarketappSettings } from './MarketappSettings';
+import { PersonalAnalytics } from './PersonalAnalytics';
+import { localCollectionBlocker } from './data/marketappSettings';
+import type { CollectionBlocker } from './data/marketappSettings';
 import { SyncProgress } from './SyncProgress';
 import { compactJobMessage, presentJobSync } from './data/syncPresentation';
-import { efficientRefreshSelection, presentCollectionEfficiency, visibleDashboardJobs } from './data/collectionEfficiency';
+import { efficientRefreshSelection, presentCollectionEfficiency, presentResumeSupport, visibleDashboardJobs } from './data/collectionEfficiency';
 import './interface.css';
 
 type Page = 'pricing' | 'overview' | 'gifts' | 'activity';
@@ -100,12 +104,14 @@ function Empty({ title, children, icon = 'gift' }: { title: string; children: Re
   return <div className="empty-state"><span className="empty-icon"><Icon name={icon} size={30} /></span><h3>{title}</h3><p>{children}</p></div>;
 }
 
-function JobCard({ job, onResume, onEfficient, disabled, onStop, stopping, stopDisabled }: {
+function JobCard({ job, onResume, onEfficient, disabled, onStop, stopping, stopDisabled, blocker, onSetup }: {
   job: Job; onResume: (job: Job) => void; disabled: boolean;
   onEfficient: (job: Job) => void;
   onStop: (job: Job) => void; stopping: boolean; stopDisabled: boolean;
+  blocker?: CollectionBlocker | null; onSetup?: () => void;
 }) {
   const requiresResume = job.progress?.requires_resume === true;
+  const pausedBlocker = job.state === 'partial' || requiresResume ? blocker : null;
   const active = isActiveJob(job) && !requiresResume;
   const isStopping = active && (stopping || job.stop_requested);
   const window = job.collection_window;
@@ -116,6 +122,8 @@ function JobCard({ job, onResume, onEfficient, disabled, onStop, stopping, stopD
   const listing = job.progress?.listing_refresh;
   const cache = job.progress?.market_cache;
   const efficiency = presentCollectionEfficiency(job);
+  const resume = presentResumeSupport(job);
+  const resumeMessage = resume.blocked && job.state !== 'complete' ? resume.message : null;
   const metrics = [['pages', 'Pages read'], ['observations', 'Records saved'], ['streams_complete', 'Checks completed'], ['streams_total', 'Checks planned']] as const;
   return <article className={`job-card sync-card job-${job.state} sync-${view.state}`} aria-label={view.title}>
     <div className="sync-card-header">
@@ -123,31 +131,34 @@ function JobCard({ job, onResume, onEfficient, disabled, onStop, stopping, stopD
       <strong>{view.title}</strong><span className="sync-state">{view.stateLabel}</span>
     </div>
     <SyncProgress progress={view.progress} moving={active && !isStopping && view.state !== 'waiting'} />
-    <p className="sync-message" role="status">{compactJobMessage(job, view)}</p>
+    <p className={`sync-message${pausedBlocker ? ' sync-setup-blocker' : ''}`} role="status">{resumeMessage || pausedBlocker?.message || compactJobMessage(job, view)}</p>
+    {resumeMessage && pausedBlocker && <p className="sync-message sync-setup-blocker">{pausedBlocker.message}</p>}
+    {pausedBlocker?.setup && onSetup && <button className="button small secondary sync-setup-action" onClick={onSetup}>Open API key setup<Icon name="shield" size={15} /></button>}
     {view.cacheNote && <p className="sync-cache-note">Cached comparisons · {cache?.oldest_observed_at ? <>oldest data {relativeTime(cache.oldest_observed_at)}</> : 'observation time unavailable'}</p>}
-    {efficiency.warning && <p className="sync-efficiency-warning">Older scan · {efficiency.pageSize} items/request. New scans use {efficiency.recommendedPageSize}.</p>}
+    {!resume.blocked && efficiency.warning && <p className="sync-efficiency-warning">Older scan · {efficiency.pageSize} items/request. New scans use {efficiency.recommendedPageSize}.</p>}
     <div className="sync-card-footer">
       <details className="sync-details"><summary>Details</summary><div>
-        <p>{view.objective} {view.message}</p>
+        <p>{view.objective} {resumeMessage || pausedBlocker?.message || view.message}</p>
         {efficiency.sampled && <p>{efficiency.sampled}</p>}
         {view.cacheNote && <p>{view.cacheNote}</p>}
-        {efficiency.warning && <p>{efficiency.warning}</p>}
-        <p>Progress counts completed collections or gift checks, not time remaining. Collections can take different amounts of time.</p>
-        {window && <p>Selected period: {windowLabel}.{window.window_from && <> From {dateTime(window.window_from)}{window.window_to ? ` to ${dateTime(window.window_to)}` : ''}.</>} Continue keeps this period.</p>}
+        {!resume.blocked && efficiency.warning && <p>{efficiency.warning}</p>}
+        <p>Progress counts finished comparison checks, collections or gift checks. It does not estimate time remaining.</p>
+        {window && !resume.blocked && <p>Selected period: {windowLabel}.{window.window_from && <> From {dateTime(window.window_from)}{window.window_to ? ` to ${dateTime(window.window_to)}` : ''}.</>} Continue keeps this period.</p>}
         {budget && <div className="job-metrics"><span>Requests this session <b>{budget.invocation_used} / {budget.invocation_limit}</b></span><span>Last 24 hours <b>{budget.rolling_24h_used} / {budget.rolling_24h_limit}</b></span></div>}
         <div className="job-metrics">{metrics.map(([key, label]) => typeof job.progress?.[key] === 'number' ? <span key={key}>{label} <b>{String(job.progress[key])}</b></span> : null)}</div>
         {history && <p>History: {history.incremental_streams} incremental and {history.full_streams} full-window plans. Incremental checks reread {history.overlap_seconds / 3600} hours of overlap.</p>}
         {listing && listing.reused_streams > 0 && <p>{listing.reused_streams} listing groups use completed broader scans.</p>}
         {cache && cache.reused_streams > 0 && <p>{cache.reused_streams} scans use the Telegram cache, without new comparison requests.{cache.oldest_observed_at && <> Original observations from {dateTime(cache.oldest_observed_at)}.</>}</p>}
         {efficiency.pageSize && <p>Items per request: {efficiency.pageSize}. {job.progress.efficiency?.scheduling === 'round_robin' ? 'Collections are visited in turns so each can receive a first sample before deeper pages.' : 'This saved scan finishes one stream before moving to the next.'}</p>}
-        {efficiency.legacy && <p>An efficient refresh creates a new scan using {efficiency.recommendedPageSize} items per request and the same period. Relative periods start from now; custom dates stay fixed. Existing records and the older scan are kept. No saved cursor is changed.</p>}
+        {efficiency.legacy && !resume.blocked && <p>An efficient refresh creates a new scan using {efficiency.recommendedPageSize} items per request and the same period. Relative periods start from now; custom dates stay fixed. Existing records and the older scan are kept. No saved cursor is changed.</p>}
         {view.rawReason && <p>Saved status: {view.rawReason}</p>}
         <time dateTime={job.updated_at}>Updated {dateTime(job.updated_at, true)}{job.run_id != null ? ` · Run ${job.run_id}` : ''}</time>
-        {efficiency.legacy && (job.state === 'partial' || requiresResume) && <button className="button small secondary" disabled={disabled} onClick={() => onResume(job)}>Continue older scan<Icon name="arrow" size={15} /></button>}
+        {!resume.blocked && efficiency.legacy && (job.state === 'partial' || requiresResume) && <button className="button small secondary" disabled={disabled} onClick={() => onResume(job)}>Continue older scan<Icon name="arrow" size={15} /></button>}
       </div></details>
       <div className="sync-actions">
-        {efficiency.legacy && <button className="button small primary" disabled={disabled || !efficiency.canStart} onClick={() => onEfficient(job)}>Start efficient refresh<Icon name="refresh" size={15} /></button>}
-        {!efficiency.legacy && (job.state === 'partial' || requiresResume) && <button className="button small secondary" disabled={disabled} onClick={() => onResume(job)}>{view.actionLabel || 'Continue'}<Icon name="arrow" size={15} /></button>}
+        {resume.actionLabel && <button className="button small primary" disabled={disabled || !resume.canStart} onClick={() => onEfficient(job)}>{resume.actionLabel}<Icon name="refresh" size={15} /></button>}
+        {!resume.blocked && efficiency.legacy && <button className="button small primary" disabled={disabled || !efficiency.canStart} onClick={() => onEfficient(job)}>Start efficient refresh<Icon name="refresh" size={15} /></button>}
+        {!resume.blocked && !efficiency.legacy && (job.state === 'partial' || requiresResume) && <button className="button small secondary" disabled={disabled} onClick={() => onResume(job)}>{view.actionLabel || 'Continue'}<Icon name="arrow" size={15} /></button>}
         {isActiveJob(job) && <button className="button small secondary" disabled={stopDisabled || isStopping} onClick={() => onStop(job)} aria-label={`Stop ${JOB_LABEL[job.kind] || humanize(job.kind)}`}>{isStopping ? 'Stopping…' : 'Stop'}</button>}
       </div>
     </div>
@@ -187,7 +198,7 @@ function CollectionLimits({ data, selection }: { data: Dashboard; selection: Pri
   </>;
 }
 
-function Overview({ data, onFilter, onSelect }: { data: Dashboard; onFilter: (filter: GiftFilter, scope?: InventoryScope) => void; onSelect: (gift: Gift) => void }) {
+function Overview({ data, adapter, reload, onFilter, onSelect }: { data: Dashboard; adapter: DashboardAdapter; reload: () => Promise<void>; onFilter: (filter: GiftFilter, scope?: InventoryScope) => void; onSelect: (gift: Gift) => void }) {
   const summary = data.summary;
   const featured = [...data.gifts].filter(gift => gift.is_portfolio).sort((a, b) => (b.observed_at || '').localeCompare(a.observed_at || '')).slice(0, 4);
   const count = (filter: GiftFilter) => data.gifts.filter(gift => gift.is_portfolio && giftGroup(gift) === filter).length;
@@ -203,6 +214,7 @@ function Overview({ data, onFilter, onSelect }: { data: Dashboard; onFilter: (fi
   const portfolioReview = data.gifts.filter(gift => gift.is_portfolio && giftGroup(gift) === 'review').length;
   const candidateReview = data.gifts.filter(gift => !gift.is_portfolio && giftGroup(gift) === 'review').length;
   return <>
+    <PersonalAnalytics snapshot={data.personal_analytics} snapshots={data.personal_analytics_snapshots} wallet={data.wallet} transport={adapter.personalAnalytics} csrf={data.capabilities.csrf_token} onImported={reload} cloud={adapter.mode === 'serverless'} marketappLoginTest={adapter.mode === 'serverless' && data.capabilities.marketapp_login_test ? adapter.marketappLoginTest : undefined} marketappAnalyticsRefresh={adapter.mode === 'serverless' && data.capabilities.marketapp_analytics_refresh ? adapter.marketappAnalyticsRefresh : undefined} />
     <section className="stats-grid" aria-label="Portfolio summary">
       <StatCard label="Your gifts" value={summary.portfolio_count} subtitle="Saved portfolio" icon="gift" tone="neutral" onClick={() => onFilter('all')} />
       <StatCard label="For rent" value={summary.for_rent_count} subtitle="Saved listings" icon="arrow" tone="teal" onClick={() => onFilter('for_rent')} />
@@ -220,13 +232,14 @@ function Overview({ data, onFilter, onSelect }: { data: Dashboard; onFilter: (fi
   </>;
 }
 
-function Activity({ records, jobs, onResume, onEfficient, disabled, onStop, stoppingJobs, stopDisabled }: {
+function Activity({ records, jobs, onResume, onEfficient, disabled, onStop, stoppingJobs, stopDisabled, blocker, onSetup }: {
   records: DataRecord[]; jobs: Job[]; onResume: (job: Job) => void; onEfficient: (job: Job) => void; disabled: boolean;
   onStop: (job: Job) => void; stoppingJobs: Set<number>; stopDisabled: boolean;
+  blocker?: CollectionBlocker | null; onSetup?: () => void;
 }) {
   return <div className="activity-layout"><section className="panel"><div className="section-heading"><h2>Sync history</h2><span className="count-label">{jobs.length}</span></div>
     {jobs.length ? <div className="jobs-list">{[...jobs].sort((a, b) => b.id - a.id).map(job => {
-      const card = <JobCard job={job} onResume={onResume} onEfficient={onEfficient} disabled={disabled} onStop={onStop} stopping={stoppingJobs.has(job.id)} stopDisabled={stopDisabled} />;
+      const card = <JobCard job={job} onResume={onResume} onEfficient={onEfficient} disabled={disabled} onStop={onStop} stopping={stoppingJobs.has(job.id)} stopDisabled={stopDisabled} blocker={blocker} onSetup={onSetup} />;
       const view = presentJobSync(job);
       return job.state === 'complete' ? <details key={job.id} className="completed-sync"><summary><Icon name="check" size={17} /><strong>{view.title}</strong><span>{view.progress.label}</span><time dateTime={job.updated_at}>{dateTime(job.updated_at, true)}</time></summary>{card}</details> : <div key={job.id}>{card}</div>;
     })}</div> : <Empty title="No sync jobs yet" icon="activity">Refreshes will appear here.</Empty>}
@@ -309,6 +322,11 @@ export default function App({ adapter, walletControl }: {
   const [jobError, setJobError] = useState<string | null>(null);
   const [syncMenu, setSyncMenu] = useState(false);
   const [refreshOpen, setRefreshOpen] = useState(false);
+  const [apiSettingsOpen, setApiSettingsOpen] = useState(false);
+  const settings = !cloud ? adapter.marketappSettings : undefined;
+  const openApiSettings = settings ? () => setApiSettingsOpen(true) : undefined;
+  const closeApiSettings = useCallback(() => setApiSettingsOpen(false), []);
+  const collectionBlocker = !cloud ? localCollectionBlocker(data?.capabilities) || (error ? { message: 'Reload saved data before continuing the sync.', setup: false } : null) : null;
   const simplePricing = page === 'pricing' && pricingView === 'grid';
   const activeJobs = jobs.filter(job => isActiveJob(job) && job.progress?.requires_resume !== true);
   const visibleJobs = visibleDashboardJobs(jobs);
@@ -351,7 +369,7 @@ export default function App({ adapter, walletControl }: {
   const supportsJob = (kind: JobKind) => !data?.capabilities.supported_jobs || data.capabilities.supported_jobs.includes(kind);
   const canSync = Boolean(data?.capabilities.network_enabled && (cloud ? data.gifts.some(gift => gift.is_portfolio && gift.collection_address) : data.capabilities.wallet_configured) && data.capabilities.marketapp_configured && !error);
   const launch = async (kind: JobKind, job?: Job, options?: JobStartOptions, selection = pricingSelection) => {
-    if (!data || busy) return;
+    if (!data || busy || !canSync) return;
     setSubmitting(true); setJobError(null); setSyncMenu(false);
     try {
       const changed = job ? await adapter.resumeJob(job.id, data.capabilities.csrf_token)
@@ -361,9 +379,9 @@ export default function App({ adapter, walletControl }: {
     } catch (problem) { setJobError(problem instanceof Error ? problem.message : 'The sync could not be started.'); }
     finally { setSubmitting(false); }
   };
-  const onResume = (job: Job) => { void launch(job.kind, job); };
+  const onResume = (job: Job) => { if (job.resume_supported !== false) void launch(job.kind, job); };
   const onEfficient = (job: Job) => {
-    if (!presentCollectionEfficiency(job).canStart || busy || !canSync) return;
+    if (!(presentResumeSupport(job).canStart || (job.resume_supported !== false && presentCollectionEfficiency(job).canStart)) || busy || !canSync) return;
     try { void launch(job.kind, undefined, undefined, efficientRefreshSelection(job, pricingSelection)); }
     catch (problem) { setJobError(problem instanceof Error ? problem.message : 'Choose a recent period before starting a new refresh.'); }
   };
@@ -390,7 +408,7 @@ export default function App({ adapter, walletControl }: {
   const goFilter = (value: GiftFilter, scope: InventoryScope = 'portfolio') => { setFilter(value); setInventoryScope(scope); navigate('gifts'); setSearch(''); setCollection(''); };
   const nav = <>{NAV.map(item => <button key={item.id} aria-current={page === item.id ? 'page' : undefined} className={`nav-item ${page === item.id ? 'active' : ''}`} onClick={() => navigate(item.id)}><Icon name={item.icon} size={20} /><span>{item.label}</span>{item.id === 'gifts' && data && <b>{data.summary.portfolio_count}</b>}</button>)}</>;
 
-  const jobCards = visibleJobs.length > 0 && <div className="active-jobs">{visibleJobs.slice(0, 1).map(job => <JobCard key={job.id} job={job} onResume={onResume} onEfficient={onEfficient} disabled={busy || !canSync} onStop={onStop} stopping={stoppingJobs.has(job.id)} stopDisabled={!data} />)}{visibleJobs.length > 1 && <button className="text-button other-syncs" onClick={() => navigate('activity')}>{visibleJobs.length - 1} more updates · View activity<Icon name="arrow" size={14} /></button>}</div>;
+  const jobCards = visibleJobs.length > 0 && <div className="active-jobs">{visibleJobs.slice(0, 1).map(job => <JobCard key={job.id} job={job} onResume={onResume} onEfficient={onEfficient} disabled={busy || !canSync} onStop={onStop} stopping={stoppingJobs.has(job.id)} stopDisabled={!data} blocker={collectionBlocker} onSetup={openApiSettings} />)}{visibleJobs.length > 1 && <button className="text-button other-syncs" onClick={() => navigate('activity')}>{visibleJobs.length - 1} more updates · View activity<Icon name="arrow" size={14} /></button>}</div>;
   const viewControl = <div className="pricing-view-toggle" role="group" aria-label="Gift display"><button type="button" className={simplePricing ? 'active' : ''} aria-pressed={simplePricing} onClick={() => changePricingView('grid')}><Icon name="overview" size={15} />Simple</button><button type="button" className={!simplePricing ? 'active' : ''} aria-pressed={!simplePricing} onClick={() => changePricingView('detailed')}><Icon name="layers" size={15} />Detailed</button></div>;
 
   const headingActions = <div className="heading-actions"><a className="button secondary export-button" href={data && !adapter.exportCsv ? adapter.exportUrl(pricingSelection) : undefined} role={adapter.exportCsv ? 'button' : undefined} onClick={event => { if (adapter.exportCsv && data) { event.preventDefault(); adapter.exportCsv(data, pricingSelection); } }} onKeyDown={event => { if (adapter.exportCsv && data && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); adapter.exportCsv(data, pricingSelection); } }} aria-disabled={!data} tabIndex={data ? 0 : -1}><Icon name="download" size={16} />Export</a><div className="sync-control"><button className="button primary" onClick={() => { void launch(priceJob); }} disabled={!canSync || busy} title={!canSync ? cloud ? 'Configure the private server token and import your portfolio to collect comparison prices.' : 'Configure your wallet and local Marketapp API token, and enable network collection to sync.' : pricingSelection.source === 'rentals' ? 'Collect recorded rentals for your gift collections' : 'Collect observed asking prices for your gift collections'}><Icon name={busy ? 'refresh' : 'pricing'} size={17} className={busy ? 'spinning' : ''} />{busy ? 'Sync in progress' : simplePricing ? 'Refresh prices' : pricingSelection.source === 'rentals' ? 'Collect actual rentals' : 'Collect comparison prices'}</button><button className="button primary sync-more" disabled={!canSync || busy} aria-label="More sync options" aria-expanded={syncMenu} onClick={() => setSyncMenu(!syncMenu)}><span>⌄</span></button>{syncMenu && <div className="sync-menu">{cloud && <button onClick={() => { void launch(priceJob, undefined, { forceRefresh: true }); }}><Icon name="refresh" size={18} /><span><strong>Force fresh comparison data</strong><small>Bypass the 60-minute comparison cache. Request limits still apply.</small></span></button>}{supportsJob('refresh') && <button onClick={() => { void launch('refresh'); }}><Icon name="refresh" size={18} /><span><strong>Refresh gift status</strong><small>Update ownership, traits and configured asking prices</small></span></button>}{supportsJob('discover') && <button onClick={() => { void launch('discover'); }} disabled={!data?.capabilities.marketapp_configured}><Icon name="discover" size={18} /><span><strong>Discover wallet gifts</strong><small>Search holdings and transfer history</small></span></button>}<button onClick={() => { void launch('collect'); }} disabled={!data?.capabilities.marketapp_configured}><Icon name="layers" size={18} /><span><strong>Collect market listings</strong><small>{cloud ? 'Refresh public listings and bounded rental history' : 'Read public listings; rented-gift prices use Refresh gift status'}</small></span></button></div>}</div></div>;
@@ -399,12 +417,13 @@ export default function App({ adapter, walletControl }: {
     <aside className="sidebar"><a className="brand" href="#" onClick={event => { event.preventDefault(); navigate('pricing'); }} aria-label="Gift Rent Check pricing"><span className="brand-symbol"><Icon name="gift" size={24} /></span><span>Gift Rent<br />Check</span></a><div className="workspace-label"><span />PRIVATE DASHBOARD</div><nav aria-label="Main navigation">{nav}</nav>
       <div className="sidebar-bottom"><div className="network-label"><span className="network-dot" />TON mainnet<Icon name="shield" size={15} /></div><span className="local-label"><i />{cloud ? 'TELEGRAM' : 'DESKTOP'} · READ ONLY</span></div>
     </aside>
-    <div className="main-shell"><header className="topbar"><span className="breadcrumb">Workspace <span>/</span> <strong>{NAV.find(item => item.id === page)?.label}</strong></span><div className="topbar-right"><span className="read-only-indicator"><Icon name="shield" size={14} />Read only</span>{walletControl ? walletControl(data) : <div className="wallet-chip" title={data?.wallet || 'No wallet configured'}><span className="wallet-avatar"><Icon name="wallet" size={15} /></span><span>{data?.wallet ? shorten(data.wallet) : 'Wallet not configured'}</span><span className={`connection-dot ${error ? 'offline' : ''}`} /></div>}</div></header>
+    <div className="main-shell"><header className="topbar"><span className="breadcrumb">Workspace <span>/</span> <strong>{NAV.find(item => item.id === page)?.label}</strong></span><div className="topbar-right">{settings && <button className="button secondary marketapp-settings-button" onClick={openApiSettings}>API key</button>}<span className="read-only-indicator"><Icon name="shield" size={14} />Read only</span>{walletControl ? walletControl(data) : <div className="wallet-chip" title={data?.wallet || 'No wallet configured'}><span className="wallet-avatar"><Icon name="wallet" size={15} /></span><span>{data?.wallet ? shorten(data.wallet) : 'Wallet not configured'}</span><span className={`connection-dot ${error ? 'offline' : ''}`} /></div>}</div></header>
       <main id="main" ref={mainRef} tabIndex={-1} aria-label={NAV.find(item => item.id === page)?.label}>
       <div className={page === 'pricing' ? 'sr-only' : 'page-heading concise-heading'}><h1>{NAV.find(item => item.id === page)?.label}</h1>
       </div>
       {page === 'pricing' && <PricingControls selection={pricingSelection} onChange={changePricing} loading={loading} compact />}
       {ownedPriceRefresh && <OwnedPriceStatus driver={ownedPriceRefresh} />}
+      {settings && data && !data.capabilities.marketapp_configured && <div className="notice info marketapp-setup-notice"><Icon name="shield" size={18} /><div><strong>Add your Marketapp API key</strong><p>{collectionBlocker?.message} Saved data remains available.</p></div><button className="button secondary" onClick={openApiSettings}>Open API key setup</button></div>}
       {data && <details className="grid-collection-settings data-actions" open={refreshOpen} onToggle={event => { setRefreshOpen(event.currentTarget.open); if (!event.currentTarget.open) setSyncMenu(false); }}>
         <summary>Refresh & export</summary>
         {refreshOpen && <div className="grid-collection-content">{headingActions}<CollectionLimits data={data} selection={pricingSelection} />{cloud && <p>Keep Telegram open while updating.</p>}<button className="text-button" onClick={() => navigate('activity')}>View activity <Icon name="arrow" size={14} /></button></div>}
@@ -413,13 +432,13 @@ export default function App({ adapter, walletControl }: {
       {jobError && <div className="notice error" role="alert"><Icon name="alert" size={19} /><div><strong>Sync action failed</strong><p>{jobError}</p></div><button className="icon-button" aria-label="Dismiss sync error" onClick={() => setJobError(null)}><Icon name="close" size={17} /></button></div>}
       {data && !data.capabilities.network_enabled && refreshOpen && <div className="notice info"><Icon name="shield" size={18} /><div><strong>Saved data</strong><p>{data.capabilities.owned_price_refresh ? 'Marketapp sync is off. Your gift prices can still update through TON.' : 'Sync is off. Browsing and export remain available.'}</p></div></div>}
       {!cloud && data && data.capabilities.network_enabled && !data.capabilities.wallet_configured && <div className="notice info"><Icon name="wallet" size={19} /><div><strong>Connect the dashboard to your wallet</strong><p>Set your wallet address in the local configuration, then restart the dashboard. No wallet connection or signing is needed.</p></div></div>}
-      {data && data.capabilities.network_enabled && data.capabilities.wallet_configured && !data.capabilities.marketapp_configured && <div className="notice info"><Icon name="layers" size={18} /><div><strong>{cloud ? 'A Marketapp API token is required on Telegram' : 'A local Marketapp API token is required to sync'}</strong><p>{cloud ? 'Configure the private backend token before collecting. Saved data remains available.' : 'Configure the token locally so refresh and discovery can check the eligible collection catalog. Sync and resume stay disabled until it is configured; saved data remains available.'}</p></div></div>}
+      {cloud && data && data.capabilities.network_enabled && data.capabilities.wallet_configured && !data.capabilities.marketapp_configured && <div className="notice info"><Icon name="layers" size={18} /><div><strong>{cloud ? 'A Marketapp API token is required on Telegram' : 'A local Marketapp API token is required to sync'}</strong><p>{cloud ? 'Configure the private backend token before collecting. Saved data remains available.' : 'Configure the token locally so refresh and discovery can check the eligible collection catalog. Sync and resume stay disabled until it is configured; saved data remains available.'}</p></div></div>}
       {reviewWarnings.length > 0 && <div className="notice error"><Icon name="alert" size={18} /><div><strong>Some review evidence could not be loaded</strong>{reviewWarnings.map((warning, index) => <p key={index}>{warning}</p>)}</div></div>}
       {page !== 'activity' && jobCards}
       {loading && !data ? <div className="loading-state" role="status"><div className="loading-cards">{[0, 1, 2, 3].map(key => <div className="skeleton" key={key} />)}</div><div className="skeleton loading-panel" /><p>Reading your saved collection…</p></div> : data ? <>
         {page !== 'pricing' && <div className="observation-caption"><span className="tiny-dot" /><span title={dateTime(latestEvidence)}>Latest observation {relativeTime(latestEvidence)}</span></div>}
         {page === 'pricing' && <PricingPage data={data} selection={pricingSelection} onSelectionChange={changePricing} filters={pricingFilters} onFiltersChange={setPricingFilters} onSelect={setSelected} renderImage={gift => <GiftImage gift={gift} />} collectPrices={() => { void launch(priceJob); }} disabled={!canSync || busy} viewMode={pricingView} viewControl={viewControl} />}
-        {page === 'overview' && <Overview data={data} onFilter={goFilter} onSelect={setSelected} />}
+        {page === 'overview' && <Overview data={data} adapter={adapter} reload={reload} onFilter={goFilter} onSelect={setSelected} />}
         {page === 'gifts' && <section className="panel gifts-panel">
           <div className="inventory-scope" role="group" aria-label="Gift membership">
             {(['portfolio', 'candidates', 'all'] as const).map(scope => <button key={scope} aria-pressed={inventoryScope === scope} className={inventoryScope === scope ? 'active' : ''} onClick={() => setInventoryScope(scope)}>{scope === 'portfolio' ? 'Your gifts' : scope === 'candidates' ? 'Candidates' : 'All'} <b>{data.gifts.filter(gift => scope === 'all' || (scope === 'portfolio' ? gift.is_portfolio : !gift.is_portfolio)).length}</b></button>)}
@@ -428,11 +447,12 @@ export default function App({ adapter, walletControl }: {
           {filtered.length ? <GiftTable gifts={filtered.slice(0, giftList.visibleCount)} onSelect={setSelected} /> : <Empty title={data.gifts.length ? 'No matching gifts' : 'No gifts yet'} icon={data.gifts.length ? 'search' : 'gift'}>{data.gifts.length ? <>Try another filter.<button className="button secondary" onClick={() => { setSearch(''); setCollection(''); setFilter('all'); setInventoryScope('portfolio'); }}>Reset filters</button></> : cloud ? 'Import your saved portfolio to add gifts here.' : 'Import a portfolio or discover your wallet to add gifts.'}</Empty>}
           <ListFooter {...giftList} total={filtered.length} noun={inventoryScope === 'candidates' ? 'candidates' : 'gifts'} />
         </section>}
-        {page === 'activity' && <Activity records={data.activity || []} jobs={jobs} onResume={onResume} onEfficient={onEfficient} disabled={busy || !canSync} onStop={onStop} stoppingJobs={stoppingJobs} stopDisabled={!data} />}
+        {page === 'activity' && <Activity records={data.activity || []} jobs={jobs} onResume={onResume} onEfficient={onEfficient} disabled={busy || !canSync} onStop={onStop} stoppingJobs={stoppingJobs} stopDisabled={!data} blocker={collectionBlocker} onSetup={openApiSettings} />}
       </> : !loading && !error && <Empty title="No saved data yet" icon="alert">{cloud ? 'Open this Mini App from your bot to load the portfolio.' : 'Start the dashboard service to load your portfolio.'}</Empty>}
       <footer className="page-footer"><span><Icon name="shield" size={14} />Read-only · no price changes</span><span>TON & Marketapp</span></footer>
       </main>
     </div><nav className="mobile-nav" aria-label="Mobile navigation">{nav}</nav>
+    {apiSettingsOpen && settings && <MarketappSettings settings={settings} csrf={data?.capabilities.csrf_token || ''} onChanged={() => { void reload(); }} close={closeApiSettings} />}
     {selected && data && <GiftDetails key={selected.id} gift={selected} selection={pricingSelection} close={closeDetails} />}
   </div>;
 }

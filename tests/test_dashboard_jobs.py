@@ -394,6 +394,28 @@ def test_rental_price_progress_uses_history_stream_checkpoints(jobs):
     }
 
 
+@pytest.mark.parametrize("kind,mode,collector", [
+    ("prices", "pricing", "collect_prices"),
+    ("rental_prices", "rental_pricing", "collect_rental_prices"),
+])
+def test_pricing_resume_uses_frozen_targets_without_rebuilding_dashboard(jobs, monkeypatch, kind, mode, collector):
+    database = jobs.path.parent / "portfolio.sqlite3"
+    with Store(database) as store:
+        run_id = store.create_run({"mode": mode}, [COLLECTION], [])
+    saved, _ = jobs.enqueue(kind, WALLET)
+    jobs.link_run(saved["id"], run_id)
+    saved = jobs.get(saved["id"])
+    monkeypatch.setattr("marketapp_rent.dashboard_view.build_dashboard",
+                        lambda *args, **kwargs: pytest.fail("Resume rebuilt comparison dashboard"))
+    def resume(store, settings, **kwargs):
+        assert kwargs["resume_id"] == run_id
+        assert kwargs["gifts"] == []
+        return CollectionResult(run_id, "complete", None, 0)
+    monkeypatch.setattr(jobs_module, collector, resume)
+    result = execute_job(saved, jobs, Settings(token="fake-market-token", db_path=database), DiscoverySettings())
+    assert result["state"] == "complete"
+
+
 def test_rental_price_shutdown_guard_keeps_new_run_resumable_without_http(jobs, monkeypatch):
     monkeypatch.setattr(jobs_module.ApiClient, "get", lambda *args, **kwargs: pytest.fail("Cancelled job made a request"))
     job, _ = jobs.enqueue("rental_prices", WALLET)

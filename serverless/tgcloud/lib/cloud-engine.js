@@ -4,6 +4,7 @@ import {planHistoryRefresh, validHistoryPlan, completedHistoryCoverage, historyR
 import {MARKET_CACHE_POLICY, pruneMarketCache, cachedMarketStream, completedMarketStream, marketCacheKey, marketCacheProgress} from './market-cache.js';
 import {newCollectionSchedule, validCollectionSchedule, nextCollectionStream, commitCollectionTurn, collectionEfficiency} from './collection-schedule.js';
 import {effectiveMarketAttempts} from './market-budget.js';
+import {normalizePersonalAnalytics, configuredAnalyticsWallet, PERSONAL_ANALYTICS_MAX_BYTES} from './personal-analytics.js';
 
 export const CLOUD_LIMITS = Object.freeze({page_size: 100, invocation_attempts: 100, daily_attempts: 500, duration_ms: 300000, interval_ms: 1000, retry_attempts: 4, lease_ms: 120000, response_bytes: 1048576, import_bytes: 524288, import_records: 250});
 export class CloudRequestError extends Error {}
@@ -172,7 +173,11 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
     try {resolveCloudWindow(input, now());} catch (error) {throw new CloudRequestError(error.message);}
     const {state} = await repository.read(), records = await repository.records();
     await refreshClock();
-    return dashboard(records, input, {now: now(), capabilities: {mode: 'serverless', network_enabled: true, marketapp_configured: Boolean(secret.trim()), ton_configured: false, owned_price_refresh: ownedPriceRefresh, wallet_configured: records.some(r => r.kind === 'settings' && r.record.wallet), csrf_token: '', marketapp_limits: budget(state), supported_jobs: ['prices', 'rental_prices', 'collect']}, jobs: (await repository.jobs()).map(j => project(j, state, true))});
+    const result = dashboard(records, input, {now: now(), capabilities: {mode: 'serverless', network_enabled: true, marketapp_configured: Boolean(secret.trim()), ton_configured: false, owned_price_refresh: ownedPriceRefresh, marketapp_login_test: true, marketapp_analytics_refresh: true, wallet_configured: records.some(r => r.kind === 'settings' && r.record.wallet), csrf_token: '', marketapp_limits: budget(state), supported_jobs: ['prices', 'rental_prices', 'collect']}, jobs: (await repository.jobs()).map(j => project(j, state, true))});
+    const wallet = configuredAnalyticsWallet(records);
+    result.personal_analytics = wallet && repository.latestPersonalAnalytics ? await repository.latestPersonalAnalytics(wallet) : null;
+    result.personal_analytics_snapshots = wallet && repository.personalAnalyticsSnapshots ? await repository.personalAnalyticsSnapshots(wallet) : [];
+    return result;
   }
   async function getJobs(ctx) {
     authorize(ctx); const {state} = await repository.read();
@@ -383,5 +388,18 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
     }
     return {accepted: true, imported: input.records.length, already_committed: false};
   }
-  return {getDashboard, getJobs, startJob, stepJob, stopJob, resumeJob, importChunk};
+  async function importPersonalAnalytics(ctx, input = {}) {
+    authorize(ctx);
+    // Bound input before parsing or storage. Error messages never echo imported
+    // source bodies, financial values, or provider credentials.
+    if (!object(input) || Object.keys(input).length !== 1 || typeof input.snapshot !== 'string' || input.snapshot.length > PERSONAL_ANALYTICS_MAX_BYTES || size(input.snapshot) > PERSONAL_ANALYTICS_MAX_BYTES || (secret && input.snapshot.includes(secret))) throw new CloudRequestError('The analytics snapshot is invalid or exceeds 256 KiB.');
+    const wallet = configuredAnalyticsWallet(await repository.records());
+    if (!wallet) throw new CloudRequestError('Configure a mainnet wallet before importing personal rental analytics.');
+    let snapshot;
+    try {snapshot = normalizePersonalAnalytics(input.snapshot, wallet);} catch (error) {throw new CloudRequestError(error.message);}
+    await refreshClock();
+    await repository.importPersonalAnalytics(snapshot, input.snapshot, iso(now()));
+    return {personal_analytics: snapshot};
+  }
+  return {getDashboard, getJobs, startJob, stepJob, stopJob, resumeJob, importChunk, importPersonalAnalytics};
 }

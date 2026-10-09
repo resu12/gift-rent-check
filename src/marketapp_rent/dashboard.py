@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import csv
 import io
+import json
+import logging
 import math
 import secrets
 import sqlite3
+import threading
 from contextlib import asynccontextmanager, closing
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,13 +19,16 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from starlette.concurrency import run_in_threadpool
 
 from .addresses import canonical_address
 from .dashboard_jobs import JobStore, JobWorker, execute_job
+from .dashboard_credentials import DashboardCredentials, CredentialStoreError, valid_api_key
 from .discovery_config import DiscoverySettings
 from .discovery_store import DiscoveryStore
 from .reports import _cell
 from .storage import Store
+from .personal_analytics import PersonalAnalyticsError, import_snapshot, snapshot_options
 
 
 class JobRequest(BaseModel):
@@ -97,7 +104,8 @@ def _ton_price_cooldown(database):
 
 def create_app(settings, discovery_settings=None, *, wallet=None, review_path=None,
                allow_network=False, static_dir=None, jobs_path=None, start_worker=True,
-               execute=None, allow_price_refresh=False, owned_price_service=None):
+               execute=None, allow_price_refresh=False, owned_price_service=None,
+               credential_store=None):
     """Local development adapter. Do not expose it through a tunnel or public bind.
 
     Telegram Serverless will supply its own transport/authentication adapter;
@@ -111,6 +119,9 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
     if review_path and not review_path.is_dir():
         raise ValueError("Review directory does not exist")
     database = Path(settings.db_path).resolve()
+    credentials = DashboardCredentials(database, settings.token, credential_store)
+    settings = replace(settings, token=credentials.key)
+    credential_lock = threading.RLock()
     with Store(database) as store:
         store.connection.execute("PRAGMA journal_mode=WAL")
         selected_wallet = choose_wallet(store, wallet or settings.owner_address)
@@ -134,6 +145,23 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
     static_dir = Path(static_dir or Path(__file__).parent / "dashboard_static").resolve()
     execute = execute or (lambda job: execute_job(job, jobs, settings, discovery_settings, review_path, worker.stop_event))
     worker = JobWorker(jobs, database, execute, (settings.token, discovery_settings.api_key))
+
+    retained_secrets = {value for value in (settings.token, discovery_settings.api_key) if value}
+    for handler in logging.getLogger("marketapp_rent").handlers:
+        retained_secrets.update(getattr(handler.formatter, "secrets", ()))
+
+    def set_runtime_token(key):
+        nonlocal settings
+        from .logging_setup import configure_logging
+        if key:
+            retained_secrets.add(key)
+        # Old keys remain redacted after replacement/removal, including a late
+        # worker exception. The worker closure reads this current Settings value.
+        worker.secrets = tuple(sorted(retained_secrets, key=len, reverse=True))
+        configure_logging(*worker.secrets)
+        settings = replace(settings, token=key)
+
+    set_runtime_token(settings.token)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -172,7 +200,10 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
                 content_length = int(request.headers.get("content-length", "0"))
             except ValueError:
                 return JSONResponse({"detail": "Invalid request length"}, status_code=400)
-            if content_length > 4096:
+            if content_length < 0:
+                return JSONResponse({"detail": "Invalid request length"}, status_code=400)
+            body_limit = 262144 if request.url.path == "/api/personal-analytics" else 4096
+            if content_length > body_limit:
                 return JSONResponse({"detail": "Request is too large"}, status_code=413)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
@@ -194,6 +225,96 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
     def health():
         return {"status": "ok", "mode": "local", "network_enabled": allow_network,
                 "owned_price_refresh": price_refresh_enabled}
+
+    def has_active_job(connection=None):
+        if connection is not None:
+            return bool(connection.execute("SELECT 1 FROM dashboard_jobs WHERE state IN ('queued','running') LIMIT 1").fetchone())
+        with jobs.connect() as read_connection:
+            return has_active_job(read_connection)
+
+    @app.get("/api/settings/marketapp")
+    def marketapp_settings():
+        with credential_lock:
+            return credentials.status(network_enabled=allow_network, active_job=has_active_job())
+
+    def change_credential(key=None, persist=False, *, remove=False):
+        with credential_lock, jobs.connect() as connection:
+            # Also serialize against job submission/claim from another local
+            # connection. The transaction contains no secret SQL parameters.
+            connection.execute("BEGIN IMMEDIATE")
+            if credentials.source == "environment":
+                raise HTTPException(409, "The configured environment key takes precedence. Change it outside the dashboard.")
+            if has_active_job(connection):
+                raise HTTPException(409, "Wait for active work to finish or stop it before changing the API key.")
+            if persist and not credentials.storage_available:
+                raise HTTPException(409, "Secure storage is unavailable. Choose this session only.")
+            try:
+                if remove:
+                    credentials.delete()
+                else:
+                    credentials.save(key, persist)
+            except (CredentialStoreError, OSError):
+                raise HTTPException(503, "The credential store could not complete the change. The current configuration remains in use.") from None
+            set_runtime_token(credentials.key)
+            return credentials.status(network_enabled=allow_network)
+
+    async def credential_body(request):
+        # Read actual bytes so omitted/false Content-Length and chunked bodies
+        # cannot bypass the small credential request limit.
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > 4096:
+                raise HTTPException(413, "Request is too large")
+            raw.extend(chunk)
+        return raw
+
+    @app.post("/api/settings/marketapp")
+    async def save_marketapp_key(request: Request):
+        # Manual parsing avoids Pydantic's input reflection for this secret.
+        raw = await credential_body(request)
+
+        def unique_object(pairs):
+            result = {}
+            for name, value in pairs:
+                if name in result:
+                    raise ValueError("Invalid request")
+                result[name] = value
+            return result
+
+        try:
+            body = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
+            if (not isinstance(body, dict) or set(body) != {"api_key", "persist"}
+                    or type(body["persist"]) is not bool or not valid_api_key(body["api_key"])):
+                raise ValueError("Invalid request")
+        except (ValueError, UnicodeError, RecursionError):
+            raise HTTPException(422, "Supply a raw API key of 1–512 printable ASCII characters without spaces or Bearer, and choose whether to save it securely.") from None
+        return await run_in_threadpool(change_credential, body["api_key"], body["persist"])
+
+    @app.delete("/api/settings/marketapp")
+    async def delete_marketapp_key(request: Request):
+        if await credential_body(request):
+            raise HTTPException(422, "The remove-key request must not contain a body.")
+        return await run_in_threadpool(change_credential, remove=True)
+
+    @app.post("/api/personal-analytics")
+    async def save_personal_analytics(request: Request):
+        if not selected_wallet:
+            raise HTTPException(409, "Choose a saved wallet before importing personal analytics.")
+        if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+            raise HTTPException(415, "Import a JSON analytics snapshot.")
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > 262144:
+                raise HTTPException(413, "The analytics snapshot must be no larger than 256 KiB.")
+            raw.extend(chunk)
+        try:
+            snapshot_text = raw.decode("utf-8")
+        except UnicodeError:
+            raise HTTPException(422, "The analytics snapshot must be UTF-8 JSON.") from None
+        try:
+            return await run_in_threadpool(import_snapshot, jobs.path, snapshot_text, selected_wallet)
+        except PersonalAnalyticsError as exc:
+            raise HTTPException(422, str(exc)) from None
 
     def view(pricing_source="listings", timeframe="30d", date_from=None, date_to=None, pricing_backdrop=None):
         from .pricing_window import dashboard_window
@@ -222,6 +343,9 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
                 **jobs.marketapp_usage(settings.dashboard_daily_max_attempts),
             },
         }
+        analytics_snapshots = snapshot_options(jobs.path, selected_wallet) if selected_wallet else []
+        result["personal_analytics_snapshots"] = analytics_snapshots
+        result["personal_analytics"] = analytics_snapshots[0] if analytics_snapshots else None
         return result
 
     @app.get("/api/dashboard")
@@ -279,6 +403,10 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
 
     @app.post("/api/jobs", status_code=202)
     def submit_job(body: JobRequest):
+        with credential_lock:
+            return enqueue_job(body)
+
+    def enqueue_job(body):
         if not allow_network:
             raise HTTPException(409, "Network refresh is disabled. Start with --allow-network to enable manual refresh.")
         if not selected_wallet:

@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.0 — 2026-10-09
+
+This release adds personal rental analytics to Overview, including a wallet-approved refresh in Telegram, and makes desktop setup and saved sync recovery easier.
+
+### Added
+
+- Telegram Overview can refresh **Last 30 days** or **1 year** rental analytics after a fresh Marketapp wallet approval. A bounded, separate website client verifies login and imports the same-wallet daily snapshot. The temporary session and proof are never persisted; an encrypted, five-minute envelope stays only in browser memory. Website reads do not spend comparison-collection API allowance, and failed refreshes retain prior snapshots. Desktop capture/import stays unchanged.
+- Retained the earlier **Connect Marketapp** proof-compatibility test as a fallback for deployments without analytics refresh. The current Telegram Overview uses **Refresh analytics**. SDK console logging is removed from the Telegram build.
+- Personal Marketapp rental analytics snapshots in Overview, with a saved reporting-period selector and daily, weekly, monthly, and calendar-year volume/count charts. Annual statistics use a separately captured one-year snapshot; chart grouping does not change the reporting period. Calendar-year bars mark incomplete coverage as partial. A browser capture and private JSON import preserve source dates, gross-before-fees meaning, and previous snapshots without using the collection API or importing website credentials.
+- Desktop API-key settings with masked entry, session-only use, optional Windows Credential Manager storage, and removal. Environment configuration retains precedence; entered keys never appear in responses, browser storage, or the application databases.
+
+### Fixed
+
+- Telegram analytics refresh accepts Marketapp's separate rental-duration histogram alongside the daily financial charts. Refresh results and fixed failure codes remain available after returning from the wallet or reopening the Mini App; saved snapshots are confirmed from storage before reporting success.
+- Telegram analytics-refresh limits distinguish the one-minute cooldown from the rolling hourly allowance and show an exact retry countdown. Refresh is disabled while waiting and becomes ready without automatically issuing a wallet request. Previous snapshots remain visible.
+- Legacy Marketapp compatibility tests explain failed wallet, network, website, challenge, timestamp, or signature-format checks using fixed reason codes, without revealing or storing wallet proofs.
+- Repeated compatibility tests report their cooldown or hourly allowance explicitly. A successful approval remains visible if another start is blocked by the test limit.
+- Paused desktop syncs explain missing setup or disabled collection instead of claiming they are ready to continue.
+- Listing page saves gather collection evidence once per page, avoiding repeated full-history scans while preserving address aliases, conflicts, and atomic checkpoints. Pricing resumes reuse frozen targets without rebuilding the dashboard first.
+- Listing comparison progress counts finished comparison checks, so completed model checks remain visible before an entire collection finishes. Older saved jobs use their existing check counts too.
+- Older history scans without a supported saved timeframe offer a new 30-day scan instead of a Continue action that would fail. Their records and checkpoints remain intact; valid bounded scans keep their original timeframe on resume.
+
+### Compatibility
+
+Existing portfolio and price observations remain intact. Personal analytics use separate snapshots and do not change recommendations or comparison API allowances. The new analytics and login-attempt tables are additive; refresh results reuse the saved attempts and are confirmed against their committed snapshots. Telegram's website integration remains experimental and requires a fresh wallet approval for each refresh. Desktop retains browser capture/import. No scheduling, transactions, or automatic price changes are enabled.
+
 ## 0.2.0 — 2026-10-09
 
 This release makes the desktop and Telegram dashboards easier to read, with clearer prices, shorter status messages, and expandable supporting evidence.

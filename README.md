@@ -4,7 +4,11 @@ A Python 3.12+ application for discovering wallet gifts on TON, collecting Marke
 
 The project includes a local React dashboard and a private Telegram Mini App backed by Telegram Serverless. Both show saved evidence and exact three-decimal prices. The Telegram app can refresh known gifts' configured TON contract prices on startup; Marketapp comparison collection remains manual and bounded. Its optional mainnet TON Connect control connects or disconnects a wallet without changing the saved portfolio or granting backend access; see [wallet setup](docs/telegram-serverless.md#connect-and-disconnect-a-wallet).
 
-**Version 0.2.0** improves dashboard readability and separates recommendation sample size from comparison match. See the [release notes](CHANGELOG.md) for changes and compatibility details.
+**Version 0.3.0** adds personal rental analytics, wallet-approved Telegram analytics refresh, secure desktop API-key settings, and clearer resumable syncs. See the [release notes](CHANGELOG.md) for changes and compatibility details.
+
+Overview can also import a saved snapshot of your personal Marketapp rental analytics, showing volume before fees and daily, weekly, monthly, and yearly rental statistics. Refresh it from your signed-in browser without transferring website credentials or starting a collection scan. See the [personal analytics guide](docs/personal-analytics.md).
+
+The private Telegram app can [refresh personal analytics](docs/telegram-serverless.md#refresh-marketapp-analytics) for 30 days or one year after a fresh Marketapp wallet approval. Its temporary login is used only for that refresh; no authenticated session is saved. Desktop retains its existing snapshot workflow. The website integration is experimental and fails safely if Marketapp changes its login or page format.
 
 Start with the Windows setup below, then follow the [local dashboard guide](docs/dashboard.md) or [Telegram deployment guide](docs/telegram-serverless.md). [Repository and GitHub setup](docs/github.md) explains what is excluded from version control and how to verify a fresh clone. Python 3.12, Node.js 24, and pnpm 11.25.0 are the tested development toolchain. No credentials or private portfolio dataset are included.
 
@@ -40,7 +44,9 @@ powershell -File scripts\build-dashboard.ps1
 
 This installs locked frontend dependencies, runs the frontend checks, and copies the production bundle into the Python package. Generated assets are ignored by Git. Build them again after changing the frontend and before creating a Python wheel. CLI collection and reports do not require Node or a frontend build.
 
-Edit `.env` locally to add `MARKETAPP_API_TOKEN`. Existing environment variables take precedence over `.env`. Do not paste a token into a command, issue, or shared report. Fill in `portfolio.csv` with your actual NFT addresses and, when known, collection addresses:
+For desktop-only use, you can instead enter the key through **API key** in the dashboard header, using session memory or Windows Credential Manager. See [secure desktop key setup](docs/dashboard.md#add-a-marketapp-api-key-in-the-desktop-ui). This does not configure CLI commands or Telegram.
+
+For CLI use, edit `.env` locally to add `MARKETAPP_API_TOKEN`. Existing environment variables take precedence over `.env`. Do not paste a token into a command, issue, or shared report. Fill in `portfolio.csv` with your actual NFT addresses and, when known, collection addresses:
 
 ```csv
 nft_address,collection_address,label

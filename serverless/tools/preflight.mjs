@@ -5,7 +5,9 @@ import {join} from 'node:path';
 
 try {
   const {ownerTelegramId, marketappToken} = await import('../tgcloud/lib/private-config.js');
+  const {marketappRefreshKey} = await import('../tgcloud/lib/private-refresh-key.js');
   if (!Number.isSafeInteger(ownerTelegramId) || ownerTelegramId <= 0 || typeof marketappToken !== 'string' || !marketappToken.trim()) throw new Error();
+  if (typeof marketappRefreshKey !== 'string' || !/^[a-f0-9]{64}$/.test(marketappRefreshKey)) throw new Error();
   const root = fileURLToPath(new URL('../dist/', import.meta.url));
   async function check(dir) {
     for (const entry of await readdir(dir, {withFileTypes: true})) {
@@ -14,7 +16,7 @@ try {
       if (entry.isDirectory()) await check(path);
       else {
         const body = await readFile(path, 'utf8');
-        if (body.includes(marketappToken) || body.includes('mock-only-token') || body.includes('/mock-api/')) throw new Error();
+        if (body.includes(marketappToken) || body.includes(marketappRefreshKey) || body.includes('mock-only-token') || body.includes('/mock-api/')) throw new Error();
       }
     }
   }

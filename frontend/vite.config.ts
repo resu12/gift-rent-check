@@ -1,12 +1,13 @@
 import { defineConfig, loadEnv } from 'vite';
 import {tonConnectBuild} from './config/tonConnect';
+import {tonConnectPrivacyPlugin} from './config/tonConnectPrivacy';
 
 export default defineConfig(({ mode }) => {
   const wallet = mode === 'serverless' ? tonConnectBuild(loadEnv(mode, process.cwd(), 'VITE_')) : null;
   return {
     base: mode === 'serverless' ? './' : '/',
     define: {__TON_CONNECT_CONFIG__: JSON.stringify(wallet?.config ?? null)},
-    plugins: mode === 'serverless' ? [{
+    plugins: mode === 'serverless' ? [tonConnectPrivacyPlugin(), {
       name: 'telegram-serverless-sdk',
       generateBundle() {
         if (wallet) this.emitFile({type: 'asset', fileName: 'tonconnect-manifest.json', source: JSON.stringify(wallet.manifest, null, 2) + '\n'});
