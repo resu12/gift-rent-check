@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react';
-import { ownedPriceStatusText } from './ownedPriceRefresh';
-import type { OwnedPriceRefreshDriver } from './ownedPriceRefresh';
+import { ownedPriceStatusText } from './data/ownedPriceRefresh';
+import type { OwnedPriceRefreshDriver } from './data/ownedPriceRefresh';
 import './ownedPriceStatus.css';
 
 export function OwnedPriceStatus({ driver }: { driver: OwnedPriceRefreshDriver }) {

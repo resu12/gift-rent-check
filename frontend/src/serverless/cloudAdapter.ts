@@ -77,6 +77,7 @@ export function createCloudDashboardAdapter(transport: CloudTransport, options: 
 
   return {
     mode: 'serverless',
+    ownedPriceTransport: transport,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     savedDataChanged() { emit({ savedDataChanged: true }); },
     interrupt() { generation += 1; driver?.interrupt(); },

@@ -59,7 +59,17 @@ def _decimal(value: Any, *, nanos: bool = False) -> str | None:
         return None
 
 
-def _price_observation(listings: list[dict], annotation: dict, ownership: list[dict], supplement: dict) -> dict:
+def _configured_owned_price(row: dict) -> str | None:
+    """A verified price check supplies integer nanoGRAM configured asking terms."""
+    value = row.get("configured_price_per_day_raw")
+    if row.get("verified") is not True or isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    raw = str(value)
+    return _decimal(raw, nanos=True) if re.fullmatch(r"[0-9]{1,120}", raw) else None
+
+
+def _price_observation(listings: list[dict], annotation: dict, ownership: list[dict], supplement: dict,
+                       owned_prices: list[dict] | tuple[dict, ...] = ()) -> dict:
     """Choose a price by its own evidence date, independently of ownership state."""
     candidates = []
 
@@ -81,19 +91,49 @@ def _price_observation(listings: list[dict], annotation: dict, ownership: list[d
         # Configured asking terms can differ from an ongoing rental's rate.
         # A missing configured amount stays unknown; explicit zero is valid.
         remember(row.get("configured_price_per_day_raw"), row.get("observed_at"), "Observed contract terms", 1, nanos=True)
-    if not candidates:
-        return {"price_per_day": None, "price_source": None, "price_observed_at": None, "price_is_historical": False}
-    chosen = max(candidates, key=lambda row: (row["instant"], row["priority"]))
-    evidence_times = [row.get("observed_at") for row in [*listings, *ownership, annotation, supplement]]
+    # These observations have already been scoped to the selected wallet and
+    # an existing portfolio gift's collection. They never become ownership proof.
+    price_uncertainties = []
+    owned_groups = {}
+    for row in owned_prices:
+        when, amount = _instant(row.get("observed_at")), _configured_owned_price(row)
+        if when is not None and amount is not None:
+            owned_groups.setdefault(when, []).append((row, amount))
+    accepted_checks = []
+    for group in owned_groups.values():
+        if len({Decimal(amount) for _, amount in group}) != 1:
+            price_uncertainties.append("Conflicting simultaneous TON configured-price observations.")
+            continue
+        for row, amount in group:
+            remember(amount, row["observed_at"], "Observed contract terms", 1)
+            accepted_checks.append(row)
+    chosen = max(candidates, key=lambda row: (row["instant"], row["priority"])) if candidates else None
+    evidence_times = [row.get("observed_at") for row in [*listings, *ownership, annotation, supplement, *owned_prices]]
     if annotation.get("marketapp_ui_state") in {"for_rent", "rented"} and _text(annotation.get("marketapp_ui_source")):
         evidence_times.append(annotation.get("marketapp_ui_reviewed_at"))
-    historical = chosen["price_source"] == "Marketapp user view" or any(
-        _newer(observed_at, chosen["price_observed_at"]) for observed_at in evidence_times)
-    source = chosen["price_source"]
+    historical = bool(chosen and (chosen["price_source"] == "Marketapp user view" or any(
+        _newer(observed_at, chosen["price_observed_at"]) for observed_at in evidence_times)))
+
+    def checked_time(row):
+        return row.get("checked_at") if _instant(row.get("checked_at")) else row.get("observed_at")
+
+    checks = [row for row in owned_prices if _instant(checked_time(row)) is not None]
+    latest_check = max(enumerate(checks), key=lambda item: (_instant(checked_time(item[1])), item[0]))[1] if checks else None
+    if latest_check is not None and latest_check not in accepted_checks and (
+        chosen is None or _instant(checked_time(latest_check)) >= chosen["instant"]
+    ):
+        historical = chosen is not None
+        price_uncertainties.append("The latest TON rent-price check could not verify current configured terms; the previous dated price is retained.")
+    source = chosen["price_source"] if chosen else None
     if historical and source == "Marketapp listing":
         source = "Historical Marketapp listing"
-    return {"price_per_day": chosen["price_per_day"], "price_source": source,
-            "price_observed_at": chosen["price_observed_at"], "price_is_historical": historical}
+    if owned_prices and source == "Observed contract terms":
+        price_uncertainties.append("Configured rental-contract price; Marketapp listing visibility and counterpart settings propagation are not established.")
+    return {"price_per_day": chosen["price_per_day"] if chosen else None, "price_source": source,
+            "price_observed_at": chosen["price_observed_at"] if chosen else None, "price_is_historical": historical,
+            "price_checked_at": checked_time(latest_check) if latest_check else None,
+            "price_check_reason": _text(latest_check.get("reason")) if latest_check else None,
+            "_price_uncertainties": list(dict.fromkeys(price_uncertainties))}
 
 
 def _https(value: Any) -> str | None:
@@ -270,7 +310,7 @@ def _run_summary(run: dict, kind: str, checkpoints: list[dict] | None = None) ->
             "checkpoints": [{key: row.get(key) for key in ("kind", "state", "pages", "upper_lt")} for row in rows]}
 
 
-def build_dashboard(store: Store, wallet: str | None = None, review_path: Path | None = None, *, pricing_source="listings", timeframe="30d", date_from=None, date_to=None, pricing_backdrop=None) -> dict:
+def build_dashboard(store: Store, wallet: str | None = None, review_path: Path | None = None, *, pricing_source="listings", timeframe="30d", date_from=None, date_to=None, pricing_backdrop=None, owned_price_observations=()) -> dict:
     """Build a JSON-safe projection without network access, DB writes, or enrollment."""
     discovery = DiscoveryStore(store)
     discovery_runs = discovery.runs()
@@ -294,6 +334,18 @@ def build_dashboard(store: Store, wallet: str | None = None, review_path: Path |
     automatic = {row["nft_key"] for row in discovery.memberships(wallet)} if wallet else set()
     members = {address_key(row["nft_address"]): row for row in store.portfolio()
                if "user_declared" in row["membership_sources"] or address_key(row["nft_address"]) in automatic}
+    price_checks = {}
+    for row in owned_price_observations:
+        if not isinstance(row, dict):
+            continue
+        try:
+            if canonical_address(row.get("wallet_address")) != wallet:
+                continue
+            nft_key = canonical_address(row.get("nft_address"))
+            collection_key = canonical_address(row.get("collection_address"))
+        except ValueError:
+            continue
+        price_checks.setdefault(nft_key, []).append((collection_key, row))
     listings = {}
     listing_prices = {}
     for observation in store.observations("listing"):
@@ -374,7 +426,10 @@ def build_dashboard(store: Store, wallet: str | None = None, review_path: Path |
             ui_state = None
         if collection_conflict:
             ui_state = None
-        price_evidence = _price_observation(listing_prices.get(key, []), annotation, ownership_prices.get(key, []), supplement)
+        owned_checks = [row for collection_key, row in price_checks.get(key, [])
+                        if is_portfolio and not collection_conflict and collection_key == address_key(collection)]
+        price_evidence = _price_observation(listing_prices.get(key, []), annotation, ownership_prices.get(key, []), supplement, owned_checks)
+        uncertainties.extend(price_evidence.pop("_price_uncertainties"))
         if price_evidence["price_is_historical"]:
             if price_evidence["price_source"] == "Marketapp user view":
                 uncertainties.append("The asking price comes from a dated user-supplied Marketapp view")

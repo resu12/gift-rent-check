@@ -280,8 +280,24 @@ test('trusted clock is monotonic and failure does not fall back to a stale JavaS
 test('SQL clock returns millisecond wall time and rejects unavailable values', async () => {
   const t = setup(), before = Date.now();
   const current = await t.repository.clock();
-  assert.ok(current >= before && current <= Date.now());
+  const after = Date.now();
+  // SQLite and V8 quantize separate OS clock reads to milliseconds. Their
+  // rounding boundaries can differ by one tick, including on Windows.
+  assert.ok(Number.isSafeInteger(current));
+  assert.ok(current >= before - 1 && current <= after + 1,
+    `SQLite clock ${current} was outside the JavaScript interval [${before}, ${after}] by more than 1 ms`);
   await assert.rejects(createCloudRepository({get: async () => ({server_time: null})}).clock(), /Server clock unavailable/);
+});
+
+test('SQL clock preserves the millisecond part instead of rounding to whole seconds', async () => {
+  const database = new DatabaseSync(':memory:');
+  try {
+    const fixed = '2026-10-09T12:00:00.789Z';
+    const repository = createCloudRepository({get: async sql => database.prepare(sql.replaceAll("'now'", `'${fixed}'`)).get()});
+    assert.equal(await repository.clock(), Date.parse(fixed));
+  } finally {
+    database.close();
+  }
 });
 
 test('reservation latency cannot launch a provider request past the trusted invocation deadline', async () => {

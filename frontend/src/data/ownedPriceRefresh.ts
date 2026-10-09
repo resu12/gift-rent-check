@@ -1,4 +1,9 @@
-import type { CloudTransport } from './cloudTransport.ts';
+export type OwnedPriceEndpoint = 'getOwnedPriceRefresh' | 'startOwnedPriceRefresh' | 'stepOwnedPriceRefresh' | 'stopOwnedPriceRefresh';
+
+/** Hosts supply authentication and routing; the price-check lifecycle is shared. */
+export interface OwnedPriceTransport {
+  call<T>(endpoint: OwnedPriceEndpoint, input?: Record<string, unknown>, signal?: AbortSignal): Promise<T>;
+}
 
 export interface OwnedPriceRun {
   id: number;
@@ -25,7 +30,7 @@ export interface OwnedPriceSnapshot {
 }
 
 interface RefreshOptions {
-  transport: CloudTransport;
+  transport: OwnedPriceTransport;
   sessionId: string;
   onSavedDataChanged(): void;
   now?: () => number;

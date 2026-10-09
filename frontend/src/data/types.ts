@@ -168,6 +168,8 @@ export interface Job {
 
 export interface DashboardAdapter {
   readonly mode?: 'local' | 'serverless';
+  readonly ownedPriceTransport?: import('./ownedPriceRefresh.ts').OwnedPriceTransport;
+  interrupt?(): void;
   subscribe?(listener: (event: { job?: Job; error?: string; savedDataChanged?: boolean }) => void): () => void;
   exportCsv?(dashboard: Dashboard, selection: PricingSelection): void;
   getDashboard(selection: PricingSelection, signal?: AbortSignal): Promise<Dashboard>;

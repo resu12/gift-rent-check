@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import secrets
 import sqlite3
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
@@ -45,6 +48,16 @@ class JobRequest(BaseModel):
         return self
 
 
+class OwnedPriceStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    session_id: str = Field(min_length=16, max_length=160, pattern=r"^[A-Za-z0-9._:-]+$")
+
+
+class OwnedPriceRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    run_id: int = Field(ge=1)
+
+
 def choose_wallet(store, configured=None):
     if configured:
         return canonical_address(configured)
@@ -57,15 +70,41 @@ def choose_wallet(store, configured=None):
     return None
 
 
+def _ton_price_cooldown(database):
+    """Read the manual TON collector's provider deadline without modifying it."""
+    def milliseconds(value):
+        if not isinstance(value, str):
+            raise ValueError("Invalid saved TON cooldown")
+        instant = datetime.fromisoformat(value)
+        if instant.tzinfo is None:
+            raise ValueError("Invalid saved TON cooldown")
+        stamp = math.ceil(instant.timestamp() * 1000)
+        if not 0 <= stamp <= 253402300799000:
+            raise ValueError("Invalid saved TON cooldown")
+        return stamp
+
+    # A read-only connection prevents Store's normal initialization/migration
+    # behavior if the main database disappears or changes during a handoff.
+    uri = Path(database).resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=5)) as connection:
+        deadline = DiscoveryStore(SimpleNamespace(connection=connection)).retry_not_before("toncenter")
+        observed = connection.execute(
+            "SELECT MAX(observed_at) FROM discovery_responses WHERE provider='toncenter'"
+        ).fetchone()[0]
+    return max(milliseconds(deadline) if deadline is not None else 0,
+               milliseconds(observed) + 1000 if observed is not None else 0)
+
+
 def create_app(settings, discovery_settings=None, *, wallet=None, review_path=None,
                allow_network=False, static_dir=None, jobs_path=None, start_worker=True,
-               execute=None):
+               execute=None, allow_price_refresh=False, owned_price_service=None):
     """Local development adapter. Do not expose it through a tunnel or public bind.
 
     Telegram Serverless will supply its own transport/authentication adapter;
     this module deliberately does not pretend localhost is a hosted deployment.
     """
     from .dashboard_view import build_dashboard
+    from .owned_prices import OwnedPriceService
 
     discovery_settings = discovery_settings or DiscoverySettings()
     review_path = Path(review_path).resolve() if review_path else None
@@ -76,6 +115,21 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
         store.connection.execute("PRAGMA journal_mode=WAL")
         selected_wallet = choose_wallet(store, wallet or settings.owner_address)
     jobs = JobStore(jobs_path or database.with_name(database.stem + ".dashboard.sqlite3"))
+    price_refresh_enabled = bool((allow_price_refresh or allow_network) and selected_wallet)
+
+    def price_targets():
+        # Freeze only the saved portfolio. This does not run discovery or update
+        # membership; reviewed gifts use the same existing dashboard evidence.
+        with Store(database) as store:
+            store.connection.execute("PRAGMA query_only=ON")
+            gifts = build_dashboard(store, selected_wallet, review_path)["gifts"]
+        return [{"nft_address": gift["nft_address"], "collection_address": gift.get("collection_address")}
+                for gift in gifts if gift["is_portfolio"] and not gift.get("collection_conflict")]
+
+    owned_prices = owned_price_service or OwnedPriceService(
+        jobs.path, wallet=selected_wallet, targets=price_targets, api_key=discovery_settings.api_key,
+        cooldown=lambda: _ton_price_cooldown(database),
+    )
     csrf_token = secrets.token_urlsafe(32)
     static_dir = Path(static_dir or Path(__file__).parent / "dashboard_static").resolve()
     execute = execute or (lambda job: execute_job(job, jobs, settings, discovery_settings, review_path, worker.stop_event))
@@ -95,6 +149,7 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
     app.state.jobs = jobs
     app.state.worker = worker
     app.state.csrf_token = csrf_token
+    app.state.owned_prices = owned_prices
 
     @app.middleware("http")
     async def local_access(request: Request, call_next):
@@ -137,7 +192,8 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
 
     @app.get("/api/health")
     def health():
-        return {"status": "ok", "mode": "local", "network_enabled": allow_network}
+        return {"status": "ok", "mode": "local", "network_enabled": allow_network,
+                "owned_price_refresh": price_refresh_enabled}
 
     def view(pricing_source="listings", timeframe="30d", date_from=None, date_to=None, pricing_backdrop=None):
         from .pricing_window import dashboard_window
@@ -151,12 +207,13 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
             raise HTTPException(422, str(exc)) from None
         with Store(database) as store:
             store.connection.execute("PRAGMA query_only=ON")
-            result = build_dashboard(store, selected_wallet, review_path, pricing_source=pricing_source, timeframe=timeframe, date_from=date_from, date_to=date_to, pricing_backdrop=pricing_backdrop)
+            result = build_dashboard(store, selected_wallet, review_path, pricing_source=pricing_source, timeframe=timeframe, date_from=date_from, date_to=date_to, pricing_backdrop=pricing_backdrop,
+                                     owned_price_observations=owned_prices.observations(selected_wallet))
         result["capabilities"] = {
             "mode": "local", "network_enabled": allow_network,
+            "owned_price_refresh": price_refresh_enabled,
             "marketapp_configured": bool(settings.token), "ton_configured": bool(discovery_settings.api_key),
             "wallet_configured": bool(selected_wallet), "csrf_token": csrf_token,
-            "telegram_hosting": "early access available; separate Serverless prototype",
             "marketapp_limits": {
                 "max_attempts": settings.dashboard_max_attempts,
                 "rolling_24h_attempts": settings.dashboard_daily_max_attempts,
@@ -170,6 +227,35 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
     @app.get("/api/dashboard")
     def dashboard_data(pricing_source: str = "listings", timeframe: str = "30d", date_from: str | None = None, date_to: str | None = None, pricing_backdrop: str | None = None):
         return view(pricing_source, timeframe, date_from, date_to, pricing_backdrop)
+
+    @app.get("/api/owned-prices")
+    def owned_price_status():
+        return owned_prices.get_status()
+
+    def require_price_refresh():
+        if not price_refresh_enabled:
+            raise HTTPException(409, "Start the dashboard with --allow-price-refresh and a saved wallet to enable TON rent price checks.")
+
+    def price_operation(operation, *args):
+        try:
+            return operation(*args)
+        except ValueError:
+            raise HTTPException(409, "The rent price check could not continue. Reload its saved status.") from None
+
+    @app.post("/api/owned-prices/start")
+    def start_owned_prices(body: OwnedPriceStartRequest):
+        require_price_refresh()
+        return price_operation(owned_prices.start, body.session_id)
+
+    @app.post("/api/owned-prices/step")
+    def step_owned_prices(body: OwnedPriceRunRequest):
+        require_price_refresh()
+        return price_operation(owned_prices.step, body.run_id)
+
+    @app.post("/api/owned-prices/stop")
+    def stop_owned_prices(body: OwnedPriceRunRequest):
+        # Same-origin CSRF still applies. Stop remains possible in offline mode.
+        return price_operation(owned_prices.stop, body.run_id)
 
     @app.get("/api/jobs")
     def job_list():
@@ -221,7 +307,7 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
         fields = [
             "name", "nft_address", "collection_name", "collection_address", "collection_conflict", "collection_addresses", "state", "display_state",
             "category", "automatic_membership", "membership_sources", "verification_method", "proof_badges",
-            "price_per_day", "price_unit", "price_source", "price_observed_at", "price_is_historical", "observed_at", "market_observed_at",
+            "price_per_day", "price_unit", "price_source", "price_observed_at", "price_is_historical", "price_checked_at", "price_check_reason", "observed_at", "market_observed_at",
             "rental_until", "holding_contract", "code_hash", "decoder_version", "reason",
             "recorded_rental_count", "rental_history_coverage", "rental_history_observed_at",
             "first_recorded_rental_at", "last_recorded_rental_at", "rental_history_excluded_counts", "rental_history_note",
@@ -281,10 +367,10 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
 
 
 def serve(settings, discovery_settings, *, wallet=None, review_path=None, port=8765,
-          allow_network=False):
+          allow_network=False, allow_price_refresh=False):
     import uvicorn
     app = create_app(settings, discovery_settings, wallet=wallet, review_path=review_path,
-                     allow_network=allow_network)
+                     allow_network=allow_network, allow_price_refresh=allow_price_refresh)
     print(f"Local dashboard: http://127.0.0.1:{port}", flush=True)
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning", access_log=False,
                 proxy_headers=False)

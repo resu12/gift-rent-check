@@ -1,8 +1,12 @@
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { localAdapter } from './local.ts';
+import { createLocalDashboardAdapter } from './local.ts';
 import type { Job, PricingSelection } from './types.ts';
+import { createOwnedPriceStartupGate, OwnedPriceRefreshDriver } from './ownedPriceRefresh.ts';
+import type { OwnedPriceEndpoint } from './ownedPriceRefresh.ts';
+
+const localAdapter = createLocalDashboardAdapter();
 
 const fixture = { id: 7, kind: 'rental_prices', state: 'queued' } as Job;
 
@@ -84,4 +88,103 @@ test('overlong custom ranges and historical scans older than 90 days are blocked
     await localAdapter.startJob(kind, 'csrf', { ...selection, dateFrom: '2026-07-12' });
   }
   assert.equal(calls.length, 3);
+});
+
+const selection: PricingSelection = { source: 'rentals', timeframe: '30d' };
+const completedRefresh = { run: { id: 1, state: 'complete', total: 1, checked: 1, updated: 1, unresolved: 0,
+  reason: null, started_at: '2026-10-09T00:00:00Z', completed_at: '2026-10-09T00:00:01Z' }, server_time: 1000, next_allowed_at: 0 };
+
+test('local price transport uses only the four exact routes with current dashboard CSRF and same-origin credentials', async context => {
+  const adapter = createLocalDashboardAdapter();
+  const calls: { path: string; init: RequestInit }[] = [];
+  let token = 'first-dashboard-token';
+  context.mock.method(globalThis, 'fetch', async (path: string, init: RequestInit) => {
+    calls.push({ path, init });
+    return new Response(JSON.stringify(path.startsWith('/api/dashboard')
+      ? { capabilities: { csrf_token: token, network_enabled: false, owned_price_refresh: true } } : completedRefresh));
+  });
+  await assert.rejects(adapter.ownedPriceTransport.call('startOwnedPriceRefresh', { session_id: 'page' }), /Reload saved data/);
+  assert.equal(calls.length, 0);
+  await adapter.getDashboard(selection);
+  await adapter.ownedPriceTransport.call('getOwnedPriceRefresh');
+  await adapter.ownedPriceTransport.call('startOwnedPriceRefresh', { session_id: 'page' });
+  token = 'next-dashboard-token';
+  await adapter.getDashboard(selection);
+  await adapter.ownedPriceTransport.call('stepOwnedPriceRefresh', { run_id: 1 });
+  await adapter.ownedPriceTransport.call('stopOwnedPriceRefresh', { run_id: 1 });
+  const prices = calls.filter(call => call.path.startsWith('/api/owned-prices'));
+  assert.deepEqual(prices.map(({ path, init }) => [path, init.method, init.credentials, init.cache]), [
+    ['/api/owned-prices', 'GET', 'same-origin', 'no-store'],
+    ['/api/owned-prices/start', 'POST', 'same-origin', 'no-store'],
+    ['/api/owned-prices/step', 'POST', 'same-origin', 'no-store'],
+    ['/api/owned-prices/stop', 'POST', 'same-origin', 'no-store'],
+  ]);
+  assert.equal(prices[0].init.body, undefined);
+  assert.equal(new Headers(prices[0].init.headers).get('X-Dashboard-CSRF'), null);
+  assert.deepEqual(prices.slice(1).map(call => new Headers(call.init.headers).get('X-Dashboard-CSRF')),
+    ['first-dashboard-token', 'next-dashboard-token', 'next-dashboard-token']);
+  assert.deepEqual(prices.slice(1).map(call => JSON.parse(String(call.init.body))), [{ session_id: 'page' }, { run_id: 1 }, { run_id: 1 }]);
+  assert.ok(prices.every(call => !new Headers(call.init.headers).has('Authorization')));
+  await assert.rejects(adapter.ownedPriceTransport.call('startJob' as OwnedPriceEndpoint), /Unsupported/);
+  assert.equal(calls.length, 6);
+});
+
+test('local adapters isolate their CSRF state and cancelled dashboard reads cannot replace it', async context => {
+  const first = createLocalDashboardAdapter(); const second = createLocalDashboardAdapter();
+  const tokens: (string | null)[] = [];
+  let token = 'first';
+  context.mock.method(globalThis, 'fetch', async (path: string, init: RequestInit) => {
+    if (path.startsWith('/api/dashboard')) return new Response(JSON.stringify({ capabilities: { csrf_token: token } }));
+    tokens.push(new Headers(init.headers).get('X-Dashboard-CSRF'));
+    return new Response(JSON.stringify(completedRefresh));
+  });
+  await first.getDashboard(selection);
+  await assert.rejects(second.ownedPriceTransport.call('startOwnedPriceRefresh'), /Reload saved data/);
+  token = 'second'; await second.getDashboard(selection);
+  const aborted = new AbortController(); aborted.abort();
+  token = 'discard'; await first.getDashboard(selection, aborted.signal);
+  await first.ownedPriceTransport.call('startOwnedPriceRefresh', { session_id: 'first-page' });
+  await second.ownedPriceTransport.call('startOwnedPriceRefresh', { session_id: 'second-page' });
+  assert.deepEqual(tokens, ['first', 'second']);
+});
+
+test('local price-only capability starts the same bounded driver once without enabling Marketapp jobs', async context => {
+  let enabled = false; let hidden = true; let reloads = 0;
+  const requests: string[] = [];
+  context.mock.method(globalThis, 'fetch', async (path: string) => {
+    requests.push(path);
+    return new Response(JSON.stringify(path.startsWith('/api/dashboard')
+      ? { capabilities: { csrf_token: 'csrf', network_enabled: false, owned_price_refresh: enabled } } : completedRefresh));
+  });
+  const adapter = createLocalDashboardAdapter();
+  const driver = new OwnedPriceRefreshDriver({ transport: adapter.ownedPriceTransport, sessionId: 'local-opening', onSavedDataChanged: () => { reloads++; } });
+  const startup = createOwnedPriceStartupGate(driver, () => hidden);
+  startup.dashboardLoaded((await adapter.getDashboard(selection)).capabilities.owned_price_refresh === true);
+  hidden = false; startup.visibilityChanged();
+  assert.equal(requests.length, 1);
+  enabled = true;
+  const data = await adapter.getDashboard(selection);
+  assert.equal(data.capabilities.network_enabled, false);
+  startup.dashboardLoaded(data.capabilities.owned_price_refresh === true);
+  await driver.start();
+  startup.dashboardLoaded(true); startup.visibilityChanged();
+  await driver.start();
+  assert.deepEqual(requests.filter(path => !path.startsWith('/api/dashboard')), ['/api/owned-prices/start']);
+  assert.equal(reloads, 1);
+  assert.equal(driver.getSnapshot().phase, 'complete');
+});
+
+test('an ambiguous local price mutation is read back once and never resubmitted', async context => {
+  const requests: string[] = [];
+  context.mock.method(globalThis, 'fetch', async (path: string) => {
+    requests.push(path);
+    if (path.endsWith('/start')) throw new TypeError('connection closed');
+    return new Response(JSON.stringify(path.startsWith('/api/dashboard')
+      ? { capabilities: { csrf_token: 'csrf', owned_price_refresh: true } } : completedRefresh));
+  });
+  const adapter = createLocalDashboardAdapter(); await adapter.getDashboard(selection);
+  const driver = new OwnedPriceRefreshDriver({ transport: adapter.ownedPriceTransport, sessionId: 'local-opening', onSavedDataChanged() {} });
+  await driver.start(); await driver.start();
+  assert.deepEqual(requests.slice(1), ['/api/owned-prices/start', '/api/owned-prices']);
+  assert.equal(driver.getSnapshot().phase, 'complete');
 });

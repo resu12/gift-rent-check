@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { filterGifts, filterPricingGifts, formatAmount, formatPriceDifference, giftGroup, hasRecommendation, isExactBlack, priceDifference, pricingBasisLabel, relativeTime, safeExternalUrl, sortPricingGifts } from './helpers.ts';
 import type { Gift } from './types.ts';
 import { DEFAULT_PRICING, historyCollectionError, pricingQuery, selectTimeframe, sourceDefaults, timeframeLabel, TIMEFRAME_OPTIONS, validDateRange } from './pricingSelection.ts';
-import { localAdapter } from './local.ts';
+import { createLocalDashboardAdapter } from './local.ts';
+
+const localAdapter = createLocalDashboardAdapter();
 
 const base: Gift = {
   id: '1', nft_address: 'wallet:nft1', name: 'Electric Skull #6175', collection_name: 'Electric Skulls',

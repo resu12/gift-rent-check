@@ -10,6 +10,8 @@ import { createDashboardPoller } from './data/dashboardPolling';
 import { useProgressiveList } from './useProgressiveList';
 import { ListFooter } from './ListFooter';
 import { RentalCount, RentalHistoryDetails } from './RentalCount';
+import { useOwnedPriceRefresh } from './useOwnedPriceRefresh';
+import { OwnedPriceStatus } from './OwnedPriceStatus';
 
 type Page = 'pricing' | 'overview' | 'gifts' | 'activity';
 const NAV: { id: Page; label: string; icon: 'overview' | 'gift' | 'pricing' | 'activity' }[] = [
@@ -234,9 +236,8 @@ function GiftDetails({ gift, selection, close }: { gift: Gift; selection: Pricin
   </dialog>;
 }
 
-export default function App({ adapter, ownedPriceStatus, walletControl }: {
+export default function App({ adapter, walletControl }: {
   adapter: DashboardAdapter;
-  ownedPriceStatus?: React.ReactNode;
   walletControl?: (dashboard: Dashboard | null) => React.ReactNode;
 }) {
   const cloud = adapter.mode === 'serverless';
@@ -255,6 +256,7 @@ export default function App({ adapter, ownedPriceStatus, walletControl }: {
   const [pricingSelection, setPricingSelection] = useState<PricingSelection>(DEFAULT_PRICING);
   const [pricingFilters, setPricingFilters] = useState<PricingFilters>({ search: '', collection: '', filter: 'all', sort: 'increase' });
   const { data, jobs, loading, error, loadedAt, reload, updateJob } = useDashboard(adapter, pricingSelection);
+  const ownedPriceRefresh = useOwnedPriceRefresh(adapter, data, reload);
   const [page, setPage] = useState<Page>('pricing');
   const [selected, setSelected] = useState<Gift | null>(null);
   const [search, setSearch] = useState('');
@@ -352,7 +354,7 @@ export default function App({ adapter, ownedPriceStatus, walletControl }: {
         {!simplePricing && headingActions}
       </div>
       {page === 'pricing' && <PricingControls selection={pricingSelection} onChange={changePricing} loading={loading} compact={simplePricing} />}
-      {ownedPriceStatus}
+      {ownedPriceRefresh && <OwnedPriceStatus driver={ownedPriceRefresh} />}
       {page === 'pricing' && data && (simplePricing ? <details className="grid-collection-settings" open={refreshOpen} onToggle={event => { setRefreshOpen(event.currentTarget.open); if (!event.currentTarget.open) setSyncMenu(false); }}>
         <summary>Refresh prices & activity{visibleJobs.length > 0 && <span className="grid-collection-summary-state"> · {activeJobs.length > 0 ? 'Collecting' : 'Saved progress'}</span>}</summary>
         {refreshOpen && <div className="grid-collection-content">{headingActions}<CollectionLimits data={data} selection={pricingSelection} />{cloud && <p>Keep the app open while collecting. Ownership uses your saved wallet scan.</p>}{jobCards}<button className="text-button" onClick={() => setPage('activity')}>Open collection activity <Icon name="arrow" size={14} /></button></div>}

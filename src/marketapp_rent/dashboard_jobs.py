@@ -102,6 +102,26 @@ class JobStore:
         with self.connect() as connection:
             return [self.row(row) for row in connection.execute("SELECT * FROM dashboard_jobs ORDER BY id DESC LIMIT 100")]
 
+    @staticmethod
+    def _check_price_refresh(connection, kind):
+        """Serialize TON ownership work with the browser's targeted price check."""
+        if kind not in {"refresh", "discover"}:
+            return
+        now_ms = int(time.time() * 1000)
+        if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='owned_price_state'").fetchone():
+            cooldown = connection.execute("SELECT next_allowed_at FROM owned_price_state WHERE singleton=1").fetchone()
+            if cooldown and cooldown[0] > now_ms:
+                when = datetime.fromtimestamp(cooldown[0] / 1000, timezone.utc).isoformat()
+                raise ValueError(f"TON is cooling down; retry ownership refresh after {when}.")
+        if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='owned_price_runs'").fetchone():
+            return
+        row = connection.execute("SELECT document FROM owned_price_runs ORDER BY id DESC LIMIT 1").fetchone()
+        if row is None:
+            return
+        run = json.loads(row["document"])
+        if run.get("lease_until", 0) > now_ms or (run.get("state") == "running" and run.get("deadline", 0) > now_ms):
+            raise ValueError("Wait for the rent price check to finish, or stop it before refreshing ownership.")
+
     def enqueue(self, kind=None, wallet=None, resume_job_id=None, *, collection_window=None):
         if kind is not None and kind not in {"refresh", "discover", "collect", "prices", "rental_prices"}:
             raise ValueError("Unknown refresh operation")
@@ -121,11 +141,13 @@ class JobStore:
                     validate_saved_dashboard_window(previous["collection_window"])
                 if collection_window is not None and previous["collection_window"] != collection_window:
                     raise ValueError("Resume timeframe differs from the saved collection timeframe")
+                self._check_price_refresh(connection, previous["kind"])
                 connection.execute("UPDATE dashboard_jobs SET state='queued',reason=NULL,updated_at=?,worker=NULL,stop_requested=0 WHERE id=?", (now, resume_job_id))
                 job_id = resume_job_id
             else:
                 if kind is None:
                     raise ValueError("Choose a refresh operation")
+                self._check_price_refresh(connection, kind)
                 if kind in {"prices", "rental_prices", "collect"}:
                     if collection_window is None:
                         collection_window = window_metadata(dashboard_window())

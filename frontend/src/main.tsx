@@ -8,8 +8,9 @@ async function mount() {
     const { default: CloudApp } = await import('./serverless/CloudApp');
     root.render(<React.StrictMode><CloudApp /></React.StrictMode>);
   } else {
-    const [{ default: App }, { localAdapter }] = await Promise.all([import('./App'), import('./data/local'), import('./pricing.css')]);
-    root.render(<React.StrictMode><App adapter={localAdapter} /></React.StrictMode>);
+    const [{ default: App }, { createLocalDashboardAdapter }] = await Promise.all([import('./App'), import('./data/local'), import('./pricing.css')]);
+    const adapter = createLocalDashboardAdapter();
+    root.render(<React.StrictMode><App adapter={adapter} /></React.StrictMode>);
   }
 }
 

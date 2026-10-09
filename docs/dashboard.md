@@ -10,7 +10,7 @@ The default **Pricing** page switches between **Listing prices** and **Actual re
 
 ## PowerShell setup and launch
 
-New openings default to **Actual rentals**, **Last 30 days**, and **Biggest increase first**. Both the local and Telegram dashboards use these display defaults. Opening either does not start Marketapp collection; Telegram separately checks configured TON contract prices for known gifts.
+New openings default to **Actual rentals**, **Last 30 days**, and **Biggest increase first**. Both the local and Telegram dashboards use these display defaults. Opening either does not start Marketapp collection. Both can separately check configured TON contract prices for known gifts using the same startup controls and progress display.
 
 From the project directory, use Python 3.12 and the tested dependency constraints:
 
@@ -33,6 +33,24 @@ powershell -File scripts\build-dashboard.ps1
 
 ## Continuous collection and resumable work
 
+### Automatic rent price check
+
+To enable the same startup price check as Telegram while leaving desktop Marketapp collection disabled:
+
+```powershell
+& .\.venv\Scripts\python.exe -m marketapp_rent --db data\marketapp.sqlite3 dashboard --allow-price-refresh
+```
+
+Each fresh visible page opening loads saved data first, then checks only existing portfolio gifts through TON Center. It requests NFT holders, supported rental-contract settings, and a holder/logical-time recheck. It does not scan transfers, discover gifts, refresh comparison samples, request Marketapp data, or change membership or ownership labels. No Marketapp token is required; `TONCENTER_API_KEY` is optional and remains on the Python side. The saved wallet and collection mapping determine the targets.
+
+The frontend driver, startup gate, status text, and **Stop check** control are shared with Telegram. The check starts once per page opening, waits if the page is initially hidden, and stops issuing steps when hidden or closed. Returning to the same page or the 15-second saved-data poll does not start another check. Reopen/reload for a new check. Concurrent pages join existing work rather than duplicate provider calls. **Stop check** retains committed observations.
+
+The limits match Telegram: 50 gifts per batch, one TON request per second, 60 attempts and two minutes per run, three attempts per request, a 20-second timeout, and 1,000 attempts per rolling 24 hours. Persistent leases and request counters live in the dashboard database. Manual wallet discovery/ownership refresh and this price check cannot run concurrently in the same dashboard. CLI invocations and Telegram retain separate provider budgets. Desktop and Telegram have separate data stores and allowances; this is behavior parity, not live data synchronization.
+
+Fresh verified settings appear as **Observed contract terms**, using the contract observation time. Only the configured asking rate is used, never an ongoing rental's payment rate. Directly held gifts, unsupported contracts, and failed checks keep their previous dated price with uncertainty. Marketapp visibility, recommendation samples, traits, and rental counts remain unchanged. The dashboard CSV includes price-check time and reason.
+
+`--allow-network` also enables this startup check, alongside the existing manual collection controls. Omit both flags for fully offline operation. Only the price check follows browser visibility; the manual job worker described below can continue while the browser is closed.
+
 Saved prices remain visible while the same comparison refreshes. Dashboard reads run one at a time, with the next poll scheduled after the previous response completes. Job progress is checked separately, and a finishing job triggers another read of its saved results. Switching the price source, timeframe, or backdrop cancels the old view's requests.
 
 **Refresh gift status** reads configured asking prices from supported rental contracts, including gifts currently rented out. **Collect market listings** reads public listing observations across the selected collections and continues automatically through its request batches. It does not refresh the contract settings of a rented gift absent from those listings. The asking price shows its own source and observation time, also included in CSV exports. Newer valid evidence supersedes older evidence by its price timestamp. A contract's configured asking price can differ from the rate of an ongoing rental; that existing rental rate is never substituted for the asking price. Historical prices stay dated when a newer check fails.
@@ -43,7 +61,7 @@ The default dashboard reads saved observations with provider requests disabled. 
 & .\.venv\Scripts\python.exe -m marketapp_rent --db data\marketapp.sqlite3 dashboard --allow-network
 ```
 
-Environment variables override `.env`. Tokens stay on the Python side and are not sent to the browser. No new job begins until you click a collection action or Resume; its batches then continue automatically:
+Environment variables override `.env`. Tokens stay on the Python side and are not sent to the browser. Apart from the independent TON startup price check, no new job begins until you click a collection action or Resume; its batches then continue automatically:
 
 - **Refresh gifts** verifies the known portfolio and unresolved candidates against a newly saved eligibility catalog. It does not enumerate the wallet again. Its seed list is frozen for resume.
 - **Collect comparison prices** collects the portfolio's fixed collection/model/Black listing groups with 100 items per page, using the same job queue and automatic batches. Its averages are calculated from saved observations.
@@ -53,7 +71,7 @@ Environment variables override `.env`. Tokens stay on the Python side and are no
 
 Dashboard jobs continue automatically through batches until completion or a safety cap. By default each start/resume permits **100 Marketapp HTTP attempts** and **300 seconds** across all its batches. A shared **500-attempt rolling 24-hour cap** persists in the queue database across jobs, resumes, and restarts. Retries and catalog refreshes count; TON Center requests have separate provider budgets. Marketapp requests remain sequential, at most one per second even if the CLI rate setting is higher. Provider Retry-After cooldowns are honored, and a cooldown beyond the remaining duration pauses without waiting through it. Repeated clicks reuse the active job.
 
-The pricing page displays these limits, remaining daily allowance, and saved job usage. Configure them with `MARKETAPP_DASHBOARD_MAX_ATTEMPTS`, `MARKETAPP_DASHBOARD_DAILY_MAX_ATTEMPTS`, and `MARKETAPP_DASHBOARD_RUN_SECONDS` in `.env`; restart the service afterward. They are conservative local safeguards, not a published Marketapp allowance or a guarantee against restrictions. The counter covers this dashboard queue, not CLI runs, the separate Telegram dashboard, other database queues, or other clients using the same token. Existing requests from before this upgrade are not backfilled into the new counter. When using Telegram as the active collector, leave the local service read-only without `--allow-network`.
+The pricing page displays these limits, remaining daily allowance, and saved job usage. Configure them with `MARKETAPP_DASHBOARD_MAX_ATTEMPTS`, `MARKETAPP_DASHBOARD_DAILY_MAX_ATTEMPTS`, and `MARKETAPP_DASHBOARD_RUN_SECONDS` in `.env`; restart the service afterward. They are conservative local safeguards, not a published Marketapp allowance or a guarantee against restrictions. The counter covers this dashboard queue, not CLI runs, the separate Telegram dashboard, other database queues, or other clients using the same token. Existing requests from before this upgrade are not backfilled into the new counter. When using Telegram as the Marketapp collector, omit desktop `--allow-network`; `--allow-price-refresh` can independently enable the TON-only check.
 
 **Collect actual rentals** freezes the displayed timeframe for each new job. Its newest-first collection stops after a valid ordered page passes the lower boundary, keeping that whole page for audit. It marks `timeframe_covered`, which does not imply complete lifetime history. Missing or out-of-order event times prevent that shortcut and leave the request limits in control. New history scans are capped at the last 90 days. Custom history scans must start within the last 90 inclusive UTC calendar dates; older custom ranges can inspect saved data only. Collect market listings also includes history and uses the selected timeframe. Resume preserves the original job window; changing the displayed timeframe only reads local data. Start a fresh job to collect a different window. Legacy unbounded history jobs require a fresh bounded run; they cannot resume from the dashboard. Previously collected data is retained. Current listing refreshes cannot request historical listing snapshots; past listing windows use data saved at those times. See [pricing collection details](pricing.md).
 

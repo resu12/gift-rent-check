@@ -1,8 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createOwnedPriceStartupGate, OwnedPriceRefreshDriver, ownedPriceStatusText, readOwnedPriceResponse } from './ownedPriceRefresh.ts';
-import type { OwnedPriceResponse, OwnedPriceRun } from './ownedPriceRefresh.ts';
-import type { CloudEndpoint, CloudTransport } from './cloudTransport.ts';
+import type { OwnedPriceResponse, OwnedPriceRun, OwnedPriceEndpoint, OwnedPriceTransport } from './ownedPriceRefresh.ts';
 
 function saved(overrides: Partial<OwnedPriceRun> = {}, timing: Partial<OwnedPriceResponse> = {}): OwnedPriceResponse {
   return {
@@ -19,8 +18,8 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function mockTransport(call: (name: CloudEndpoint, input: Record<string, unknown>) => unknown | Promise<unknown>): CloudTransport {
-  return { call: async <T>(name: CloudEndpoint, input: Record<string, unknown> = {}) => await call(name, input) as T };
+function mockTransport(call: (name: OwnedPriceEndpoint, input: Record<string, unknown>) => unknown | Promise<unknown>): OwnedPriceTransport {
+  return { call: async <T>(name: OwnedPriceEndpoint, input: Record<string, unknown> = {}) => await call(name, input) as T };
 }
 
 test('one page session starts once and sequential TON steps never call Marketapp endpoints', async () => {

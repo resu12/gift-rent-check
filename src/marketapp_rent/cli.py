@@ -66,7 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--wallet", help="Wallet to show; inferred only when exactly one is stored")
     dashboard.add_argument("--port", type=int, default=8765)
     dashboard.add_argument("--review-directory", type=Path, help="Explicit directory of dated supplemental review files")
-    dashboard.add_argument("--allow-network", action="store_true", help="Enable manual refresh jobs; does not start a scan or schedule")
+    dashboard.add_argument("--allow-network", action="store_true", help="Enable manual refresh jobs and automatic TON rent price checks; no automatic scans or Marketapp collection")
+    dashboard.add_argument("--allow-price-refresh", action="store_true", help="Enable only automatic TON rent price checks for saved gifts when the dashboard opens")
     return parser
 
 
@@ -108,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
             discovery_settings = load_discovery_settings(args.env_file)
             configure_logging(token, discovery_settings.api_key)
             serve(settings, discovery_settings, wallet=args.wallet, review_path=args.review_directory,
-                  port=args.port, allow_network=args.allow_network)
+                  port=args.port, allow_network=args.allow_network, allow_price_refresh=args.allow_price_refresh)
             return 0
         # Missing credentials should not create an empty database as a side effect.
         if args.command in {"collect", "collect-prices", "collect-rental-prices"} and not settings.token:
