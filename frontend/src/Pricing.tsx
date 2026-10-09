@@ -184,13 +184,13 @@ export function PricingDetails({ gift, selection }: { gift: Gift; selection: Pri
 
 
 
-export function PricingPage({ data, selection, onSelectionChange, filters, onFiltersChange, onSelect, renderImage, collectPrices, disabled, viewMode = 'detailed', onViewModeChange }: {
+export function PricingPage({ data, selection, onSelectionChange, filters, onFiltersChange, onSelect, renderImage, collectPrices, disabled, viewMode = 'grid' }: {
 
   data: Dashboard; selection: PricingSelection; onSelectionChange: (selection: PricingSelection) => void;
   filters: PricingFilters; onFiltersChange: (filters: PricingFilters) => void; onSelect: (gift: Gift) => void; renderImage: (gift: Gift) => ReactNode;
 
   collectPrices: () => void; disabled: boolean;
-  viewMode?: PricingViewMode; onViewModeChange?: (mode: PricingViewMode) => void;
+  viewMode?: PricingViewMode;
 
 }) {
 
@@ -266,7 +266,7 @@ export function PricingPage({ data, selection, onSelectionChange, filters, onFil
 
     {!grid && (warnings.length > 0 || excluded.length > 0) && <details className="pricing-coverage"><summary>Sample coverage and exclusions</summary><p>Only saved, eligible observations in this timeframe are included. Your own gifts are included on the same terms as other gifts. Duplicate observations and invalid or incompatible records do not add extra weight.</p>{warnings.length > 0 && <ul>{warnings.map((warning, index) => <li key={index}>{humanize(warning)}</li>)}</ul>}{excluded.length > 0 && <dl>{excluded.map(([reason, count]) => <div key={reason}><dt>{humanize(reason)}</dt><dd>{String(count)}</dd></div>)}</dl>}</details>}
 
-    <section className="panel pricing-panel"><div className="section-heading"><div>{!grid && <span className="eyebrow">RENTAL PRICE COMPARISON</span>}<h2>{grid ? 'Your gifts' : 'Your gifts, compared'} <span className="heading-count">{portfolio.length}</span></h2>{grid && <span className="pricing-grid-unit">GRAM / day</span>}</div><div className="pricing-heading-options">{!grid && <span className="table-unit">Comparisons: {unit}</span>}{onViewModeChange && <div className="pricing-view-toggle" role="group" aria-label="Gift display"><button type="button" className={grid ? 'active' : ''} aria-pressed={grid} onClick={() => onViewModeChange('grid')}><Icon name="overview" size={15} />Grid</button><button type="button" className={!grid ? 'active' : ''} aria-pressed={!grid} onClick={() => onViewModeChange('detailed')}><Icon name="layers" size={15} />Detailed</button></div>}</div></div>
+    <section className="panel pricing-panel"><div className="section-heading"><div>{!grid && <span className="eyebrow">RENTAL PRICE COMPARISON</span>}<h2>{grid ? 'Your gifts' : 'Your gifts, compared'} <span className="heading-count">{portfolio.length}</span></h2>{grid && <span className="pricing-grid-unit">GRAM / day</span>}</div>{!grid && <span className="table-unit">Comparisons: {unit}</span>}</div>
 
       <div className="filter-toolbar pricing-filter-toolbar"><label className="search-field"><Icon name="search" size={18} /><input aria-label="Search pricing gifts" placeholder="Search gifts…" value={search} onChange={event => setSearch(event.target.value)} />{search && <button className="icon-button" aria-label="Clear pricing search" onClick={() => setSearch('')}><Icon name="close" size={15} /></button>}</label>{!grid && <label className="collection-filter"><span className="sr-only">Filter pricing by collection</span><select value={collection} onChange={event => setCollection(event.target.value)}><option value="">All collections</option>{collections.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>}</div>
 

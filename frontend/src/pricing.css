@@ -175,7 +175,9 @@ button.pricing-summary-card:hover{border-color:#4c6978;transform:translateY(-2px
 }
 
 /* A compact gift gallery shares the detailed view's selection and prices. */
-.pricing-heading-options{display:flex;align-items:center;justify-content:flex-end;gap:16px;flex-wrap:wrap}
+.pricing-view-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}
+.pricing-view-bar>span{color:#9fb4cb;font-size:13px}
+.app-shell.simple-pricing .page-heading,.app-shell.simple-pricing .page-footer,.app-shell.simple-pricing .observation-caption{display:none}
 .pricing-view-toggle{display:flex;gap:3px;padding:3px;border:1px solid #34475b;border-radius:9px;background:#121d2b}
 .pricing-view-toggle button{display:flex;align-items:center;justify-content:center;gap:6px;border:1px solid transparent;border-radius:6px;background:transparent;color:#a1b5ca;font-size:12px;line-height:1.4;min-height:35px;padding:7px 10px}
 .pricing-view-toggle button.active{background:#264c43;border-color:#436c5f;color:#d0f4e5}
@@ -223,7 +225,6 @@ button.pricing-summary-card:hover{border-color:#4c6978;transform:translateY(-2px
   .pricing-gift-card-prices>span>span{font-size:11px}
   .pricing-gift-card-prices strong{font-size:20px}
   .pricing-view-toggle button{font-size:12px;gap:5px;padding:7px 8px}
-  .pricing-heading-options{gap:8px}
   .pricing-grid-advanced>div{grid-template-columns:1fr}
   .pricing-controls.compact{display:grid;grid-template-columns:minmax(0,1fr) 110px;gap:12px 10px;padding:13px 12px}
   .pricing-controls.compact .pricing-source-control,.pricing-controls.compact .pricing-timeframe{width:auto;min-width:0}

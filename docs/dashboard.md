@@ -12,6 +12,8 @@ The default **Pricing** page switches between **Listing prices** and **Actual re
 
 New openings default to **Actual rentals**, **Last 30 days**, and **Biggest increase first**. Both the local and Telegram dashboards use these display defaults. Opening either does not start Marketapp collection. Both can separately check configured TON contract prices for known gifts using the same startup controls and progress display.
 
+Use **Simple / Detailed** at the top of Pricing to switch views. **Simple** is the default on both versions and shows gift images and names with only Current and Recommended daily prices. It uses two columns on mobile and more columns on wider screens. Select a gift for its full evidence. **Detailed** restores the comparison table and extra information. The browser remembers your choice, including an existing Detailed preference. Switching views keeps filters, source and timeframe, and does not start another price check. Refresh controls and desktop Export remain available under **Refresh prices & activity**.
+
 From the project directory, use Python 3.12 and the tested dependency constraints:
 
 ```powershell
