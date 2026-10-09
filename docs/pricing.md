@@ -2,7 +2,7 @@
 
 The Pricing page switches between **Listing prices** and **Actual rentals**, with a separate timeframe selector. Both sources compare each portfolio gift with its collection, exact model, and exact model with a Black backdrop. “Gift” means its collection, identified by TON address. Model and Backdrop come from saved structured attributes, never from names or pictures. **Black means the exact named backdrop Black. Onyx Black and other dark backdrops are separate.**
 
-Each gift shows its observed asking price, comparison averages, sample counts, and a suggested daily asking price based on the selected source. Details show the median, range, timestamps, recommendation basis, confidence, and missing-data explanations. All comparison rates are in GRAM/day. They are not sale valuations or estimates of your net income.
+Each gift shows its observed asking price, comparison averages, sample counts, and a suggested daily asking price based on the selected source. Sample size and comparison match are shown separately, so a broad collection estimate is distinguishable from a same-model comparison even when both have many gifts. Details show the median, range, timestamps, and missing-data explanations. All comparison rates are in GRAM/day. They are not sale valuations or estimates of your net income.
 
 ## Source and timeframe
 
@@ -33,7 +33,18 @@ For example, a Black Low Rider uses the collection average across Black Low Ride
 
 The groups overlap and their averages are **not averaged together**. The recommendation uses the mean of the most specific applicable group with at least **three distinct NFTs**. In the default all-backdrop view, a Black gift first uses Model + Black, then Model, then Collection. Other backdrops use Model, then Collection; their Black average is comparison information only. Means from smaller groups remain visible, but cannot supply a recommendation. Rental record counts and distinct NFT counts are shown separately: ten rentals of one gift still provide only one distinct gift.
 
-Fallbacks are explicit and have low confidence because broader groups can miss model or backdrop premiums. Rental-derived suggestions have low confidence. Confidence is a sample heuristic, not a guarantee of demand, occupancy, or income. Missing rental evidence never silently falls back to listing prices; select Listing prices to use that source.
+The **comparison match** describes the group used: **Collection estimate**, **Same model**, or **Model + Black**. In Black scope, a collection fallback is labelled **Collection + Black**; an exact-model match is **Model + Black**. A collection estimate can miss model premiums, and a same-model group can miss backdrop premiums. These labels describe the comparison, not its predictive accuracy. Missing rental evidence never silently falls back to listing prices; select Listing prices to use that source.
+
+The **sample size** label uses distinct gifts in that comparison group:
+
+| Distinct gifts | Sample size |
+| --- | --- |
+| 1–2 | Limited sample |
+| 3–9 | Small sample |
+| 10–29 | Medium sample |
+| 30 or more | Large sample |
+
+For listing comparisons, the listing sample count already counts distinct gifts. Actual-rental comparisons use the distinct-gift count, not the number of rental records: 100 rentals of two gifts are still a **Limited sample**. An explicit zero means no sample; a missing distinct-gift count remains unknown rather than being inferred from rental records. These are descriptive size bands, not statistical confidence levels or forecasts of demand, occupancy, or income. A large sample can still be biased, stale, or a broad comparison. The calculation and minimum of **three distinct gifts** for a suggestion are unchanged.
 
 Your own portfolio NFTs and listings whose observed owner matches your wallet are included in both sources on the same terms as other gifts. The gift being compared can contribute to its own groups when its evidence is eligible. Canonical TON identity prevents friendly/raw address aliases from adding statistical weight. Conflicting collection or trait evidence is excluded or flagged. In the all-backdrop view, unknown model/backdrop metadata can leave a collection average available while narrower comparisons remain empty. Black scope requires verified exact Black metadata even for its collection average; unknown models may still contribute to that Black collection average.
 
@@ -73,7 +84,7 @@ Reported amounts do not establish landlord net proceeds, fees, gas, refunds, or 
 
 All arithmetic uses `Decimal`; API comparison values are rounded half up to one nanoGRAM, and the dashboard displays prices rounded half up to three decimal places. Monetary values remain decimal strings through SQLite, the local API, and the frontend. No outliers are silently removed: median and range expose the spread. Attribute rental floors, contract sale values, and undocumented discount calculations are not substituted for the selected source.
 
-The dashboard CSV export follows the selected source, timeframe, and backdrop scope, including the same three means, counts, distinct NFT counts, recommendation, basis/confidence, units, warnings, time basis, and interpretation version. The local data and export endpoints accept the same `pricing_source=listings|rentals` and `timeframe=24h|7d|30d|60d|90d|custom` parameters; custom ranges also use `date_from=YYYY-MM-DD` and `date_to=YYYY-MM-DD`. `pricing_backdrop=Black` selects exact Black comparisons and Black portfolio export rows; omit it for the all-backdrop view. The exported `pricing_backdrop` records that scope. Browsing and exporting require no provider token. The CLI `report` command remains the full historical inspection export.
+The dashboard CSV export follows the selected source, timeframe, and backdrop scope, including the same three means, counts, distinct NFT counts, recommendation, basis, units, warnings, time basis, and interpretation version. The existing backend and export `confidence` field remains unchanged for compatibility; it is not the dashboard's sample-size or comparison-match label. This display change does not alter API fields, cohort eligibility, or price calculations. The local data and export endpoints accept the same `pricing_source=listings|rentals` and `timeframe=24h|7d|30d|60d|90d|custom` parameters; custom ranges also use `date_from=YYYY-MM-DD` and `date_to=YYYY-MM-DD`. `pricing_backdrop=Black` selects exact Black comparisons and Black portfolio export rows; omit it for the all-backdrop view. The exported `pricing_backdrop` records that scope. Browsing and exporting require no provider token. The CLI `report` command remains the full historical inspection export.
 
 ## Populate comparisons
 

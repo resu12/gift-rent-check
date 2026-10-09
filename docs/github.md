@@ -34,6 +34,14 @@ Copy `.env.example` to `.env` and configure it only when ready for live use. The
 
 GitHub Actions checks Python 3.12, Node 24 tests, and both frontend builds on pushes and pull requests. Dependencies use committed lockfiles; Actions are pinned by full commit hash. The workflow requests only read access to repository contents and never publishes the app.
 
+## Release preparation
+
+The current application version is **0.2.0**. [CHANGELOG.md](../CHANGELOG.md) contains the release notes and can supply the body of a GitHub release.
+
+Keep `pyproject.toml`, `src/marketapp_rent/__init__.py`, `frontend/package.json`, and `serverless/package.json` on the same application version. Dependency and database schema versions are separate; a UI release does not change them. Add a dated changelog entry, run the fresh-clone checks above, and review the committed paths before pushing. Generated bundles and private operational data must remain ignored.
+
+Preparing a release commit locally does not publish a GitHub release or deploy the app. After pushing an approved release commit and checking GitHub Actions, use its matching version, such as `v0.2.0`, for the release tag.
+
 ## First GitHub push
 
 Preparation of a local repository does not create or upload a GitHub repository. Create an empty repository named `gift-rent-check` in the intended account; choose its visibility deliberately. Avoid initializing a second README or license there when pushing this existing history.

@@ -39,6 +39,7 @@ export interface GiftPricing {
   model_black: PriceCohort;
   recommended_price_per_day: string | null;
   basis: PricingBasis | null;
+  /** Legacy API field. UI describes sample size and comparison match separately. */
   confidence: 'none' | 'low' | 'medium';
   reason: string;
   warnings: string[];

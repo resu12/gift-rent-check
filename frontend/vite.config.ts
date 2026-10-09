@@ -13,7 +13,7 @@ export default defineConfig(({ mode }) => {
       },
       transformIndexHtml(html: string) {
         return {
-          html: html.replace('<title>Giftfolio · Rental price comparisons</title>', '<title>Giftfolio · Telegram pricing dashboard</title>')
+          html: html.replace('<title>Gift Rent Check · Rental prices</title>', '<title>Gift Rent Check · Telegram</title>')
             .replace('Compare rental asking prices for your TON gifts by collection, exact model, and Black backdrop.', 'Private Telegram dashboard for gift listing and rental-price comparisons.'),
           tags: [{ tag: 'script', attrs: { src: 'https://telegram.org/js/telegram-web-app.js?64' }, injectTo: 'head-prepend' as const }],
         };

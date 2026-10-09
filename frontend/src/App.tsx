@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons';
 import type { Dashboard, DashboardAdapter, DataRecord, Gift, Job, JobKind, JobStartOptions, PricingSelection } from './data/types';
-import { dateTime, filterGifts, formatAmount, giftGroup, humanize, isActiveJob, relativeTime, safeExternalUrl, shorten } from './data/helpers';
+import { dateTime, formatAmount, giftGroup, humanize, isActiveJob, relativeTime, safeExternalUrl, shorten } from './data/helpers';
+import { filterInventoryGifts, latestEvidenceAt } from './data/inventory';
+import type { InventoryScope } from './data/inventory';
 import type { GiftFilter, PricingFilters } from './data/helpers';
 import { telegramBridge } from './data/telegram';
 import { PricingControls, PricingDetails, PricingPage } from './Pricing';
@@ -13,8 +15,9 @@ import { RentalCount, RentalHistoryDetails } from './RentalCount';
 import { useOwnedPriceRefresh } from './useOwnedPriceRefresh';
 import { OwnedPriceStatus } from './OwnedPriceStatus';
 import { SyncProgress } from './SyncProgress';
-import { presentJobSync } from './data/syncPresentation';
+import { compactJobMessage, presentJobSync } from './data/syncPresentation';
 import { efficientRefreshSelection, presentCollectionEfficiency, visibleDashboardJobs } from './data/collectionEfficiency';
+import './interface.css';
 
 type Page = 'pricing' | 'overview' | 'gifts' | 'activity';
 const NAV: { id: Page; label: string; icon: 'overview' | 'gift' | 'pricing' | 'activity' }[] = [
@@ -119,14 +122,16 @@ function JobCard({ job, onResume, onEfficient, disabled, onStop, stopping, stopD
       <span className={`job-symbol ${active && !isStopping && view.state !== 'waiting' ? 'spinning' : ''}`} aria-hidden="true"><Icon name={view.state === 'complete' ? 'check' : view.state === 'failed' ? 'alert' : active && !isStopping && view.state !== 'waiting' ? 'refresh' : 'clock'} /></span>
       <strong>{view.title}</strong><span className="sync-state">{view.stateLabel}</span>
     </div>
-    <p className="sync-purpose">{view.objective}</p>
     <SyncProgress progress={view.progress} moving={active && !isStopping && view.state !== 'waiting'} />
-    <p className="sync-message" role="status">{view.message}</p>
-    {efficiency.sampled && <p className="sync-sampled">{efficiency.sampled}</p>}
-    {view.cacheNote && <p className="sync-cache-note">{view.cacheNote}</p>}
-    {efficiency.warning && <p className="sync-efficiency-warning">{efficiency.warning}</p>}
+    <p className="sync-message" role="status">{compactJobMessage(job, view)}</p>
+    {view.cacheNote && <p className="sync-cache-note">Cached comparisons · {cache?.oldest_observed_at ? <>oldest data {relativeTime(cache.oldest_observed_at)}</> : 'observation time unavailable'}</p>}
+    {efficiency.warning && <p className="sync-efficiency-warning">Older scan · {efficiency.pageSize} items/request. New scans use {efficiency.recommendedPageSize}.</p>}
     <div className="sync-card-footer">
       <details className="sync-details"><summary>Details</summary><div>
+        <p>{view.objective} {view.message}</p>
+        {efficiency.sampled && <p>{efficiency.sampled}</p>}
+        {view.cacheNote && <p>{view.cacheNote}</p>}
+        {efficiency.warning && <p>{efficiency.warning}</p>}
         <p>Progress counts completed collections or gift checks, not time remaining. Collections can take different amounts of time.</p>
         {window && <p>Selected period: {windowLabel}.{window.window_from && <> From {dateTime(window.window_from)}{window.window_to ? ` to ${dateTime(window.window_to)}` : ''}.</>} Continue keeps this period.</p>}
         {budget && <div className="job-metrics"><span>Requests this session <b>{budget.invocation_used} / {budget.invocation_limit}</b></span><span>Last 24 hours <b>{budget.rolling_24h_used} / {budget.rolling_24h_limit}</b></span></div>}
@@ -138,10 +143,11 @@ function JobCard({ job, onResume, onEfficient, disabled, onStop, stopping, stopD
         {efficiency.legacy && <p>An efficient refresh creates a new scan using {efficiency.recommendedPageSize} items per request and the same period. Relative periods start from now; custom dates stay fixed. Existing records and the older scan are kept. No saved cursor is changed.</p>}
         {view.rawReason && <p>Saved status: {view.rawReason}</p>}
         <time dateTime={job.updated_at}>Updated {dateTime(job.updated_at, true)}{job.run_id != null ? ` · Run ${job.run_id}` : ''}</time>
+        {efficiency.legacy && (job.state === 'partial' || requiresResume) && <button className="button small secondary" disabled={disabled} onClick={() => onResume(job)}>Continue older scan<Icon name="arrow" size={15} /></button>}
       </div></details>
       <div className="sync-actions">
         {efficiency.legacy && <button className="button small primary" disabled={disabled || !efficiency.canStart} onClick={() => onEfficient(job)}>Start efficient refresh<Icon name="refresh" size={15} /></button>}
-        {(job.state === 'partial' || requiresResume) && <button className="button small secondary" disabled={disabled} onClick={() => onResume(job)}>{efficiency.legacy ? 'Continue older scan' : view.actionLabel || 'Continue'}<Icon name="arrow" size={15} /></button>}
+        {!efficiency.legacy && (job.state === 'partial' || requiresResume) && <button className="button small secondary" disabled={disabled} onClick={() => onResume(job)}>{view.actionLabel || 'Continue'}<Icon name="arrow" size={15} /></button>}
         {isActiveJob(job) && <button className="button small secondary" disabled={stopDisabled || isStopping} onClick={() => onStop(job)} aria-label={`Stop ${JOB_LABEL[job.kind] || humanize(job.kind)}`}>{isStopping ? 'Stopping…' : 'Stop'}</button>}
       </div>
     </div>
@@ -149,10 +155,9 @@ function JobCard({ job, onResume, onEfficient, disabled, onStop, stopping, stopD
 }
 
 function GiftTable({ gifts, onSelect }: { gifts: Gift[]; onSelect: (gift: Gift) => void }) {
-  return <div className="table-scroll"><table className="gift-table"><thead><tr><th>Gift</th><th>Status</th><th>Observed daily price</th><th>Ownership evidence</th><th>Last observed</th><th><span className="sr-only">Details</span></th></tr></thead>
-    <tbody>{gifts.map(gift => <tr key={gift.id}><td><button className="gift-name-button" onClick={() => onSelect(gift)}><GiftImage gift={gift} /><span><strong>{gift.name || 'Unnamed gift'}</strong><small>{gift.collection_name || shorten(gift.collection_address)}</small><RentalCount gift={gift} /></span></button></td>
-      <td><StateBadge gift={gift} /></td><td><Price gift={gift} /></td>
-      <td><span className={`evidence-label ${gift.automatic_membership ? 'verified' : ''}`}><Icon name={gift.automatic_membership ? 'shield' : 'layers'} size={15} />{gift.verification_method ? humanize(gift.verification_method) : gift.automatic_membership ? 'Verified on TON' : gift.is_portfolio ? 'Declared portfolio' : 'Needs verification'}</span></td>
+  return <div className="table-scroll"><table className="gift-table inventory-table"><thead><tr><th>Gift</th><th>Saved status</th><th>Daily price</th><th>Observed</th><th><span className="sr-only">Details</span></th></tr></thead>
+    <tbody>{gifts.map(gift => <tr key={gift.id}><td><button className="gift-name-button" onClick={() => onSelect(gift)}><GiftImage gift={gift} /><span><strong>{gift.name || 'Unnamed gift'}</strong><small>{gift.collection_name || shorten(gift.collection_address)}{!gift.is_portfolio && <span className="candidate-label"> · Candidate</span>}</small><RentalCount gift={gift} /></span></button></td>
+      <td><StateBadge gift={gift} /></td><td><Price gift={gift} />{gift.price_is_historical && <small className="saved-price-label">Saved price</small>}</td>
       <td><span className="observation" title={dateTime(gift.observed_at)}>{relativeTime(gift.observed_at)}</span></td><td><button className="icon-button" aria-label={`View ${gift.name || 'gift'} details`} onClick={() => onSelect(gift)}><Icon name="chevron" size={17} /></button></td>
     </tr>)}</tbody></table></div>;
 }
@@ -165,7 +170,7 @@ function Coverage({ data }: { data: Dashboard }) {
   const coverage = data.coverage || {};
   const label = typeof coverage.note === 'string' ? coverage.note : typeof coverage.coverage_note === 'string' ? coverage.coverage_note : 'Each gift reflects its last saved observation. A completed scan is not an instantaneous market snapshot.';
   const facts = Object.entries(coverage).filter(([key, value]) => !['note', 'coverage_note'].includes(key) && (typeof value === 'number' || typeof value === 'boolean')).slice(0, 4);
-  return <div className="coverage-card"><span className="coverage-icon"><Icon name="shield" size={22} /></span><div><h3>Evidence, with context</h3><p>{label}</p>{facts.length > 0 && <div className="coverage-facts">{facts.map(([key, value]) => <span key={key}>{humanize(key)} <b>{typeof value === 'boolean' ? (value ? 'Yes' : 'No') : String(value)}</b></span>)}</div>}</div><span className="read-only-tag">READ ONLY</span></div>;
+  return <details className="coverage-disclosure"><summary>Coverage details</summary><div className="coverage-card"><p>{label}</p>{facts.length > 0 && <div className="coverage-facts">{facts.map(([key, value]) => <span key={key}>{humanize(key)} <b>{typeof value === 'boolean' ? (value ? 'Yes' : 'No') : String(value)}</b></span>)}</div>}</div></details>;
 }
 
 function CollectionLimits({ data, selection }: { data: Dashboard; selection: PricingSelection }) {
@@ -177,11 +182,12 @@ function CollectionLimits({ data, selection }: { data: Dashboard; selection: Pri
       {limits && <p>{limits.remaining_24h} of {limits.rolling_24h_attempts} requests remain in the last 24 hours. Each start or continuation allows up to {limits.max_attempts} requests and {limits.run_seconds / 60} minutes, at {limits.requests_per_second} request/s. Retries count.</p>}
       <p>{selection.source === 'rentals' ? `Checks actual rentals for ${timeframeLabel(selection).toLowerCase()}. Completed history is reused with a 48-hour overlap; a requested update after seven days rechecks the full period.` : 'Checks current asking prices. Past listing prices come from previously saved observations.'}</p>
       <p>Changing filters reads saved data. Continue keeps the original period. No prices are changed on Marketapp.</p>
+      {data.capabilities.ownership_note && <p>{data.capabilities.ownership_note} Keep Telegram open while updating; Continue resumes saved progress.</p>}
     </div></details>
   </>;
 }
 
-function Overview({ data, onFilter, onSelect }: { data: Dashboard; onFilter: (filter: GiftFilter) => void; onSelect: (gift: Gift) => void }) {
+function Overview({ data, onFilter, onSelect }: { data: Dashboard; onFilter: (filter: GiftFilter, scope?: InventoryScope) => void; onSelect: (gift: Gift) => void }) {
   const summary = data.summary;
   const featured = [...data.gifts].filter(gift => gift.is_portfolio).sort((a, b) => (b.observed_at || '').localeCompare(a.observed_at || '')).slice(0, 4);
   const count = (filter: GiftFilter) => data.gifts.filter(gift => gift.is_portfolio && giftGroup(gift) === filter).length;
@@ -194,17 +200,18 @@ function Overview({ data, onFilter, onSelect }: { data: Dashboard; onFilter: (fi
     { label: 'Needs review', value: count('review'), color: 'amber', filter: 'review' as GiftFilter },
   ].filter(group => group.value > 0);
   const total = groups.reduce((sum, group) => sum + group.value, 0);
+  const portfolioReview = data.gifts.filter(gift => gift.is_portfolio && giftGroup(gift) === 'review').length;
+  const candidateReview = data.gifts.filter(gift => !gift.is_portfolio && giftGroup(gift) === 'review').length;
   return <>
     <section className="stats-grid" aria-label="Portfolio summary">
-      <StatCard label="Portfolio gifts" value={summary.portfolio_count} subtitle={`${summary.automatic_count} automatic · ${summary.review_count} reviewed`} icon="gift" tone="neutral" onClick={() => onFilter('all')} />
-      <StatCard label="For rent" value={summary.for_rent_count} subtitle="Observed market listings" icon="arrow" tone="teal" onClick={() => onFilter('for_rent')} />
-      <StatCard label="Observed rented" value={summary.rented_count} subtitle="From saved contract state" icon="clock" tone="blue" onClick={() => onFilter('rented')} />
-      <StatCard label="Needs review" value={data.gifts.filter(gift => giftGroup(gift) === 'review').length} subtitle="Uncertain or incomplete evidence" icon="alert" tone="amber" onClick={() => onFilter('review')} />
+      <StatCard label="Your gifts" value={summary.portfolio_count} subtitle="Saved portfolio" icon="gift" tone="neutral" onClick={() => onFilter('all')} />
+      <StatCard label="For rent" value={summary.for_rent_count} subtitle="Saved listings" icon="arrow" tone="teal" onClick={() => onFilter('for_rent')} />
+      <StatCard label="Rented" value={summary.rented_count} subtitle="Saved contract status" icon="clock" tone="blue" onClick={() => onFilter('rented')} />
+      <StatCard label="Needs review" value={portfolioReview + candidateReview} subtitle={`${portfolioReview} gifts · ${candidateReview} candidates`} icon="alert" tone="amber" onClick={() => onFilter('review', 'all')} />
     </section>
-    <div className="overview-columns"><section className="panel inventory-panel"><div className="section-heading"><div><span className="eyebrow">INVENTORY</span><h2>Recently observed</h2></div><button className="text-button" onClick={() => onFilter('all')}>View all gifts <Icon name="arrow" size={17} /></button></div>
-      {featured.length ? <div className="featured-grid">{featured.map(gift => <button className="featured-gift" key={gift.id} onClick={() => onSelect(gift)}><GiftImage gift={gift} large /><div className="featured-info"><small>{gift.collection_name || 'Collection unresolved'}</small><strong>{gift.name || 'Unnamed gift'}</strong><StateBadge gift={gift} /></div></button>)}</div> : <Empty title="Your portfolio starts here">Refresh your known gifts or discover a wallet to build a view of its collection.</Empty>}
-    </section><section className="panel distribution-panel"><div className="section-heading"><div><span className="eyebrow">AT A GLANCE</span><h2>Portfolio mix</h2></div><Icon name="layers" size={20} /></div>
-      <div className="mix-total"><strong>{summary.portfolio_count.toLocaleString()}</strong><span>gifts in your portfolio</span></div>
+    <div className="overview-columns"><section className="panel inventory-panel"><div className="section-heading"><h2>Recently checked</h2><button className="text-button" onClick={() => onFilter('all')}>View all <Icon name="arrow" size={17} /></button></div>
+      {featured.length ? <div className="featured-grid">{featured.map(gift => <button className="featured-gift" key={gift.id} onClick={() => onSelect(gift)}><GiftImage gift={gift} large /><div className="featured-info"><strong>{gift.name || 'Unnamed gift'}</strong><StateBadge gift={gift} /></div></button>)}</div> : <Empty title="No gifts yet">{data.capabilities.hosting === 'serverless' ? 'Import your saved portfolio to get started.' : 'Import a portfolio or discover your wallet to get started.'}</Empty>}
+    </section><section className="panel distribution-panel"><div className="section-heading"><h2>Portfolio status</h2><Icon name="layers" size={20} /></div>
       <div className="distribution-bar" aria-label="Observed portfolio status distribution">{groups.map(group => <span className={group.color} key={group.label} style={{ flex: group.value }} title={`${group.label}: ${group.value}`} />)}{total === 0 && <span className="slate" style={{ flex: 1 }} />}</div>
       <div className="mix-legend">{groups.length ? groups.map(group => <button key={group.label} onClick={() => onFilter(group.filter)}><span><i className={group.color} />{group.label}</span><b>{group.value.toLocaleString()}</b></button>) : <p>No classified observations yet.</p>}</div>
       <p className="fine-print"><Icon name="clock" size={14} />States come from observations at different times.</p>
@@ -217,9 +224,13 @@ function Activity({ records, jobs, onResume, onEfficient, disabled, onStop, stop
   records: DataRecord[]; jobs: Job[]; onResume: (job: Job) => void; onEfficient: (job: Job) => void; disabled: boolean;
   onStop: (job: Job) => void; stoppingJobs: Set<number>; stopDisabled: boolean;
 }) {
-  return <div className="activity-layout"><section className="panel"><div className="section-heading"><div><span className="eyebrow">COLLECTION ACTIVITY</span><h2>Sync history</h2></div><span className="count-label">{jobs.length} jobs</span></div>
-    {jobs.length ? <div className="jobs-list">{[...jobs].sort((a, b) => b.id - a.id).map(job => <JobCard key={job.id} job={job} onResume={onResume} onEfficient={onEfficient} disabled={disabled} onStop={onStop} stopping={stoppingJobs.has(job.id)} stopDisabled={stopDisabled} />)}</div> : <Empty title="No sync jobs yet" icon="activity">Manual refresh jobs will appear here.</Empty>}
-  </section><section className="panel"><div className="section-heading"><div><span className="eyebrow">SAVED EVIDENCE</span><h2>Recent observations</h2></div></div>
+  return <div className="activity-layout"><section className="panel"><div className="section-heading"><h2>Sync history</h2><span className="count-label">{jobs.length}</span></div>
+    {jobs.length ? <div className="jobs-list">{[...jobs].sort((a, b) => b.id - a.id).map(job => {
+      const card = <JobCard job={job} onResume={onResume} onEfficient={onEfficient} disabled={disabled} onStop={onStop} stopping={stoppingJobs.has(job.id)} stopDisabled={stopDisabled} />;
+      const view = presentJobSync(job);
+      return job.state === 'complete' ? <details key={job.id} className="completed-sync"><summary><Icon name="check" size={17} /><strong>{view.title}</strong><span>{view.progress.label}</span><time dateTime={job.updated_at}>{dateTime(job.updated_at, true)}</time></summary>{card}</details> : <div key={job.id}>{card}</div>;
+    })}</div> : <Empty title="No sync jobs yet" icon="activity">Refreshes will appear here.</Empty>}
+  </section><details className="panel observations-disclosure"><summary>Recent observations <span>{records.length}</span></summary>
     {records.length ? <div className="activity-list">{records.slice(0, 30).map((record, index) => {
       const title = stringField(record, 'title', 'message', 'kind', 'type') || 'Observation recorded';
       const identity = stringField(record, 'name') || shorten(stringField(record, 'nft_address'), 10);
@@ -227,7 +238,7 @@ function Activity({ records, jobs, onResume, onEfficient, disabled, onStop, stop
       const time = stringField(record, 'observed_at', 'created_at', 'timestamp', 'at');
       return <article className="activity-item" key={String(record.id ?? index)}><span className="activity-dot" /><div><strong>{identity}</strong><p>{humanize(title)}{detail && detail !== title ? ` · ${detail}` : ''}</p><time title={dateTime(time)}>{dateTime(time, true)}</time></div></article>;
     })}</div> : <Empty title="No recent observations" icon="activity">Gift and rental evidence will appear here once it has been collected.</Empty>}
-  </section></div>;
+  </details></div>;
 }
 
 function stringField(record: DataRecord, ...keys: string[]): string | null {
@@ -238,20 +249,27 @@ function stringField(record: DataRecord, ...keys: string[]): string | null {
 function GiftDetails({ gift, selection, close }: { gift: Gift; selection: PricingSelection; close: () => void }) {
   const ref = useRef<HTMLDialogElement>(null);
   const [copied, setCopied] = useState(false);
-  useEffect(() => { ref.current?.showModal(); return telegramBridge.back(close); }, [close]);
+  useEffect(() => {
+    const dialog = ref.current, trigger = document.activeElement;
+    dialog?.showModal();
+    const removeBack = telegramBridge.back(close);
+    return () => { removeBack(); dialog?.close(); if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus({ preventScroll: true }); };
+  }, [close]);
   const explorer = safeExternalUrl(gift.explorer_url);
-  return <dialog ref={ref} className="detail-dialog" onCancel={close} onClick={event => { if (event.target === event.currentTarget) close(); }} aria-labelledby="gift-detail-title">
-    <div className="drawer-content"><div className="drawer-top"><span className="eyebrow">GIFT DETAILS</span><button className="icon-button" autoFocus aria-label="Close gift details" onClick={close}><Icon name="close" /></button></div>
-      <div className="detail-art"><GiftImage gift={gift} large /></div><div className="detail-title"><p>{gift.collection_name || 'Collection unresolved'}</p><h2 id="gift-detail-title">{gift.name || 'Unnamed gift'}</h2><StateBadge gift={gift} /></div>
-      <div className="detail-price"><div><span>Observed daily price</span><Price gift={gift} /></div><Icon name="layers" size={27} /></div>
-      {gift.price_source && <p className="detail-source">Source: {humanize(gift.price_source)}. This is an observation, not a price recommendation.</p>}
+  return <dialog ref={ref} className="detail-dialog" onCancel={close} onClick={event => {
+    if (event.target !== event.currentTarget) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) close();
+  }} aria-labelledby="gift-detail-title">
+    <div className="drawer-content"><div className="drawer-top"><span>Gift details</span><button className="icon-button" autoFocus aria-label="Close gift details" onClick={close}><Icon name="close" /></button></div>
+      <div className="detail-hero"><div className="detail-art"><GiftImage gift={gift} large /></div><div className="detail-title"><p>{gift.collection_name || 'Collection unresolved'}</p><h2 id="gift-detail-title">{gift.name || 'Unnamed gift'}</h2><StateBadge gift={gift} />{!gift.is_portfolio && <span className="candidate-label">Candidate · ownership unverified</span>}</div></div>
       <PricingDetails gift={gift} selection={selection} />
       <RentalHistoryDetails gift={gift} />
-      <section className="detail-section"><h3>Ownership evidence</h3><div className="proof-badges">{gift.proof_badges.length ? gift.proof_badges.map(badge => <span key={badge}><Icon name="shield" size={14} />{humanize(badge)}</span>) : <span><Icon name="layers" size={14} />{gift.is_portfolio ? 'Declared portfolio membership' : 'Unverified candidate'}</span>}</div>
+      <details className="detail-section detail-disclosure"><summary>Ownership evidence</summary><div className="proof-badges">{gift.proof_badges.length ? gift.proof_badges.map(badge => <span key={badge}><Icon name="shield" size={14} />{humanize(badge)}</span>) : <span><Icon name="layers" size={14} />{gift.is_portfolio ? 'Declared portfolio membership' : 'Unverified candidate'}</span>}</div>
         <dl><div><dt>Verification</dt><dd>{gift.verification_method ? humanize(gift.verification_method) : 'Not established'}</dd></div><div><dt>Membership source</dt><dd>{gift.membership_sources.map(humanize).join(', ') || 'Not established'}</dd></div><div><dt>TON observation</dt><dd>{dateTime(gift.observed_at)}</dd></div><div><dt>Market observation</dt><dd>{dateTime(gift.market_observed_at)}</dd></div><div><dt>Asking price observation</dt><dd>{dateTime(gift.price_observed_at)}{gift.price_is_historical ? " · saved historical price" : ""}</dd></div>{gift.rental_until != null && <div><dt>Rental expiry</dt><dd>{dateTime(gift.rental_until)}</dd></div>}{gift.reviewed_at && <div><dt>Local review</dt><dd>{dateTime(gift.reviewed_at)}{gift.review_stale ? ' · stale' : ''}</dd></div>}{gift.reason && <div><dt>Verification result</dt><dd>{humanize(gift.reason)}</dd></div>}</dl>
-      </section>
-      <section className="detail-section"><h3>On-chain identity</h3><label className="address-label">NFT address</label><div className="address-box"><code>{gift.nft_address}</code><button className="icon-button" aria-label="Copy NFT address" onClick={() => { void navigator.clipboard?.writeText(gift.nft_address).then(() => setCopied(true)).catch(() => setCopied(false)); }}><Icon name={copied ? 'check' : 'copy'} size={17} /></button></div><span className="sr-only" aria-live="polite">{copied ? 'NFT address copied' : ''}</span><label className="address-label">Collection address</label><div className="address-box"><code>{gift.collection_address || 'Not established'}</code></div></section>
-      {gift.uncertainties.length > 0 && <section className="uncertainty-box"><h3><Icon name="alert" size={16} />What is still uncertain</h3><ul>{gift.uncertainties.map((item, index) => <li key={index}>{item}</li>)}</ul></section>}
+      </details>
+      <details className="detail-section detail-disclosure"><summary>Addresses</summary><label className="address-label">NFT address</label><div className="address-box"><code>{gift.nft_address}</code><button className="icon-button" aria-label="Copy NFT address" onClick={() => { void navigator.clipboard?.writeText(gift.nft_address).then(() => setCopied(true)).catch(() => setCopied(false)); }}><Icon name={copied ? 'check' : 'copy'} size={17} /></button></div><span className="sr-only" aria-live="polite">{copied ? 'NFT address copied' : ''}</span><label className="address-label">Collection address</label><div className="address-box"><code>{gift.collection_address || 'Not established'}</code></div></details>
+      {gift.uncertainties.length > 0 && <details className="uncertainty-box"><summary><Icon name="alert" size={16} />Uncertainty · {gift.uncertainties.length} {gift.uncertainties.length === 1 ? 'note' : 'notes'}</summary><ul>{gift.uncertainties.map((item, index) => <li key={index}>{item}</li>)}</ul></details>}
       {explorer && <a className="button secondary external-link" href={explorer} target="_blank" rel="noopener noreferrer">Open in TON explorer<Icon name="external" size={16} /></a>}
     </div>
   </dialog>;
@@ -279,6 +297,8 @@ export default function App({ adapter, walletControl }: {
   const { data, jobs, loading, error, loadedAt, reload, updateJob } = useDashboard(adapter, pricingSelection);
   const ownedPriceRefresh = useOwnedPriceRefresh(adapter, data, reload);
   const [page, setPage] = useState<Page>('pricing');
+  const mainRef = useRef<HTMLElement>(null);
+  const [inventoryScope, setInventoryScope] = useState<InventoryScope>('portfolio');
   const [selected, setSelected] = useState<Gift | null>(null);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<GiftFilter>('all');
@@ -314,9 +334,9 @@ export default function App({ adapter, walletControl }: {
       if (fresh) setSelected(fresh);
     }
   }, [data]); // Keep an open drawer current after a completed local sync.
-  const filtered = useMemo(() => filterGifts(data?.gifts || [], search, filter, collection), [data, search, filter, collection]);
+  const filtered = useMemo(() => filterInventoryGifts(data?.gifts || [], search, filter, collection, inventoryScope), [data, search, filter, collection, inventoryScope]);
   const giftList = useProgressiveList(filtered.length, PAGE_SIZE,
-    JSON.stringify([search, filter, collection]), page === 'gifts' && Boolean(data));
+    JSON.stringify([search, filter, collection, inventoryScope]), page === 'gifts' && Boolean(data));
   const collections = useMemo(() => {
     const values = new Map<string, string>();
     for (const gift of data?.gifts || []) {
@@ -325,8 +345,7 @@ export default function App({ adapter, walletControl }: {
     }
     return [...values].sort((a, b) => a[1].localeCompare(b[1]));
   }, [data]);
-  const latestEvidence = useMemo(() => (data?.gifts || []).flatMap(gift => [gift.observed_at, gift.market_observed_at])
-    .filter((value): value is string => Boolean(value)).sort((a, b) => Date.parse(b) - Date.parse(a))[0] || null, [data]);
+  const latestEvidence = useMemo(() => latestEvidenceAt(data?.gifts || []), [data]);
   const reviewWarnings = data && !Array.isArray(data.review) && Array.isArray(data.review.warnings)
     ? data.review.warnings.filter((value): value is string => typeof value === 'string') : [];
   const supportsJob = (kind: JobKind) => !data?.capabilities.supported_jobs || data.capabilities.supported_jobs.includes(kind);
@@ -364,48 +383,54 @@ export default function App({ adapter, walletControl }: {
     } finally { stopRequests.current.delete(job.id); }
   };
   const onStop = (job: Job) => { void stop(job); };
-  const goFilter = (value: GiftFilter) => { setFilter(value); setPage('gifts'); setSearch(''); setCollection(''); };
-  const nav = <>{NAV.map(item => <button key={item.id} aria-current={page === item.id ? 'page' : undefined} className={`nav-item ${page === item.id ? 'active' : ''}`} onClick={() => setPage(item.id)}><Icon name={item.icon} size={20} /><span>{item.label}</span>{item.id === 'gifts' && data && <b>{data.summary.portfolio_count}</b>}</button>)}</>;
+  const navigate = (next: Page) => {
+    setPage(next); setSyncMenu(false); setRefreshOpen(false);
+    requestAnimationFrame(() => { window.scrollTo({ top: 0, behavior: 'instant' }); mainRef.current?.focus({ preventScroll: true }); });
+  };
+  const goFilter = (value: GiftFilter, scope: InventoryScope = 'portfolio') => { setFilter(value); setInventoryScope(scope); navigate('gifts'); setSearch(''); setCollection(''); };
+  const nav = <>{NAV.map(item => <button key={item.id} aria-current={page === item.id ? 'page' : undefined} className={`nav-item ${page === item.id ? 'active' : ''}`} onClick={() => navigate(item.id)}><Icon name={item.icon} size={20} /><span>{item.label}</span>{item.id === 'gifts' && data && <b>{data.summary.portfolio_count}</b>}</button>)}</>;
 
-  const jobCards = visibleJobs.length > 0 && <div className="active-jobs">{visibleJobs.map(job => <JobCard key={job.id} job={job} onResume={onResume} onEfficient={onEfficient} disabled={busy || !canSync} onStop={onStop} stopping={stoppingJobs.has(job.id)} stopDisabled={!data} />)}</div>;
+  const jobCards = visibleJobs.length > 0 && <div className="active-jobs">{visibleJobs.slice(0, 1).map(job => <JobCard key={job.id} job={job} onResume={onResume} onEfficient={onEfficient} disabled={busy || !canSync} onStop={onStop} stopping={stoppingJobs.has(job.id)} stopDisabled={!data} />)}{visibleJobs.length > 1 && <button className="text-button other-syncs" onClick={() => navigate('activity')}>{visibleJobs.length - 1} more updates · View activity<Icon name="arrow" size={14} /></button>}</div>;
+  const viewControl = <div className="pricing-view-toggle" role="group" aria-label="Gift display"><button type="button" className={simplePricing ? 'active' : ''} aria-pressed={simplePricing} onClick={() => changePricingView('grid')}><Icon name="overview" size={15} />Simple</button><button type="button" className={!simplePricing ? 'active' : ''} aria-pressed={!simplePricing} onClick={() => changePricingView('detailed')}><Icon name="layers" size={15} />Detailed</button></div>;
 
   const headingActions = <div className="heading-actions"><a className="button secondary export-button" href={data && !adapter.exportCsv ? adapter.exportUrl(pricingSelection) : undefined} role={adapter.exportCsv ? 'button' : undefined} onClick={event => { if (adapter.exportCsv && data) { event.preventDefault(); adapter.exportCsv(data, pricingSelection); } }} onKeyDown={event => { if (adapter.exportCsv && data && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); adapter.exportCsv(data, pricingSelection); } }} aria-disabled={!data} tabIndex={data ? 0 : -1}><Icon name="download" size={16} />Export</a><div className="sync-control"><button className="button primary" onClick={() => { void launch(priceJob); }} disabled={!canSync || busy} title={!canSync ? cloud ? 'Configure the private server token and import your portfolio to collect comparison prices.' : 'Configure your wallet and local Marketapp API token, and enable network collection to sync.' : pricingSelection.source === 'rentals' ? 'Collect recorded rentals for your gift collections' : 'Collect observed asking prices for your gift collections'}><Icon name={busy ? 'refresh' : 'pricing'} size={17} className={busy ? 'spinning' : ''} />{busy ? 'Sync in progress' : simplePricing ? 'Refresh prices' : pricingSelection.source === 'rentals' ? 'Collect actual rentals' : 'Collect comparison prices'}</button><button className="button primary sync-more" disabled={!canSync || busy} aria-label="More sync options" aria-expanded={syncMenu} onClick={() => setSyncMenu(!syncMenu)}><span>⌄</span></button>{syncMenu && <div className="sync-menu">{cloud && <button onClick={() => { void launch(priceJob, undefined, { forceRefresh: true }); }}><Icon name="refresh" size={18} /><span><strong>Force fresh comparison data</strong><small>Bypass the 60-minute comparison cache. Request limits still apply.</small></span></button>}{supportsJob('refresh') && <button onClick={() => { void launch('refresh'); }}><Icon name="refresh" size={18} /><span><strong>Refresh gift status</strong><small>Update ownership, traits and configured asking prices</small></span></button>}{supportsJob('discover') && <button onClick={() => { void launch('discover'); }} disabled={!data?.capabilities.marketapp_configured}><Icon name="discover" size={18} /><span><strong>Discover wallet gifts</strong><small>Search holdings and transfer history</small></span></button>}<button onClick={() => { void launch('collect'); }} disabled={!data?.capabilities.marketapp_configured}><Icon name="layers" size={18} /><span><strong>Collect market listings</strong><small>{cloud ? 'Refresh public listings and bounded rental history' : 'Read public listings; rented-gift prices use Refresh gift status'}</small></span></button></div>}</div></div>;
 
   return <div className={`app-shell${cloud ? ' cloud' : ''}${simplePricing ? ' simple-pricing' : ''}`}><a href="#main" className="skip-link">Skip to dashboard</a>
-    <aside className="sidebar"><a className="brand" href="#" onClick={event => { event.preventDefault(); setPage('pricing'); }} aria-label="Giftfolio pricing"><span className="brand-symbol"><Icon name="gift" size={24} /></span><span>giftfolio<span className="brand-dot">.</span></span></a><div className="workspace-label"><span />PERSONAL WORKSPACE</div><nav aria-label="Main navigation">{nav}</nav>
-      <div className="sidebar-bottom"><div className="network-label"><span className="network-dot" />TON mainnet<Icon name="shield" size={15} /></div><p>Your collection.<br />A clearer view.</p><span className="local-label"><i />{cloud ? 'TELEGRAM · PRIVATE' : 'LOCAL & PRIVATE'}</span></div>
+    <aside className="sidebar"><a className="brand" href="#" onClick={event => { event.preventDefault(); navigate('pricing'); }} aria-label="Gift Rent Check pricing"><span className="brand-symbol"><Icon name="gift" size={24} /></span><span>Gift Rent<br />Check</span></a><div className="workspace-label"><span />PRIVATE DASHBOARD</div><nav aria-label="Main navigation">{nav}</nav>
+      <div className="sidebar-bottom"><div className="network-label"><span className="network-dot" />TON mainnet<Icon name="shield" size={15} /></div><span className="local-label"><i />{cloud ? 'TELEGRAM' : 'DESKTOP'} · READ ONLY</span></div>
     </aside>
     <div className="main-shell"><header className="topbar"><span className="breadcrumb">Workspace <span>/</span> <strong>{NAV.find(item => item.id === page)?.label}</strong></span><div className="topbar-right"><span className="read-only-indicator"><Icon name="shield" size={14} />Read only</span>{walletControl ? walletControl(data) : <div className="wallet-chip" title={data?.wallet || 'No wallet configured'}><span className="wallet-avatar"><Icon name="wallet" size={15} /></span><span>{data?.wallet ? shorten(data.wallet) : 'Wallet not configured'}</span><span className={`connection-dot ${error ? 'offline' : ''}`} /></div>}</div></header>
-      <main id="main">
-      {page === 'pricing' && <div className="pricing-view-bar"><span>View</span><div className="pricing-view-toggle" role="group" aria-label="Gift display"><button type="button" className={simplePricing ? 'active' : ''} aria-pressed={simplePricing} onClick={() => changePricingView('grid')}><Icon name="overview" size={15} />Simple</button><button type="button" className={!simplePricing ? 'active' : ''} aria-pressed={!simplePricing} onClick={() => changePricingView('detailed')}><Icon name="layers" size={15} />Detailed</button></div></div>}
-      <div className="page-heading"><div><span className="eyebrow">{page === 'pricing' ? 'RENTAL PRICE INTELLIGENCE' : 'YOUR PERSONAL COLLECTION'}</span><h1>{page === 'pricing' ? 'A clearer price for every gift.' : page === 'overview' ? 'Your gifts, in view.' : page === 'gifts' ? 'A place for every gift.' : 'Every observation, recorded.'}</h1><p>{page === 'pricing' ? 'Compare listing prices or actual rental records by collection, model, and exact Black backdrop.' : page === 'overview' ? 'Wallet ownership and rental observations, together in one place.' : page === 'gifts' ? 'Explore your portfolio and the evidence behind each gift.' : 'Follow your syncs and inspect the saved evidence as it arrives.'}</p></div>
-        {!simplePricing && headingActions}
+      <main id="main" ref={mainRef} tabIndex={-1} aria-label={NAV.find(item => item.id === page)?.label}>
+      <div className={page === 'pricing' ? 'sr-only' : 'page-heading concise-heading'}><h1>{NAV.find(item => item.id === page)?.label}</h1>
       </div>
-      {page === 'pricing' && <PricingControls selection={pricingSelection} onChange={changePricing} loading={loading} compact={simplePricing} />}
+      {page === 'pricing' && <PricingControls selection={pricingSelection} onChange={changePricing} loading={loading} compact />}
       {ownedPriceRefresh && <OwnedPriceStatus driver={ownedPriceRefresh} />}
-      {page === 'pricing' && data && (simplePricing ? <details className="grid-collection-settings" open={refreshOpen} onToggle={event => { setRefreshOpen(event.currentTarget.open); if (!event.currentTarget.open) setSyncMenu(false); }}>
-        <summary>Refresh data</summary>
-        {refreshOpen && <div className="grid-collection-content">{headingActions}<CollectionLimits data={data} selection={pricingSelection} />{cloud && <p>Keep Telegram open while updating.</p>}<button className="text-button" onClick={() => setPage('activity')}>Open collection activity <Icon name="arrow" size={14} /></button></div>}
-      </details> : <CollectionLimits data={data} selection={pricingSelection} />)}
-      {error && <div className="notice error" role="alert"><Icon name="alert" size={19} /><div><strong>{cloud ? 'Telegram data could not be loaded' : data ? 'Showing saved data · local service unavailable' : 'The local service is unavailable'}</strong><p>{error}{loadedAt ? ` Last loaded ${dateTime(loadedAt)}.` : cloud ? ' Reopen the Mini App from your private bot and try again.' : ' Start the dashboard service and try again.'}</p></div><button className="text-button" onClick={() => { void reload(); }}>Retry<Icon name="refresh" size={15} /></button></div>}
+      {data && <details className="grid-collection-settings data-actions" open={refreshOpen} onToggle={event => { setRefreshOpen(event.currentTarget.open); if (!event.currentTarget.open) setSyncMenu(false); }}>
+        <summary>Refresh & export</summary>
+        {refreshOpen && <div className="grid-collection-content">{headingActions}<CollectionLimits data={data} selection={pricingSelection} />{cloud && <p>Keep Telegram open while updating.</p>}<button className="text-button" onClick={() => navigate('activity')}>View activity <Icon name="arrow" size={14} /></button></div>}
+      </details>}
+      {error && <div className="notice error" role="alert"><Icon name="alert" size={19} /><div><strong>Could not load updates</strong><p>{data ? 'Showing your last saved data.' : cloud ? 'Reopen the Mini App or try again.' : 'Start the desktop service, then retry.'}</p><details><summary>Details</summary><p>{error}{loadedAt ? ` Last loaded ${dateTime(loadedAt)}.` : ''}</p></details></div><button className="text-button" onClick={() => { void reload(); }}>Retry<Icon name="refresh" size={15} /></button></div>}
       {jobError && <div className="notice error" role="alert"><Icon name="alert" size={19} /><div><strong>Sync action failed</strong><p>{jobError}</p></div><button className="icon-button" aria-label="Dismiss sync error" onClick={() => setJobError(null)}><Icon name="close" size={17} /></button></div>}
-      {data && !data.capabilities.network_enabled && (!simplePricing || refreshOpen) && <div className="notice info"><Icon name="shield" size={18} /><div><strong>Browsing saved observations</strong><p>{data.capabilities.owned_price_refresh ? 'Marketapp collection is disabled. Your known gifts’ contract prices can still refresh through TON.' : 'Network collection is disabled for this dashboard. You can still inspect and export your local data.'}</p></div>{!data.capabilities.owned_price_refresh && <span className="quiet-pill">OFFLINE MODE</span>}</div>}
+      {data && !data.capabilities.network_enabled && refreshOpen && <div className="notice info"><Icon name="shield" size={18} /><div><strong>Saved data</strong><p>{data.capabilities.owned_price_refresh ? 'Marketapp sync is off. Your gift prices can still update through TON.' : 'Sync is off. Browsing and export remain available.'}</p></div></div>}
       {!cloud && data && data.capabilities.network_enabled && !data.capabilities.wallet_configured && <div className="notice info"><Icon name="wallet" size={19} /><div><strong>Connect the dashboard to your wallet</strong><p>Set your wallet address in the local configuration, then restart the dashboard. No wallet connection or signing is needed.</p></div></div>}
       {data && data.capabilities.network_enabled && data.capabilities.wallet_configured && !data.capabilities.marketapp_configured && <div className="notice info"><Icon name="layers" size={18} /><div><strong>{cloud ? 'A Marketapp API token is required on Telegram' : 'A local Marketapp API token is required to sync'}</strong><p>{cloud ? 'Configure the private backend token before collecting. Saved data remains available.' : 'Configure the token locally so refresh and discovery can check the eligible collection catalog. Sync and resume stay disabled until it is configured; saved data remains available.'}</p></div></div>}
-      {cloud && data && !simplePricing && <details className="cloud-note"><summary>Keep the app open while collecting <span>· private portfolio</span></summary><p>{data.capabilities.ownership_note || 'Portfolio membership and ownership evidence were imported from your saved wallet scan. Telegram refreshes market prices; it does not yet discover new gifts or recheck rental contract ownership.'} Closing or hiding the Mini App interrupts collection; Continue resumes saved progress. Opening the app and changing filters use saved data only.</p></details>}
       {reviewWarnings.length > 0 && <div className="notice error"><Icon name="alert" size={18} /><div><strong>Some review evidence could not be loaded</strong>{reviewWarnings.map((warning, index) => <p key={index}>{warning}</p>)}</div></div>}
       {page !== 'activity' && jobCards}
       {loading && !data ? <div className="loading-state" role="status"><div className="loading-cards">{[0, 1, 2, 3].map(key => <div className="skeleton" key={key} />)}</div><div className="skeleton loading-panel" /><p>Reading your saved collection…</p></div> : data ? <>
-        {!simplePricing && <div className="observation-caption"><span className="tiny-dot" />{cloud ? 'Telegram saved-data view' : 'Local database view'}<span className="caption-divider">·</span><span title={dateTime(latestEvidence)}>Latest evidence {relativeTime(latestEvidence)}</span><span className="caption-divider">·</span><span>Generated {dateTime(data.generated_at, true)}</span></div>}
-        {page === 'pricing' && <PricingPage data={data} selection={pricingSelection} onSelectionChange={changePricing} filters={pricingFilters} onFiltersChange={setPricingFilters} onSelect={setSelected} renderImage={gift => <GiftImage gift={gift} />} collectPrices={() => { void launch(priceJob); }} disabled={!canSync || busy} viewMode={pricingView} />}
+        {page !== 'pricing' && <div className="observation-caption"><span className="tiny-dot" /><span title={dateTime(latestEvidence)}>Latest observation {relativeTime(latestEvidence)}</span></div>}
+        {page === 'pricing' && <PricingPage data={data} selection={pricingSelection} onSelectionChange={changePricing} filters={pricingFilters} onFiltersChange={setPricingFilters} onSelect={setSelected} renderImage={gift => <GiftImage gift={gift} />} collectPrices={() => { void launch(priceJob); }} disabled={!canSync || busy} viewMode={pricingView} viewControl={viewControl} />}
         {page === 'overview' && <Overview data={data} onFilter={goFilter} onSelect={setSelected} />}
-        {page === 'gifts' && <section className="panel gifts-panel"><div className="section-heading"><div><span className="eyebrow">GIFT INVENTORY</span><h2>Gifts and candidates <span className="heading-count">{data.gifts.length}</span></h2></div></div><div className="filter-toolbar"><label className="search-field"><Icon name="search" size={18} /><input aria-label="Search gifts" placeholder="Search gift, collection or address…" value={search} onChange={event => setSearch(event.target.value)} />{search && <button className="icon-button" aria-label="Clear search" onClick={() => setSearch('')}><Icon name="close" size={15} /></button>}</label><label className="collection-filter"><span className="sr-only">Filter by collection</span><select value={collection} onChange={event => setCollection(event.target.value)}><option value="">All collections</option>{collections.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label></div><div className="filter-tabs" aria-label="Filter gifts by state">{FILTERS.map(option => <button className={filter === option.id ? 'active' : ''} aria-pressed={filter === option.id} key={option.id} onClick={() => setFilter(option.id)}>{option.label}</button>)}</div>
-          {filtered.length ? <GiftTable gifts={filtered.slice(0, giftList.visibleCount)} onSelect={setSelected} /> : <Empty title={data.gifts.length ? 'No gifts match this view' : 'No gifts to show yet'} icon={data.gifts.length ? 'search' : 'gift'}>{data.gifts.length ? 'Try a different search, collection, or status filter.' : 'Discover your wallet or import a portfolio to get started.'}</Empty>}
-          <ListFooter {...giftList} total={filtered.length} />
+        {page === 'gifts' && <section className="panel gifts-panel">
+          <div className="inventory-scope" role="group" aria-label="Gift membership">
+            {(['portfolio', 'candidates', 'all'] as const).map(scope => <button key={scope} aria-pressed={inventoryScope === scope} className={inventoryScope === scope ? 'active' : ''} onClick={() => setInventoryScope(scope)}>{scope === 'portfolio' ? 'Your gifts' : scope === 'candidates' ? 'Candidates' : 'All'} <b>{data.gifts.filter(gift => scope === 'all' || (scope === 'portfolio' ? gift.is_portfolio : !gift.is_portfolio)).length}</b></button>)}
+          </div>
+          <div className="filter-toolbar inventory-filters"><label className="search-field"><Icon name="search" size={18} /><input aria-label="Search gifts" placeholder="Search gifts…" value={search} onChange={event => setSearch(event.target.value)} />{search && <button className="icon-button" aria-label="Clear search" onClick={() => setSearch('')}><Icon name="close" size={15} /></button>}</label><label className="collection-filter"><span className="sr-only">Filter by collection</span><select value={collection} onChange={event => setCollection(event.target.value)}><option value="">All collections</option>{collections.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label><label className="collection-filter"><span className="sr-only">Filter gifts by state</span><select value={filter} onChange={event => setFilter(event.target.value as GiftFilter)}>{FILTERS.map(option => <option key={option.id} value={option.id}>{option.id === 'all' ? 'All statuses' : option.label}</option>)}</select></label></div>
+          {filtered.length ? <GiftTable gifts={filtered.slice(0, giftList.visibleCount)} onSelect={setSelected} /> : <Empty title={data.gifts.length ? 'No matching gifts' : 'No gifts yet'} icon={data.gifts.length ? 'search' : 'gift'}>{data.gifts.length ? <>Try another filter.<button className="button secondary" onClick={() => { setSearch(''); setCollection(''); setFilter('all'); setInventoryScope('portfolio'); }}>Reset filters</button></> : cloud ? 'Import your saved portfolio to add gifts here.' : 'Import a portfolio or discover your wallet to add gifts.'}</Empty>}
+          <ListFooter {...giftList} total={filtered.length} noun={inventoryScope === 'candidates' ? 'candidates' : 'gifts'} />
         </section>}
         {page === 'activity' && <Activity records={data.activity || []} jobs={jobs} onResume={onResume} onEfficient={onEfficient} disabled={busy || !canSync} onStop={onStop} stoppingJobs={stoppingJobs} stopDisabled={!data} />}
-      </> : !loading && <Empty title="Your dashboard is waiting" icon="alert">{cloud ? 'Open this Mini App from the private bot to load your saved portfolio.' : 'Start the local dashboard service to inspect your saved portfolio. Your data stays on this device.'}</Empty>}
-      <footer className="page-footer"><span><Icon name="shield" size={14} />Price guidance only. No transactions or automatic price changes.</span><span>Powered by TON & Marketapp data</span></footer>
+      </> : !loading && !error && <Empty title="No saved data yet" icon="alert">{cloud ? 'Open this Mini App from your bot to load the portfolio.' : 'Start the dashboard service to load your portfolio.'}</Empty>}
+      <footer className="page-footer"><span><Icon name="shield" size={14} />Read-only · no price changes</span><span>TON & Marketapp</span></footer>
       </main>
     </div><nav className="mobile-nav" aria-label="Mobile navigation">{nav}</nav>
     {selected && data && <GiftDetails key={selected.id} gift={selected} selection={pricingSelection} close={closeDetails} />}

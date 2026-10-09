@@ -1,0 +1,127 @@
+/* Shared screen hierarchy and readable controls across desktop and Telegram. */
+body:has(.detail-dialog[open]){overflow:hidden}
+.app-shell .brand{font-size:21px;line-height:1.15;letter-spacing:-.4px}
+.app-shell main:focus{outline:none}
+.app-shell .breadcrumb{font-size:12px}
+.app-shell .concise-heading{align-items:flex-start;margin-bottom:12px}
+.app-shell .concise-heading h1{font-size:25px}
+.app-shell .observation-caption{font-size:12px;color:#91a8bc}
+.app-shell .button{font-size:13px;min-height:42px}
+.app-shell .text-button{font-size:13px;min-height:40px}
+.app-shell .icon-button{min-width:40px;min-height:40px}
+.app-shell summary{cursor:pointer}
+.app-shell summary:focus-visible{outline:2px solid var(--teal);outline-offset:3px;border-radius:4px}
+.app-shell .notice strong{font-size:14px}
+.app-shell .notice p,.app-shell .notice summary{font-size:13px;line-height:1.6}
+.app-shell .notice details{margin-top:6px}
+.app-shell .data-actions{font-size:13px;color:#a9bdcf;margin:0 0 16px}
+.app-shell .data-actions>summary{min-height:36px;align-content:center}
+.app-shell .data-actions>.grid-collection-content{padding:8px 0}
+.app-shell .data-actions .heading-actions{margin:0 0 12px;justify-content:flex-start;flex-wrap:wrap;gap:8px}
+.app-shell .data-actions .sync-control{max-width:100%}
+.app-shell .data-actions .sync-menu{max-width:calc(100vw - 50px)}
+.app-shell .data-actions .sync-menu strong{font-size:13px}
+.app-shell .data-actions .sync-menu small{font-size:12px;line-height:1.5}
+.app-shell .stat-card{min-height:126px;padding:17px}
+.app-shell .stat-heading{font-size:14px}
+.app-shell .stat-card>strong{font-size:34px;margin:13px 0 10px}
+.app-shell .stat-foot{font-size:12px;line-height:1.4}
+.app-shell .stat-foot>svg{display:none}
+.app-shell .section-heading{padding:18px}
+.app-shell .section-heading h2{font-size:18px;margin:0}
+.app-shell .featured-grid{grid-template-columns:repeat(4,minmax(0,1fr));padding:0 18px 18px;gap:12px}
+.app-shell .featured-info>strong{font-size:15px;white-space:normal;line-height:1.45;min-height:0;margin-bottom:8px}
+.app-shell .featured-info .state-badge,.app-shell .state-badge{font-size:12px;line-height:1.4;padding:4px 7px;white-space:normal}
+.app-shell .gift-image.large{max-height:230px}
+.app-shell .featured-gift .gift-image.large{max-height:none;aspect-ratio:1}
+.app-shell .distribution-panel{display:block}
+.app-shell .distribution-bar{margin:8px 18px 16px}
+.app-shell .mix-legend{padding:0 18px;gap:4px}
+.app-shell .mix-legend button{font-size:14px;min-height:40px}
+.app-shell .fine-print{font-size:12px;line-height:1.6;margin:14px 18px 0}
+.app-shell .inventory-scope{display:flex;gap:5px;padding:14px 16px}
+.app-shell .inventory-scope>button{min-height:42px;background:transparent;border:1px solid transparent;border-radius:8px;padding:8px 10px;color:#a2b8cc;font-size:13px}
+.app-shell .inventory-scope>button.active{color:#c6f0e1;background:#203f36;border-color:#3b6554}
+.app-shell .inventory-scope b{font-weight:500;margin-left:4px;color:#c3d8df}
+.app-shell .inventory-filters{gap:10px;padding:0 16px 16px}
+.app-shell .inventory-filters .search-field{flex:1;height:44px}
+.app-shell .inventory-filters input{font-size:14px}
+.app-shell .inventory-filters .collection-filter{margin:0;min-width:0}
+.app-shell .inventory-filters select{height:44px;font-size:13px;min-width:140px;max-width:230px}
+.app-shell .inventory-table th{font-size:12px;padding:12px 16px}
+.app-shell .inventory-table td{padding:17px 16px}
+.app-shell .inventory-table .gift-image{width:64px;height:64px;border-radius:10px}
+.app-shell .inventory-table .gift-name-button{gap:14px;max-width:100%}
+.app-shell .inventory-table .gift-name-button strong{font-size:16px;white-space:normal;line-height:1.4}
+.app-shell .inventory-table .gift-name-button small{font-size:12px;line-height:1.5;margin-top:4px}
+.app-shell .inventory-table .price{font-size:20px}
+.app-shell .inventory-table .price>span{font-size:11px}
+.app-shell .inventory-table .observation{font-size:12px}
+.app-shell .candidate-label,.app-shell .saved-price-label{font-size:12px;color:#dbbd89;line-height:1.5}
+.app-shell .saved-price-label{display:block;margin-top:4px}
+.app-shell .empty-state h3{font-size:18px}
+.app-shell .empty-state p{font-size:14px;line-height:1.6}
+.app-shell .empty-state .button{display:flex;margin:14px auto 0}
+.app-shell .page-footer{font-size:12px;color:#92a7b9;margin-top:20px;line-height:1.5}
+.app-shell .activity-item strong{font-size:14px}
+.app-shell .activity-item p,.app-shell .activity-item time{font-size:12px;line-height:1.6}
+.app-shell .detail-dialog{width:510px}
+.app-shell .drawer-content{padding:0 24px 28px}
+.app-shell .drawer-top{position:sticky;top:0;background:#111b29f5;backdrop-filter:blur(8px);z-index:3;margin:0 -4px 16px;padding:10px 0;min-height:62px;border-bottom:1px solid #2b3d54;color:#adc3d4;font-size:14px}
+.app-shell .detail-hero{display:grid;grid-template-columns:104px minmax(0,1fr);align-items:center;gap:16px;margin-bottom:20px}
+.app-shell .detail-art{border-radius:12px}
+.app-shell .detail-art .gift-image.large{aspect-ratio:1;max-height:none}
+.app-shell .detail-title{margin:0;min-width:0}
+.app-shell .detail-title>p{font-size:12px;margin-bottom:4px}
+.app-shell .detail-title h2{font-size:22px;line-height:1.25;margin-bottom:10px}
+.app-shell .detail-title>.candidate-label{display:block;margin-top:6px}
+.app-shell .detail-section{margin-top:18px;padding-top:18px}
+.app-shell .detail-section h3{font-size:15px}
+.app-shell .detail-disclosure>summary{font-size:14px;color:#c8dbea;min-height:40px;align-content:center}
+.app-shell .detail-disclosure[open]>summary{margin-bottom:10px}
+.app-shell .detail-dialog dt,.app-shell .detail-dialog dd{font-size:12px;line-height:1.6}
+.app-shell .detail-dialog dt{flex-shrink:1}
+.app-shell .detail-dialog dl>div{gap:14px}
+.app-shell .proof-badges>span{font-size:12px}
+.app-shell .address-label,.app-shell .address-box code{font-size:12px}
+.app-shell .uncertainty-box{margin-top:18px;padding:12px 14px}
+.app-shell .uncertainty-box>summary{font-size:13px;color:#e0c18e;min-height:30px;line-height:1.5}
+.app-shell .uncertainty-box ul{font-size:12px;line-height:1.65}
+@media(max-width:1199px){.app-shell .featured-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:1050px){.app-shell .inventory-filters{flex-wrap:wrap}.app-shell .inventory-filters .search-field{flex-basis:100%}.app-shell .inventory-filters .collection-filter{flex:1}.app-shell .inventory-filters select{width:100%;max-width:none}}
+@media(max-width:760px){
+  .app-shell main{padding:18px 14px 100px}
+  .app-shell .topbar{height:58px;padding:0 14px}
+  .app-shell .breadcrumb{font-size:12px}
+  .app-shell .breadcrumb>span{margin:0 7px}
+  .app-shell .mobile-nav .nav-item{font-size:11px;min-height:55px;padding:7px}
+  .app-shell .stat-card{min-height:126px;padding:14px}
+  .app-shell .stat-heading{font-size:13px}
+  .app-shell .stat-foot{font-size:11px}
+  .app-shell .stat-foot span{max-width:none}
+  .app-shell .stats-grid{gap:10px;margin-bottom:18px}
+  .app-shell .featured-info{padding:11px}
+  .app-shell .featured-info>strong{font-size:14px}
+  .app-shell .inventory-scope{padding:12px 10px;gap:3px}
+  .app-shell .inventory-scope>button{flex:1;padding:7px 4px;font-size:12px}
+  .app-shell .inventory-scope b{margin-left:3px}
+  .app-shell .inventory-filters{padding:0 12px 14px;gap:8px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+  .app-shell .inventory-filters .search-field{grid-column:1/-1;width:100%}
+  .app-shell .inventory-filters select{min-width:0}
+  .app-shell .inventory-table tr{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;padding:16px 12px}
+  .app-shell .inventory-table td:first-child{grid-column:1/-1;margin:0;padding-right:35px!important}
+  .app-shell .inventory-table td:nth-child(2){grid-column:1;grid-row:2;margin:0}
+  .app-shell .inventory-table td:nth-child(3){grid-column:2;grid-row:2;margin:0;align-self:center}
+  .app-shell .inventory-table td:nth-child(4){display:none}
+  .app-shell .inventory-table td:nth-child(5){display:block;position:absolute;right:7px;top:20px}
+  .app-shell .inventory-table .gift-name-button .gift-image{width:60px;height:60px}
+  .app-shell .inventory-table .gift-name-button strong{font-size:16px}
+  .app-shell .inventory-table .rental-count{font-size:12px;margin-top:5px}
+  .app-shell .inventory-table .rental-count b{font-size:13px}
+  .app-shell .detail-dialog{width:100%}
+  .app-shell .drawer-content{padding:0 18px 25px}
+  .app-shell .detail-hero{grid-template-columns:88px minmax(0,1fr);gap:13px}
+  .app-shell .detail-title h2{font-size:20px}
+  .app-shell .page-footer{flex-direction:row;flex-wrap:wrap;gap:8px}
+}
+@media(prefers-reduced-motion:reduce){.app-shell *{scroll-behavior:auto!important}.app-shell .button,.app-shell .featured-gift,.app-shell .stat-card{transition:none}}

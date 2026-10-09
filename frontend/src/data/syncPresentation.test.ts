@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {presentJobSync, presentOwnedPriceSync} from './syncPresentation.ts';
+import {compactJobMessage, presentJobSync, presentOwnedPriceSync} from './syncPresentation.ts';
 import type {Job, JobKind} from './types.ts';
 import type {OwnedPriceSnapshot} from './ownedPriceRefresh.ts';
 
@@ -127,4 +127,15 @@ test('custom rental timeframes affect purpose while listing purpose stays curren
   assert.match(presentJobSync(job({collection_window: {timeframe: 'custom'}})).objective, /selected dates/);
   assert.match(presentJobSync(job(), {timeframeLabel: 'Last 7 days'}).objective, /last 7 days/);
   assert.doesNotMatch(presentJobSync(job({kind: 'prices'}), {timeframeLabel: 'Last 90 days'}).objective, /90/);
+});
+
+test('compact status retains pause cause, restored allowance, failures and the current collection', () => {
+  const compact = (value: Job) => compactJobMessage(value, presentJobSync(value));
+  assert.equal(compact(job()), 'Checking Low Riders');
+  assert.equal(compact(job({state: 'partial', reason: 'daily_limit'})), 'Daily allowance used · progress saved.');
+  assert.equal(compact(job({state: 'partial', reason: 'daily_limit', progress: {marketapp_budget: {rolling_24h_used: 0, rolling_24h_limit: 500}}})), 'Allowance available · ready to continue.');
+  assert.equal(compact(job({state: 'partial', reason: 'retry_wait'})), 'Provider cooldown · continue later.');
+  assert.equal(compact(job({reason: 'retry_wait'})), 'Provider cooldown · retrying automatically.');
+  assert.equal(compact(job({state: 'failed', reason: 'authentication_failed'})), 'Access rejected · check the API connection.');
+  assert.equal(compact(job({state: 'failed', reason: 'cursor_rejected'})), 'Cannot resume · start a new refresh.');
 });

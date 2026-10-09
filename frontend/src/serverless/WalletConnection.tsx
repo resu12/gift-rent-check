@@ -80,23 +80,29 @@ export function WalletConnection({ savedWallet, dashboardReady = true }: {
         onClick={() => setExpanded(value => !value)}><Icon name="chevron" size={14}/></button>
     </div>
     {expanded && <section className="wallet-connection-panel" id={panelId} aria-label="Wallet connection">
-      <div className="wallet-connection-heading"><strong>Wallet connection</strong>
+      <div className="wallet-connection-heading"><strong>Wallet</strong>
         <button type="button" className="icon-button" aria-label="Close wallet details"
           onClick={() => { setExpanded(false); toggleRef.current?.focus(); }}><Icon name="close" size={17}/></button>
       </div>
       <div role="status" aria-live="polite" className={warning ? 'wallet-connection-warning' : ''}>
-        {binding.state === 'restoring' && <p>Restoring your wallet connection…</p>}
-        {binding.state === 'disconnected' && <p>No wallet connected. Choose a wallet and approve the connection in your wallet app.</p>}
-        {binding.state === 'matching' && <p>Connected to your saved portfolio wallet.</p>}
-        {binding.state === 'different_wallet' && <p>This wallet is different from your saved portfolio. Connecting does not switch or import portfolio data.</p>}
-        {binding.state === 'loading_portfolio' && <p>Wallet connected. Loading the saved portfolio address…</p>}
-        {binding.state === 'unknown_portfolio' && <p>Wallet connected. The saved portfolio address could not be verified. Your saved data is unchanged.</p>}
-        {binding.state === 'unsupported_network' && <p>This connection is not on TON mainnet. Disconnect, switch your wallet to mainnet, and connect again.</p>}
-        {binding.state === 'invalid_address' && <p>The wallet returned an invalid mainnet address. Disconnect and try connecting again.</p>}
+        {binding.state === 'restoring' && <p>Restoring connection…</p>}
+        {binding.state === 'disconnected' && <p>No wallet connected.</p>}
+        {binding.state === 'matching' && <p>Connected to your saved wallet.</p>}
+        {binding.state === 'different_wallet' && <p>Different wallet connected. Saved portfolio unchanged.</p>}
+        {binding.state === 'loading_portfolio' && <p>Connected · checking the saved wallet…</p>}
+        {binding.state === 'unknown_portfolio' && <p>Saved wallet could not be verified. Saved data is unchanged.</p>}
+        {binding.state === 'unsupported_network' && <p>Mainnet required. Disconnect, switch to mainnet, and reconnect.</p>}
+        {binding.state === 'invalid_address' && <p>Invalid wallet address. Disconnect and reconnect.</p>}
       </div>
-      {binding.address && <div className="wallet-connection-address"><span>Connected wallet</span><code>{binding.address}</code></div>}
-      {savedWallet && <div className="wallet-connection-address"><span>Saved portfolio belongs to</span><code>{savedWallet}</code></div>}
-      <p className="wallet-connection-note">Read-only connection. Disconnecting keeps your saved gifts and price updates. Telegram still controls access to this private dashboard.</p>
+      {(binding.address || savedWallet) && <dl className="wallet-connection-identities">
+        <div><dt>Connected wallet</dt><dd>{binding.address ? shortWalletAddress(binding.address) : !restored ? 'Restoring…' : hasSession ? 'Address unavailable' : 'Not connected'}</dd></div>
+        <div><dt>Saved portfolio</dt><dd>{savedWallet ? shortWalletAddress(savedWallet) : 'Not available'}</dd></div>
+      </dl>}
+      <details className="wallet-connection-details"><summary>Addresses & access</summary>
+        {binding.address && <div className="wallet-connection-address"><span>Connected wallet address</span><code>{binding.address}</code></div>}
+        {savedWallet && <div className="wallet-connection-address"><span>Saved portfolio address</span><code>{savedWallet}</code></div>}
+        <p className="wallet-connection-note">Read-only connection, approved in your wallet app. Connecting does not switch or import portfolios. Disconnecting keeps saved gifts and price updates. Telegram controls access to this private dashboard.</p>
+      </details>
       {error && <p role="alert" className="wallet-connection-warning">{error}</p>}
       <button type="button" className="button secondary wallet-connection-action" disabled={!restored || pending !== null}
         onClick={() => { void act(hasSession ? 'disconnect' : 'connect'); }}>

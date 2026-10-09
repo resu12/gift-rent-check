@@ -179,6 +179,7 @@ button.pricing-summary-card:hover{border-color:#4c6978;transform:translateY(-2px
 .pricing-view-bar>span{color:#9fb4cb;font-size:13px}
 .app-shell.simple-pricing .page-heading,.app-shell.simple-pricing .page-footer,.app-shell.simple-pricing .observation-caption{display:none}
 .pricing-view-toggle{display:flex;gap:3px;padding:3px;border:1px solid #34475b;border-radius:9px;background:#121d2b}
+.pricing-gifts-heading{gap:10px;flex-wrap:wrap}.pricing-gifts-heading .pricing-view-toggle{flex-shrink:0}
 .pricing-view-toggle button{display:flex;align-items:center;justify-content:center;gap:6px;border:1px solid transparent;border-radius:6px;background:transparent;color:#a1b5ca;font-size:12px;line-height:1.4;min-height:35px;padding:7px 10px}
 .pricing-view-toggle button.active{background:#264c43;border-color:#436c5f;color:#d0f4e5}
 .pricing-view-toggle button:focus-visible,.pricing-gift-card:focus-visible,.pricing-grid-quick-filters button:focus-visible,.pricing-grid-advanced summary:focus-visible{outline:2px solid #79e1bf;outline-offset:3px}
@@ -189,6 +190,11 @@ button.pricing-summary-card:hover{border-color:#4c6978;transform:translateY(-2px
 .pricing-view-grid .pricing-filter-toolbar{padding:0 0 12px}
 .pricing-view-grid .search-field{width:100%;max-width:none;flex:1;height:42px}
 .pricing-grid-filters{display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:16px}
+.pricing-view-detailed .pricing-grid-filters{padding:0 22px}
+/* Keep the clipped Details heading inside the horizontally scrollable table. */
+.pricing-table th{position:relative}
+.pricing-view-detailed .pricing-filter-toolbar{padding-bottom:12px}
+.pricing-view-detailed .pricing-filter-toolbar .search-field{width:100%;max-width:none;flex:1}
 .pricing-grid-quick-filters{display:flex;gap:7px}
 .pricing-grid-quick-filters button{display:flex;align-items:center;justify-content:center;gap:7px;min-height:36px;border:1px solid #314258;border-radius:7px;padding:8px 12px;background:#172333;color:#a8bfd5;font-size:12px;line-height:1.4}
 .pricing-grid-quick-filters button.active{background:#234238;border-color:#416a59;color:#c2edd8}
@@ -199,6 +205,7 @@ button.pricing-summary-card:hover{border-color:#4c6978;transform:translateY(-2px
 .pricing-grid-advanced[open]{flex-basis:100%}
 .pricing-grid-advanced[open] summary{width:max-content;margin-left:auto}
 .pricing-grid-advanced[open] summary:after{transform:rotate(180deg)}
+.pricing-grid-advanced:not([open])>div{display:none}
 .pricing-grid-advanced>div{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;padding:14px;border:1px solid #34465b;border-radius:9px;background:#182434;margin-top:9px}
 .pricing-grid-advanced label{min-width:0}
 .pricing-grid-advanced label>span{display:block;color:#9fb4cb;font-size:12px;margin-bottom:7px}
@@ -219,7 +226,34 @@ button.pricing-summary-card:hover{border-color:#4c6978;transform:translateY(-2px
 .pricing-view-grid .progressive-footer{margin-top:23px;border-top:1px solid #2a3c51;padding-left:0;padding-right:0}
 .pricing-controls.compact{padding:14px 16px;gap:12px;margin-bottom:18px}
 .pricing-controls.compact .control-label{font-size:11px;margin-bottom:7px}
+.pricing-controls .pricing-selection-caption{font-size:12px;line-height:1.5}
+.pricing-summary-strip{display:flex;align-items:center;flex-wrap:wrap;gap:8px 18px;margin-bottom:10px;color:#aac0d3}
+.pricing-summary-strip>button{display:inline-flex;align-items:baseline;gap:6px;background:transparent;color:#a9bed1;font-size:13px;line-height:1.5;padding:7px 0;min-height:36px}
+.pricing-summary-strip>button strong{font-size:19px;font-weight:600;font-variant-numeric:tabular-nums;color:#d9e5f1}
+.pricing-summary-strip>button.ready strong{color:#8ee6c5}
+.pricing-summary-strip>button:hover{color:#d7eadd}
+.pricing-summary-strip .pricing-summary-age{display:inline-flex;align-items:center;gap:6px;margin-left:auto;font-size:12px;line-height:1.5;color:#9bb2c9}
+.pricing-methodology{margin:0 0 16px;color:#a7bed0;font-size:13px;line-height:1.65}
+.pricing-methodology>summary{cursor:pointer;min-height:36px;align-content:center;width:fit-content;font-size:12px;color:#a8c1d2}
+.pricing-methodology>summary span{color:#819db3}
+.pricing-methodology>summary:focus-visible{outline:2px solid var(--teal);outline-offset:4px;border-radius:4px}
+.pricing-methodology>div{padding:15px 17px;margin-top:5px;border:1px solid #304458;border-radius:9px;background:#152332}
+.pricing-methodology p{font-size:13px;line-height:1.65;margin:0 0 10px;color:#a7bed0;max-width:1000px}
+.pricing-methodology p:last-child{margin-bottom:0}
+.pricing-methodology h3{font-size:13px;line-height:1.5;color:#c4d5e4;margin:15px 0 7px;font-weight:600}
+.pricing-methodology ul{padding-left:19px;margin:0;font-size:12px;line-height:1.7;color:#a3b9ce}
+.pricing-methodology li+li{margin-top:7px}
+.pricing-methodology dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px 24px;margin:8px 0 0}
+.pricing-methodology dt,.pricing-methodology dd{font-size:12px;line-height:1.6}
+.pricing-methodology dt{color:#a2b8cc;flex-shrink:1}
+.pricing-methodology dd{color:#c8d8e7}
 @media(max-width:760px){
+  .pricing-view-detailed .pricing-grid-filters{padding:0 16px}
+  .pricing-summary-strip{gap:3px 16px;margin-bottom:7px}
+  .pricing-summary-strip .pricing-summary-age{margin-left:0;flex-basis:100%;font-size:12px;padding-bottom:4px}
+  .pricing-methodology>summary span{display:none}
+  .pricing-methodology>div{padding:13px 14px}
+  .pricing-methodology dl{grid-template-columns:1fr}
   .pricing-gift-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:23px 12px}
   .pricing-gift-card-name{font-size:15px}
   .pricing-gift-card-prices>span>span{font-size:11px}
@@ -242,4 +276,100 @@ button.pricing-summary-card:hover{border-color:#4c6978;transform:translateY(-2px
   .pricing-gift-card-prices{gap:4px;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr)}
   .pricing-gift-card-prices>span>span{font-size:10px}
   .pricing-gift-card-prices strong{font-size:18px}
+}
+
+/* Keep the decision visible; detailed evidence is available on demand. */
+.pricing-gift-card-prices .grid-price-cue{font-size:11px;line-height:1.45;color:#a3b9cd;overflow-wrap:anywhere}
+.pricing-gift-card-prices .grid-price-cue.stale,.pricing-table .saved-price-cue,.saved-price-cue{color:#d4b78e}
+.pricing-detail .pricing-detail-heading{margin-bottom:9px;gap:12px}
+.pricing-detail .pricing-detail-heading>span{font-size:12px;white-space:nowrap;color:#a5bbcf}
+.pricing-detail .pricing-detail-selection{font-size:12px;line-height:1.6;margin:0 0 16px;color:#a9bfd2}
+.detail-price-comparison{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);border:1px solid #365447;border-radius:10px;overflow:hidden;margin-bottom:15px}
+.detail-current-price,.detail-suggested-price{min-width:0;padding:15px 13px;display:flex;flex-direction:column;align-items:flex-start;gap:9px}
+.detail-current-price{background:#172333}
+.detail-suggested-price{background:#19372c88;border-left:1px solid #365447}
+.detail-suggested-price.missing{background:#1b2838}
+.detail-current-price>span:first-child,.detail-suggested-price>span:first-child{font-size:12px;line-height:1.45;color:#b3c8da}
+.detail-suggested-price.ready>span:first-child{color:#b0d6c5}
+.detail-price-comparison .comparison-price.compact>strong{font-size:25px;line-height:1.3;font-weight:600;max-width:none;white-space:normal;overflow-wrap:anywhere;letter-spacing:-.4px;font-variant-numeric:tabular-nums}
+.detail-price-comparison .comparison-price.compact>small{display:none}
+.detail-current-price>small{font-size:12px;line-height:1.5;color:#a5bad0}
+.detail-current-price>small.saved-price-cue{color:#d4b78e}
+.detail-price-comparison .recommendation-ready>span{font-size:12px;line-height:1.5;max-width:none;margin-top:9px;color:#a8c7b9}
+.detail-price-comparison .recommendation-missing>span{font-size:14px;line-height:1.45;color:#c3d0df}
+.detail-price-comparison .recommendation-missing>small{font-size:12px;line-height:1.5;color:#a8bdd0;margin-top:7px}
+.detail-price-comparison .price-difference{font-size:12px;line-height:1.5;max-width:none;color:#a9c7bb;margin-top:9px}
+.pricing-detail .compact-traits{gap:10px;margin-bottom:21px}
+.pricing-detail .compact-traits>div{padding:0;background:transparent;border:0;border-radius:0}
+.pricing-detail .compact-traits>div>span{font-size:11px;line-height:1.5;color:#8faac2;margin-bottom:4px}
+.pricing-detail .compact-traits strong{font-size:13px;line-height:1.5;color:#c4d4e4}
+.cohort-list-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:0 0 11px}
+.cohort-list-heading h4{font-size:13px;font-weight:600;line-height:1.5;color:#c0d2e1;margin:0}
+.cohort-list-heading>span{font-size:11px;line-height:1.5;text-align:right;color:#9ab3c9}
+.pricing-detail .cohort-detail-list{gap:9px}
+.pricing-detail .compact-cohort{padding:13px 14px;background:#162333;border-color:#2d4256;border-radius:9px}
+.pricing-detail .compact-cohort.selected{border-color:#416c59;background:#1b312b66}
+.compact-cohort .cohort-detail-title{gap:8px;margin-bottom:8px}
+.compact-cohort .cohort-detail-title>strong{font-size:13px;line-height:1.45;color:#c0d4e4;font-weight:500}
+.compact-cohort .cohort-detail-title .basis-tag{font-size:10px;line-height:1.4;padding:2px 5px;white-space:nowrap}
+.compact-cohort .cohort-average{display:flex;align-items:baseline;gap:8px 13px;flex-wrap:wrap}
+.compact-cohort .comparison-price.compact>strong{font-size:22px;line-height:1.4;max-width:none;white-space:normal;overflow-wrap:anywhere;font-variant-numeric:tabular-nums;color:#d8e5f1}
+.compact-cohort .comparison-price.compact>small{display:none}
+.compact-cohort .sample-count{font-size:12px;line-height:1.5;color:#a2bad0;margin:0}
+.compact-cohort .sample-count.limited{color:#dbb88a}
+.compact-cohort .cohort-empty{display:flex;align-items:baseline;gap:13px}
+.compact-cohort .cohort-empty strong{font-size:22px;line-height:1.4;color:#97adc3}
+.compact-cohort .cohort-empty small{font-size:12px;line-height:1.5;color:#a6bcd1;margin:0}
+.cohort-comparison-cue{font-size:11px;line-height:1.5;color:#adbed0;margin:8px 0 0}
+.cohort-statistics>summary,.pricing-evidence>summary{cursor:pointer;min-height:36px;align-content:center;font-size:12px;line-height:1.5;color:#a9c1d5;width:fit-content}
+.cohort-statistics>summary:focus-visible,.pricing-evidence>summary:focus-visible{outline:2px solid #79e1bf;outline-offset:3px;border-radius:3px}
+.cohort-statistics>summary{margin-top:4px}
+.cohort-statistics[open]>summary{color:#d5e4ef}
+.compact-cohort .cohort-statistics dl{margin:0;padding-top:10px;gap:10px;border-top:1px solid #304557}
+.compact-cohort .cohort-statistics dt,.compact-cohort .cohort-statistics dd{font-size:12px;line-height:1.5}
+.compact-cohort .cohort-statistics dt{color:#9eb5cb}
+.compact-cohort .cohort-statistics dd{color:#c6d9e8;max-width:58%;overflow-wrap:anywhere}
+.pricing-evidence{margin-top:14px;font-size:12px;line-height:1.6;color:#a9bfd2}
+.pricing-evidence>summary{font-size:13px;color:#b8cede}
+.pricing-evidence>summary>span{color:#98b0c7}
+.pricing-evidence>div{padding-top:11px}
+.pricing-evidence p{font-size:12px;line-height:1.65;color:#a8bfd1;margin:0 0 13px}
+.pricing-evidence dl{gap:10px;margin:0 0 15px}
+.pricing-evidence dt,.pricing-evidence dd{font-size:12px;line-height:1.5}
+.pricing-evidence dt{color:#9db6cc}
+.pricing-evidence dd{color:#c4d7e7;max-width:60%;overflow-wrap:anywhere}
+.pricing-evidence ul{margin:0;padding-left:17px;font-size:12px;line-height:1.65;color:#c7b390}
+.pricing-evidence li+li{margin-top:7px}
+.pricing-detail .comparison-price.explicit-unit>small,.pricing-table .comparison-price.explicit-unit>small,.pricing-table .own-price .comparison-price.explicit-unit>small{display:block;font-size:11px;line-height:1.5;color:#cbb590;margin-top:4px;white-space:normal}
+/* Sample amount and comparison specificity are independent, descriptive cues. */
+.recommendation-ready>.recommendation-evidence{display:flex;flex-direction:column;align-items:flex-start;gap:2px;margin-top:8px;font-size:11px;line-height:1.45;white-space:normal;max-width:none}
+.recommendation-evidence .sample-size{color:#bdd3e2}
+.recommendation-evidence .comparison-match{color:#9eb7bb}
+.recommendation-evidence .sample-limited,.sample-count .sample-limited{color:#dbb88a}
+.recommendation-evidence .sample-unknown,.sample-count .sample-unknown{color:#b0bdc9}
+.detail-price-comparison .recommendation-ready>.recommendation-evidence{font-size:12px}
+.grid-recommendation-evidence{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 5px;margin:8px 2px 0;color:#9eb7bb;font-size:11px;line-height:1.45}
+.grid-recommendation-evidence>span{white-space:nowrap}
+.grid-recommendation-evidence .sample-size{color:#bdd3e2}
+.grid-recommendation-evidence .sample-limited{color:#dbb88a}
+.grid-recommendation-evidence .evidence-separator{color:#6f899c}
+.sample-count>.sample-size{display:block;font-size:11px;line-height:1.5;margin-top:3px;white-space:normal}
+.compact-cohort .sample-count>.sample-size{font-size:12px}
+.cohort-statistics>.sample-explanation{font-size:12px;line-height:1.6;color:#a9bfd2;margin:13px 0 0}
+@media(max-width:760px){
+  .pricing-table tr,.pricing-table.black-scope tr{grid-template-columns:repeat(6,minmax(0,1fr))}
+  .pricing-table .pricing-identity,.pricing-table.black-scope .pricing-identity{grid-column:1/-1}
+  .pricing-table .own-price,.pricing-table.black-scope .own-price{grid-column:1/4;display:flex;flex-direction:column;align-items:flex-start;justify-content:flex-start;gap:8px;padding:13px 12px 13px 0!important;margin:14px 0 18px;border-bottom:0}
+  .pricing-table .own-price:before{font-size:12px;line-height:1.4;margin:0;color:#b5c8d9}
+  .pricing-table .own-price .comparison-price{display:block}
+  .pricing-table .own-price .comparison-price>strong{font-size:24px}
+  .pricing-table .own-price .comparison-price>small,.pricing-table .suggested-cell .comparison-price>small{display:none}
+  .pricing-table .own-price .price-observation-note{font-size:11px;line-height:1.5;margin:0;text-align:left}
+  .pricing-table .suggested-cell,.pricing-table.black-scope .suggested-cell{grid-column:4/7;min-width:0;padding:13px 11px!important;margin:14px 0 18px}
+  .pricing-table .suggested-cell .recommendation-ready>span{font-size:11px;line-height:1.5;margin-top:8px}
+  .pricing-table .suggested-cell .price-difference{font-size:11px;line-height:1.5}
+  .pricing-table .suggested-cell .recommendation-missing>span{font-size:13px;line-height:1.4}
+  .pricing-table .suggested-cell .recommendation-missing>small{font-size:11px;line-height:1.5}
+  .pricing-table .pricing-cohort{grid-column:span 2;padding-bottom:0!important}
+  .pricing-table.black-scope .pricing-cohort{grid-column:span 3}
 }

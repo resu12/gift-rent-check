@@ -127,6 +127,34 @@ function failedMessage(reason: Reason): string {
   return 'The refresh could not finish. Your saved data is still available; try again later.';
 }
 
+/** The main surface needs the next step; diagnostics remain in Details. */
+export function compactJobMessage(job: Job, view: SyncPresentation): string {
+  const reason = knownReason(job.reason);
+  if (view.state === 'paused') {
+    if (reason === 'daily') {
+      const budget = object(job.progress?.marketapp_budget);
+      const used = count(budget?.rolling_24h_used), limit = count(budget?.rolling_24h_limit);
+      return used !== null && limit !== null && limit > used
+        ? 'Allowance available · ready to continue.' : 'Daily allowance used · progress saved.';
+    }
+    if (reason === 'retry') return 'Provider cooldown · continue later.';
+    return 'Progress saved · ready to continue.';
+  }
+  if (view.state === 'waiting') return 'Provider cooldown · retrying automatically.';
+  if (view.state === 'stopping') return 'Saving progress and stopping…';
+  if (view.state === 'preparing') return 'Preparing checks…';
+  if (view.state === 'complete') return job.kind === 'refresh' || job.kind === 'discover'
+    ? 'Checks finished · unresolved gifts still need review.' : 'Comparison prices saved.';
+  if (view.state === 'failed') {
+    if (reason === 'access') return 'Access rejected · check the API connection.';
+    if (reason === 'cursor') return 'Cannot resume · start a new refresh.';
+    return 'Could not finish · saved data kept. Try again later.';
+  }
+  const detail = object(job.progress?.sync);
+  return typeof detail?.current_collection === 'string' && detail.current_collection.trim()
+    ? `Checking ${detail.current_collection.trim()}` : job.kind === 'discover' ? 'Finding gifts…' : 'Checking for updates…';
+}
+
 /** Human-facing status uses workload counts, never the HTTP request allowance. */
 export function presentJobSync(job: Job, options: SyncOptions = {}): SyncPresentation {
   const detail = object(job.progress?.sync), reason = knownReason(job.reason), requiresResume = job.progress?.requires_resume === true;

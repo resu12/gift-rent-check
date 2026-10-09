@@ -1,6 +1,21 @@
-.app-shell .owned-price-status.sync-card{margin:0 0 16px;border:1px solid #2d494b;border-radius:12px}
-.app-shell .owned-price-status.sync-compact{padding:12px 16px}
-.app-shell .owned-price-status.sync-compact .sync-card-header>strong{font-size:14px}
-.app-shell .owned-price-status.sync-compact .sync-message{margin-top:5px}
-.app-shell .owned-price-status.sync-compact .sync-card-footer{margin-top:2px}
-.app-shell .owned-price-status.sync-compact .sync-details>summary{min-height:32px}
+.app-shell .owned-price-status.job-card.sync-card{margin:0 0 14px;padding:12px 16px;border:1px solid #2d494b;border-radius:12px}
+.app-shell .owned-price-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.app-shell .owned-price-heading>strong{font-size:14px;line-height:1.5;color:#e2eeef}
+.app-shell .owned-price-heading>.button.small{min-height:40px;padding:8px 14px;font-size:13px;flex-shrink:0}
+.app-shell .owned-price-footer{display:flex;align-items:flex-start;gap:12px;margin-top:5px}
+.app-shell .owned-price-details{min-width:0;flex:1;color:#a9c3cb;font-size:12px;line-height:1.6}
+.app-shell .owned-price-details>summary{cursor:pointer;min-height:36px;align-content:center;width:fit-content}
+.app-shell .owned-price-details>summary:focus-visible{outline:2px solid var(--teal);outline-offset:3px;border-radius:3px}
+.app-shell .owned-price-explanation{padding-top:6px;overflow-wrap:anywhere}
+.app-shell .owned-price-explanation p{margin:0 0 8px;color:#a6babf;font-size:12px;line-height:1.6}
+.app-shell .owned-price-explanation p:last-child{margin-bottom:0}
+.app-shell .owned-price-unresolved{padding-top:8px;color:#e2c79c;font-size:12px;line-height:1.6;white-space:nowrap}
+.app-shell .owned-price-complete .owned-price-details>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;list-style:none;min-height:32px}
+.app-shell .owned-price-complete .owned-price-details>summary::-webkit-details-marker{display:none}
+.app-shell .owned-price-result{color:#bed0d5;font-size:13px;line-height:1.6}
+.app-shell .owned-price-result strong{font-weight:600;color:#e2eeef}
+.app-shell .owned-price-result>span{white-space:nowrap}
+.app-shell .owned-price-disclosure{white-space:nowrap;font-size:12px;flex-shrink:0}
+.app-shell .owned-price-disclosure::after{content:' ›';display:inline-block;margin-left:3px}
+.app-shell .owned-price-details[open] .owned-price-disclosure::after{transform:rotate(90deg)}
+@media(max-width:480px){.app-shell .owned-price-status.job-card.sync-card{padding:10px 12px}.app-shell .owned-price-complete .owned-price-details>summary{gap:8px}.app-shell .owned-price-result{font-size:12px}}

@@ -4,6 +4,8 @@ A Python 3.12+ application for discovering wallet gifts on TON, collecting Marke
 
 The project includes a local React dashboard and a private Telegram Mini App backed by Telegram Serverless. Both show saved evidence and exact three-decimal prices. The Telegram app can refresh known gifts' configured TON contract prices on startup; Marketapp comparison collection remains manual and bounded. Its optional mainnet TON Connect control connects or disconnects a wallet without changing the saved portfolio or granting backend access; see [wallet setup](docs/telegram-serverless.md#connect-and-disconnect-a-wallet).
 
+**Version 0.2.0** improves dashboard readability and separates recommendation sample size from comparison match. See the [release notes](CHANGELOG.md) for changes and compatibility details.
+
 Start with the Windows setup below, then follow the [local dashboard guide](docs/dashboard.md) or [Telegram deployment guide](docs/telegram-serverless.md). [Repository and GitHub setup](docs/github.md) explains what is excluded from version control and how to verify a fresh clone. Python 3.12, Node.js 24, and pnpm 11.25.0 are the tested development toolchain. No credentials or private portfolio dataset are included.
 
 The API contract is pinned in `docs/openapi.json`; `docs/openapi.sha256` records its SHA-256 checksum. Only these authenticated GET routes are allowed:
