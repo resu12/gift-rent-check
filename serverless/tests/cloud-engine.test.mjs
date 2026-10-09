@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
-import {createCloudEngine, parseCloudPage} from '../tgcloud/lib/cloud-engine.js';
+import {createCloudEngine, parseCloudPage, CLOUD_LIMITS} from '../tgcloud/lib/cloud-engine.js';
 import {createCloudRepository} from '../tgcloud/lib/cloud-repository.js';
 
 const ctx = {initData: {user: {id: 12345}}};
@@ -53,7 +53,7 @@ test('catalog and scoped listing traversal use exact GET routes, parameters and 
   assert.equal(jobs.jobs[0].progress.pages, 4);
   for (const request of t.requests) {assert.equal(request.options.method, 'GET'); assert.equal(request.options.headers.Authorization, token); assert.equal(request.options.redirect, 'error');}
   const url = new URL(t.requests[2].url); assert.equal(url.pathname, '/v1/rent/gifts/'); assert.equal(url.searchParams.get('cursor'), 'opaque /+=?&');
-  assert.equal(url.searchParams.get('collection_address'), scope); assert.equal(url.searchParams.get('sort_by'), 'recently_touch'); assert.equal(url.searchParams.get('limit'), '10');
+  assert.equal(url.searchParams.get('collection_address'), scope); assert.equal(url.searchParams.get('sort_by'), 'recently_touch'); assert.equal(url.searchParams.get('limit'), '100');
   assert.equal(new URL(t.requests[3].url).searchParams.get('cursor'), '');
   const records = await t.repository.records(); assert.equal(records.filter(r => r.kind === 'listing').length, 1);
 });
@@ -311,4 +311,183 @@ test('reservation latency cannot launch a provider request past the trusted invo
     return result;
   };
   assert.equal((await step(t, id)).state, 'partial'); assert.equal(t.requests.length, 0);
+});
+
+const daySeconds = 86400;
+const historyResponse = (cursor, timestamps) => response({cursor, items: timestamps.map(value => typeof value === 'number' ? history(value) : value)});
+const advanceStep = async (t, id) => {t.advance(1000); return step(t, id);};
+const editState = async (t, edit) => {
+  const {revision, state} = await t.repository.read(); edit(state);
+  assert.equal(await t.repository.append(revision, {key: `edit:${revision}`, state, job: state.job, records: [], observed_at: new Date(t.now()).toISOString()}), true);
+};
+
+test('100-record listing and history pages preserve exact payloads and unchanged request budgets', async () => {
+  const rows = Array.from({length: 100}, (_, i) => listing({nft_address: `0:${i.toString(16).padStart(64, '0')}`, nft_name: `Low Rider #${i}`, photo_url: `https://example.invalid/gift-${i}.webp`}));
+  const ts = Math.floor(Date.parse('2026-10-09T12:00:00Z') / 1000);
+  const rentals = Array.from({length: 100}, (_, i) => history(ts - i * 60, {address: rows[i].nft_address, tx_hash: `hash-${i}`}));
+  const t = setup([response(catalog), page(null, rows), historyResponse(null, rentals)]); await seed(t);
+  const id = await start(t, 'collect'); await step(t, id); await advanceStep(t, id); assert.equal((await advanceStep(t, id)).state, 'complete');
+  const records = await t.repository.records();
+  assert.deepEqual(records.filter(r => r.kind === 'listing').map(r => r.record.source_json), rows);
+  assert.deepEqual(records.filter(r => r.kind === 'history').map(r => r.record.source_json), rentals);
+  assert.equal(t.requests.length, 3);
+  for (const request of t.requests.slice(1)) {assert.equal(new URL(request.url).searchParams.get('limit'), '100'); assert.equal(request.options.headers.Authorization, token);}
+  assert.equal(CLOUD_LIMITS.invocation_attempts, 100); assert.equal(CLOUD_LIMITS.daily_attempts, 500); assert.equal(CLOUD_LIMITS.interval_ms, 1000); assert.equal(CLOUD_LIMITS.response_bytes, 1048576);
+});
+
+test('oversized raw and normalized page bodies fail without records, cursor or coverage advancing', async () => {
+  for (const normalized of [false, true]) {
+    const body = JSON.stringify({cursor: 'unsafe', items: [listing({nft_name: 'x'.repeat(normalized ? 400 : CLOUD_LIMITS.response_bytes)})]});
+    const cap = normalized ? Buffer.byteLength(body) + 1 : CLOUD_LIMITS.response_bytes;
+    if (normalized) assert.ok(Buffer.byteLength(JSON.stringify(parseCloudPage('listing', body, scope, 'time', 'test').records)) > cap);
+    const t = setup([response(catalog), response(body)], {limits: {response_bytes: cap}}); await seed(t); const id = await start(t);
+    await step(t, id); assert.equal((await advanceStep(t, id)).state, 'failed');
+    const {state} = await t.repository.read();
+    assert.equal(state.job.reason, 'response_too_large'); assert.equal(state.job.streams[1].cursor, null); assert.equal(state.job.streams[1].started, false); assert.equal(state.job.pages, 1); assert.equal(state.history_coverage, undefined);
+    assert.equal((await t.repository.records()).filter(r => r.kind === 'listing').length, 0);
+    assert.equal(state.attempts.length, 2);
+  }
+});
+
+test('a completed full history scan enables fewer requests with strict 48-hour overlap and changed variants retained', async () => {
+  const responses = []; const t = setup(responses); await seed(t); const firstAt = Math.floor(t.now() / 1000);
+  responses.push(response(catalog), ...[1, 7, 14, 21, 29, 31].map((days, i) => historyResponse(`full-${i}`, [history(firstAt - days * daySeconds, {tx_hash: 'repeated-link'})])));
+  const first = await start(t, 'rental_prices');
+  for (let i = 0; i < 7; i++) await advanceStep(t, first);
+  const baseline = (await t.repository.read()).state.history_coverage[scope];
+  assert.equal(baseline.checked_through, firstAt); assert.equal(baseline.full_scan_at, firstAt); assert.equal(baseline.source.job_id, first);
+  t.advance(3600000); const secondAt = Math.floor(t.now() / 1000), edge = firstAt - 2 * daySeconds;
+  const changed = history(firstAt - daySeconds, {tx_hash: 'repeated-link', price: '0.25', price_nano: '250000000'});
+  responses.push(response(catalog), historyResponse('overlap-a', [changed, history(edge)]), historyResponse('overlap-b', [edge]), historyResponse('overlap-c', [edge - 1]));
+  const second = await start(t, 'rental_prices');
+  assert.deepEqual((await t.engine.getJobs(ctx)).jobs[0].progress.history_refresh, {full_streams: 0, incremental_streams: 1, overlap_seconds: 172800, full_scan_interval_seconds: 604800});
+  await advanceStep(t, second); assert.equal((await advanceStep(t, second)).state, 'running'); assert.equal((await advanceStep(t, second)).state, 'running'); assert.equal((await advanceStep(t, second)).state, 'complete');
+  const state = (await t.repository.read()).state;
+  assert.equal(state.job.streams[1].completion_reason, 'incremental_history_covered');
+  assert.equal(state.history_coverage[scope].checked_through, secondAt); assert.equal(state.history_coverage[scope].full_scan_at, firstAt);
+  assert.equal(state.job.invocation_used, 4); assert.equal((await t.repository.job(first)).invocation_used, 7);
+  const saved = (await t.repository.records()).filter(r => r.kind === 'history').map(r => r.record.source_json);
+  assert.ok(saved.some(item => item.price === '0.17' && item.ts === changed.ts)); assert.ok(saved.some(item => item.price === '0.25' && item.ts === changed.ts));
+  assert.equal(saved.filter(item => item.ts === edge).length, 2, 'equal-boundary occurrences are retained across pages');
+  assert.equal(t.requests.slice(8).every(r => !new URL(r.url).searchParams.has('date_from')), true);
+});
+
+test('seven-day reconciliation uses the last full pass even after daily incremental advances', async () => {
+  const responses = [], t = setup(responses); await seed(t); const firstAt = Math.floor(t.now() / 1000);
+  responses.push(response(catalog), historyResponse(null, [])); let id = await start(t, 'rental_prices'); await step(t, id); await advanceStep(t, id);
+  for (let d = 1; d < 7; d++) {
+    t.advance(firstAt * 1000 + d * 86400000 - t.now()); responses.push(response(catalog), historyResponse(null, []));
+    id = await start(t, 'rental_prices'); assert.equal((await t.repository.job(id)).streams[1].history_plan.mode, 'incremental');
+    await step(t, id); await advanceStep(t, id); assert.equal((await t.repository.read()).state.history_coverage[scope].full_scan_at, firstAt);
+  }
+  t.advance(firstAt * 1000 + 7 * 86400000 - t.now()); id = await start(t, 'rental_prices');
+  assert.equal((await t.repository.job(id)).streams[1].history_plan.mode, 'full');
+  assert.equal((await t.repository.read()).state.history_coverage[scope].full_scan_at, firstAt, 'planning cannot promote an incomplete full pass');
+});
+
+test('widened windows, unknown collections and imported history require a full baseline', async () => {
+  const responses = [], t = setup(responses); await seed(t, [{kind: 'history', key: 'import-history', observed_at: new Date(t.now()).toISOString(), record: {source_json: history(Math.floor(t.now() / 1000))}}]);
+  let id = await start(t, 'rental_prices'); assert.equal((await t.repository.job(id)).streams[1].history_plan.mode, 'full');
+  responses.push(response(catalog), historyResponse(null, [])); await step(t, id); await advanceStep(t, id);
+  id = await start(t, 'rental_prices', {timeframe: '60d'}); assert.equal((await t.repository.job(id)).streams[1].history_plan.mode, 'full'); await t.engine.stopJob(ctx, {job_id: id});
+  await t.engine.importChunk(ctx, {import_id: 'another-collection', chunk_index: 0, records: [{kind: 'portfolio', key: 'other-gift', observed_at: new Date(t.now()).toISOString(), record: {nft_address: 'other-gift', is_portfolio: true, collection_address: 'other-collection'}}]});
+  id = await start(t, 'rental_prices'); const job = await t.repository.job(id);
+  assert.equal(job.streams.find(s => s.scope === scope).history_plan.mode, 'incremental'); assert.equal(job.streams.find(s => s.scope === 'other-collection').history_plan.mode, 'full');
+});
+
+test('partial and unordered streams do not establish coverage, while independent completed scopes do', async () => {
+  const responses = [], t = setup(responses); await seed(t, [{kind: 'portfolio', key: 'other', observed_at: new Date(t.now()).toISOString(), record: {nft_address: 'other', is_portfolio: true, collection_address: 'zz-other'}}]);
+  const id = await start(t, 'rental_prices'), since = (await t.repository.job(id)).streams[1].history_plan.scan_since;
+  responses.push(response(catalog), historyResponse(null, []), historyResponse('next', [since - 2, since - 1]), historyResponse(null, []));
+  await step(t, id); await advanceStep(t, id);
+  let state = (await t.repository.read()).state;
+  assert.equal(state.job.state, 'running'); assert.equal(state.history_coverage[scope].source.job_id, id); assert.equal(state.history_coverage['zz-other'], undefined);
+  assert.equal((await advanceStep(t, id)).state, 'running'); state = (await t.repository.read()).state;
+  assert.equal(state.job.streams[2].ordered, false); assert.equal(state.history_coverage['zz-other'], undefined);
+  assert.equal((await advanceStep(t, id)).state, 'complete'); assert.equal((await t.repository.read()).state.history_coverage['zz-other'], undefined);
+});
+
+test('crash/resume freezes history plan and promotes only with the final atomic page', async () => {
+  const responses = [], t = setup(responses); await seed(t); const id = await start(t, 'rental_prices'), plan = (await t.repository.job(id)).streams[1].history_plan;
+  responses.push(response(catalog), historyResponse('saved', [plan.checked_through]), historyResponse('past', [plan.scan_since - 1]));
+  await step(t, id); await advanceStep(t, id); assert.equal((await t.repository.read()).state.history_coverage, undefined);
+  await t.engine.stopJob(ctx, {job_id: id}); t.advance(86400000); t.engine = createCloudEngine(t.deps); await t.engine.resumeJob(ctx, {job_id: id});
+  assert.deepEqual((await t.repository.job(id)).streams[1].history_plan, plan);
+  assert.equal((await step(t, id)).state, 'complete'); assert.equal(new URL(t.requests.at(-1).url).searchParams.get('cursor'), 'saved');
+  const row = t.database.prepare('SELECT * FROM cloud_events WHERE raw_body IS NOT NULL ORDER BY sequence DESC LIMIT 1').get();
+  assert.equal(JSON.parse(row.state_json).history_coverage[scope].checked_through, plan.checked_through);
+  assert.equal(JSON.parse(row.job_json).streams[1].complete, true); assert.equal(JSON.parse(row.records_json).length, 1);
+});
+
+test('CAS conflict retries final page commit without a second provider request or partial baseline', async () => {
+  const t = setup([response(catalog), historyResponse(null, [])]); await seed(t); const id = await start(t, 'rental_prices'); await step(t, id);
+  const append = t.repository.append; let conflicted = false;
+  t.repository.append = async (revision, event) => {
+    if (!conflicted && event.state.history_coverage) {
+      conflicted = true; const current = await t.repository.read(); assert.equal(current.state.history_coverage, undefined);
+      await append(revision, {key: 'concurrent-event', state: current.state, job: current.state.job, records: [], observed_at: new Date(t.now()).toISOString()}); return false;
+    }
+    return append(revision, event);
+  };
+  assert.equal((await advanceStep(t, id)).state, 'complete'); assert.equal(t.requests.length, 2);
+  const rows = t.database.prepare('SELECT state_json,raw_body FROM cloud_events').all();
+  assert.equal(rows.filter(row => JSON.parse(row.state_json).history_coverage).length, 1);
+  assert.equal(rows.filter(row => row.raw_body && JSON.parse(row.raw_body).endpoint === '/v1/rent/gifts/history/').length, 1);
+});
+
+test('legacy resume retains ten-item pages and original window without creating a trusted baseline', async () => {
+  const responses = [], t = setup(responses); await seed(t); const id = await start(t, 'rental_prices');
+  await editState(t, state => {state.job.page_size = 10; for (const stream of state.job.streams) delete stream.history_plan;});
+  await t.engine.stopJob(ctx, {job_id: id}); t.advance(1000); await t.engine.resumeJob(ctx, {job_id: id});
+  responses.push(response(catalog), historyResponse(null, [])); await step(t, id); await advanceStep(t, id);
+  assert.equal(new URL(t.requests[1].url).searchParams.get('limit'), '10'); assert.equal((await t.repository.read()).state.history_coverage, undefined);
+  const next = await start(t, 'rental_prices'); assert.equal((await t.repository.job(next)).page_size, 100); assert.equal((await t.repository.job(next)).streams[1].history_plan.mode, 'full');
+});
+
+test('wrong-collection history disables cutoff and coverage promotion across resume', async () => {
+  const responses = [], t = setup(responses); await seed(t); const id = await start(t, 'rental_prices');
+  const since = (await t.repository.job(id)).streams[1].history_plan.scan_since;
+  responses.push(response(catalog), historyResponse('next', [history(since - 1, {collection_address: 'wrong-scope'})]), historyResponse(null, [since - 2]));
+  await step(t, id); assert.equal((await advanceStep(t, id)).state, 'running');
+  let state = (await t.repository.read()).state; assert.equal(state.job.streams[1].scope_verified, false); assert.equal(state.history_coverage, undefined);
+  await t.engine.stopJob(ctx, {job_id: id}); await t.engine.resumeJob(ctx, {job_id: id}); assert.equal((await advanceStep(t, id)).state, 'complete');
+  state = (await t.repository.read()).state; assert.equal(state.history_coverage, undefined); assert.equal(state.job.streams[1].scope_verified, false);
+  assert.equal((await t.repository.records()).filter(r => r.kind === 'history').length, 2);
+});
+
+test('canonical collection aliases establish shared coverage', async () => {
+  const raw = `0:${'00'.repeat(32)}`, friendly = 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c';
+  const responses = [], t = setup(responses);
+  await t.engine.importChunk(ctx, {import_id: 'alias', chunk_index: 0, records: [{kind: 'portfolio', key: 'alias', observed_at: new Date(t.now()).toISOString(), record: {nft_address: 'alias-gift', collection_address: friendly, is_portfolio: true}}]});
+  const id = await start(t, 'rental_prices'), since = (await t.repository.job(id)).streams[1].history_plan.scan_since;
+  responses.push(response(catalog), historyResponse('past', [history(since - 1, {collection_address: raw})]));
+  await step(t, id); assert.equal((await advanceStep(t, id)).state, 'complete');
+  assert.equal((await t.repository.read()).state.history_coverage[raw].scope_verified, true);
+  const next = await start(t, 'rental_prices'); assert.equal((await t.repository.job(next)).streams[1].history_plan.mode, 'incremental');
+});
+
+test('incompatible saved history plans are rejected on resume and before direct step requests', async () => {
+  const t = setup(); await seed(t); const id = await start(t, 'rental_prices');
+  await editState(t, state => {state.job.streams[1].history_plan.scan_since++; state.job.streams[0].complete = true;});
+  await t.engine.stopJob(ctx, {job_id: id}); await assert.rejects(t.engine.resumeJob(ctx, {job_id: id}), /incompatible/);
+  await editState(t, state => {state.job.state = 'running';}); assert.equal((await step(t, id)).state, 'failed');
+  assert.equal((await t.repository.read()).state.job.reason, 'incompatible_history_plan'); assert.equal(t.requests.length, 0);
+});
+
+test('new-policy future seconds and millisecond timestamps never establish coverage at EOF', async () => {
+  for (const timestamp of ['future', 'milliseconds']) {
+    const responses = [], t = setup(responses); await seed(t); const id = await start(t, 'rental_prices');
+    const ts = timestamp === 'milliseconds' ? t.now() : Math.floor(t.now() / 1000) + 302;
+    responses.push(response(catalog), historyResponse(null, [ts])); await step(t, id); assert.equal((await advanceStep(t, id)).state, 'complete');
+    const state = (await t.repository.read()).state;
+    assert.equal(state.job.streams[1].ordered, false); assert.equal(state.history_coverage, undefined);
+    assert.equal((await t.repository.records()).filter(r => r.kind === 'history').length, 1, 'raw event remains available for inspection');
+  }
+});
+
+test('ordinary in-flight timestamps newer than scan start are accepted without advancing its frozen watermark', async () => {
+  const responses = [], t = setup(responses); await seed(t); const id = await start(t, 'rental_prices');
+  const started = Math.floor(t.now() / 1000); responses.push(response(catalog), historyResponse(null, [started + 30]));
+  await step(t, id); t.advance(30000); assert.equal((await step(t, id)).state, 'complete');
+  const state = (await t.repository.read()).state; assert.equal(state.job.streams[1].ordered, true); assert.equal(state.history_coverage[scope].checked_through, started);
 });

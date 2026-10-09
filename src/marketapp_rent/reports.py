@@ -10,6 +10,7 @@ from typing import Any
 
 from .addresses import address_key
 from .discovery_store import DiscoveryStore
+from .history_refresh import history_refresh_summary
 from .storage import Store
 
 
@@ -253,6 +254,9 @@ def export_reports(store: Store, out: Path, owner_address: str | None = None) ->
         coverage_note = "Traversal completion is not an instantaneous market snapshot"
         if run["settings"].get("history_since") is not None:
             coverage_note += "; history traversal is scoped to its saved lower time boundary, not lifetime history"
+        history_refresh = history_refresh_summary(run["settings"])
+        if history_refresh and history_refresh["incremental_streams"]:
+            coverage_note += "; incremental history rereads recent overlap and reuses older completed coverage; older corrections may await a full scan"
         rows["run_status"].append({**run, "stream_count": len(streams), "complete_stream_count": sum(s["state"] == "complete" for s in streams), "http_attempt_count": attempts, "coverage_note": coverage_note})
         rows["stream_status"].extend(streams)
     required = {

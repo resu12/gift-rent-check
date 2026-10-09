@@ -67,11 +67,23 @@ Without `VITE_TONCONNECT_APP_URL`, builds leave wallet connections disabled, whi
 | Elapsed time per Start/Resume | 300 seconds |
 | Request pace | At most one per second |
 | Attempts per request, including first | 4 |
-| Page size | 10 |
+| Page size for new runs | 100 |
 
 Retries and catalog requests count. Counters and provider retry deadlines survive reopening, new jobs, resumes, and deployments. The upgrade conservatively inherits recent prototype attempts. The old prototype's collection entrypoints are disabled so they cannot bypass the ledger. These are conservative application limits, not a published Marketapp quota or a guarantee against restriction.
 
 Only authenticated GET requests to `/v1/collections/gifts/`, `/v1/rent/gifts/`, and `/v1/rent/gifts/history/` are constructed. Collections come from imported portfolio addresses, in stable address order. Coverage is partial until the saved streams complete. Fresh collection starts at the head; Resume freezes the original scopes, page size, and timeframe. History stops after a valid descending page crosses the selected lower boundary; empty continuation pages continue, equality retains ties, and ordering anomalies disable the cutoff shortcut. Requests are bounded even if ordering is unreliable.
+
+New Telegram jobs request 100 records per page, matching desktop pricing jobs. Existing paused jobs retain their original page size (including 10); use a new refresh for the larger pages. The one-request-per-second pace and all attempt, daily, and response-size caps remain unchanged. Larger pages reduce request overhead; they do not raise your allowance.
+
+### Incremental rental history
+
+Desktop and Telegram use the same versioned policy, with separate local/cloud coverage records. The first new-policy scan reads the entire selected window for each collection. Only an ordered, completed stream establishes reusable coverage; imported records, old runs without policy metadata, interrupted scans, and ambiguous ordering do not establish it.
+
+Later refreshes still start at the head, but stop after crossing the previous scan's start time minus a **48-hour overlap**, or the requested window's lower bound if that is newer. Older saved records continue to participate in the same selected pricing window. Every returned page is stored intact, equal timestamps at the boundary are retained, and replayed representations do not add duplicate votes. Changed representations remain available and follow the existing ambiguity rules. A first duplicate never ends traversal.
+
+After **seven days** from the last full scan's start, the next requested refresh scans the full selected window again. Incremental scans never postpone that deadline. A wider window, a new collection, invalid coverage, or a boundary already reached by the overlap also requires a full-window scan. Nothing runs on a schedule. Backfilled or corrected events older than the overlap may remain unseen until a deeper scan; incremental completion is not a newly downloaded full-window snapshot.
+
+Each run freezes its per-collection plan and baseline provenance. Resume preserves that plan even if the seven-day interval passes or the displayed dates change. An unfinished or failed stream cannot advance reusable coverage. Saved job details show how many collections use recent updates and how many require a full-window scan. Existing observations, rental counts, selected timeframes, and membership are retained.
 
 `Retry-After` applies across jobs. Authentication failures, malformed pages, cursor cycles, and rejected cursors stop collection without advancing that page. A rejected cursor requires a new collection. An in-flight lease prevents overlap; after an interruption, allow up to two minutes for it to expire before resuming. The current SDK does not document a configurable network timeout or cancellation primitive; the five-minute allowance prevents starting further requests, and the lease fences late results. It cannot force an already-sent SDK request to finish at exactly 30 seconds.
 
@@ -85,7 +97,7 @@ The existing `collector_state` prototype table remains intact. The additive `clo
 
 Import chunks have stable identifiers, content checks, and bounded size. Identical replay is acknowledged; conflicting replay is rejected. The seed compacts identical listing/history representations while preserving observation times and occurrence counts. Changed variants remain distinct. Original page occurrences remain in the local SQLite database. Reads never call Marketapp. Stored JSON keeps monetary strings, original source fields, and the missing/null distinction.
 
-The dashboard reads normalized evidence in batches of five event chunks and calculates only the selected view in memory to limit database response size and runtime work. Address, timestamp, and trait normalization is cached only within an individual calculation; caches are discarded afterward. It avoids the prototype's 2 MiB document cap, but it is not an unbounded data warehouse. Monitor growth before long-term collection. Raw responses are excluded from dashboard reads. Historical prototype behavior is documented in [telegram-serverless-prototype.md](telegram-serverless-prototype.md).
+The dashboard reads normalized evidence in batches of at most five event chunks, with a 1 MiB combined UTF-8 budget, and calculates only the selected view in memory. A single oversized legacy chunk is read alone so traversal can still advance. New provider pages must fit both the raw and normalized 1 MiB caps before progress commits. This keeps larger pages from creating oversized host responses. Address, timestamp, and trait normalization is cached only within an individual calculation; caches are discarded afterward. It avoids the prototype's 2 MiB document cap, but it is not an unbounded data warehouse. Monitor growth before long-term collection. Raw responses are excluded from dashboard reads. Historical prototype behavior is documented in [telegram-serverless-prototype.md](telegram-serverless-prototype.md).
 
 ## Build and verify
 

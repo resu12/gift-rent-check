@@ -104,13 +104,16 @@ function JobCard({ job, onResume, disabled, onStop, stopping, stopDisabled }: {
   const metrics = Object.entries(job.progress || {}).filter(([, value]) => typeof value === 'number' || typeof value === 'string').slice(0, 4);
   const budget = job.progress?.marketapp_budget as { invocation_used: number; invocation_limit: number; rolling_24h_used: number; rolling_24h_limit: number } | undefined;
   const window = job.collection_window;
-  const reason = job.reason === 'timeframe_covered' ? 'Selected timeframe covered. Older pages were not requested.' : job.reason;
+  const historyRefresh = job.progress?.history_refresh;
+  const incremental = (historyRefresh?.incremental_streams ?? 0) > 0;
+  const reason = job.reason === 'timeframe_covered' ? 'Selected timeframe covered. Older pages were not requested.' : job.reason === 'incremental_history_covered' ? 'Recent rentals checked. Older records use the saved completed scan.' : job.reason;
   return <article className={`job-card job-${job.state}`}>
     <span className={`job-symbol ${active ? 'spinning' : ''}`}><Icon name={active ? 'refresh' : job.state === 'complete' ? 'check' : job.state === 'failed' ? 'alert' : 'clock'} /></span>
     <div className="job-content"><div className="job-title"><strong>{JOB_LABEL[job.kind] || humanize(job.kind)}</strong><span className={`job-state ${job.state}`}>{isStopping ? 'Stopping' : requiresResume ? 'Waiting for you' : humanize(job.state)}</span></div>
       <p>{isStopping ? 'Stopping after the current request. Saved progress can be resumed.' : requiresResume ? 'The app is not collecting. Continue from the saved checkpoint when you are ready.' : reason || (job.state === 'running' ? 'Reading records and saving progress as it arrives.' : job.state === 'queued' ? 'Waiting to start.' : job.state === 'complete' ? 'Completed. The latest saved observations are ready.' : 'Saved progress is available to inspect.')}</p>
       {active && !isStopping && <p>Continues through batches within its limits. At a safety limit, progress is saved for manual Resume.</p>}
       {window && <p>Saved pricing window: {timeframeLabel({ source: job.kind === 'rental_prices' ? 'rentals' : 'listings', timeframe: window.timeframe, dateFrom: window.date_from || undefined, dateTo: window.date_to || undefined })}.{window.window_from && <> From {dateTime(window.window_from)}{window.window_to ? ` to ${dateTime(window.window_to)}` : ''}.</>} Resume keeps this window.</p>}
+      {historyRefresh && <p>History plan: {historyRefresh.incremental_streams} collection{historyRefresh.incremental_streams === 1 ? '' : 's'} with recent updates; {historyRefresh.full_streams} with a full window scan.{incremental && <> Recent updates recheck a {historyRefresh.overlap_seconds / 3600}-hour overlap and reuse older saved records.</>}</p>}
       {budget && <div className="job-metrics"><span>Marketapp requests <b>{budget.invocation_used} / {budget.invocation_limit}</b> this start/resume</span><span>Last 24 hours <b>{budget.rolling_24h_used} / {budget.rolling_24h_limit}</b></span></div>}
       {metrics.length > 0 && <div className="job-metrics">{metrics.map(([key, value]) => <span key={key}>{humanize(key)} <b>{String(value)}</b></span>)}</div>}
       <time dateTime={job.updated_at}>{dateTime(job.updated_at, true)}{job.run_id != null ? ` · Run ${job.run_id}` : ''}</time>
@@ -148,14 +151,14 @@ function CollectionLimits({ data, selection }: { data: Dashboard; selection: Pri
     {limits && <p>{limits.max_attempts} per start/resume · {limits.run_seconds / 60} min · {limits.requests_per_second} request/s. Retries count.</p>}
     {selection.source === 'rentals' && historyError && <p className="cloud-window-error">{historyError}</p>}
     <details><summary>Collection and timeframe details</summary><p>{selection.source === 'rentals'
-      ? `New rental collection follows ${timeframeLabel(selection).toLowerCase()}. It starts with the newest records and stops after passing the saved window or reaching a safety limit.`
+      ? `Rental collection follows ${timeframeLabel(selection).toLowerCase()}. After a completed scan, refresh checks recent rentals with a 48-hour overlap and reuses older saved records. A refresh requested after seven days rechecks the full selected window. Safety limits still apply.`
       : 'Collection reads current asking prices. The timeframe filters saved observations; Marketapp cannot supply past listing snapshots for that window.'} Changing filters and reloading this view use saved data only. Resume retains the original window.</p></details>
   </div></div>;
   return <div className="notice info"><Icon name="shield" size={18} /><div>
     <strong>{limits ? 'Marketapp request limits' : 'Collection scope'}</strong>
     {limits && <p>Up to {limits.max_attempts} requests per start/resume, {limits.rolling_24h_attempts} across this dashboard in 24 hours, and {limits.run_seconds} seconds per start/resume. Maximum {limits.requests_per_second} request{limits.requests_per_second === 1 ? '' : 's'} per second. {limits.remaining_24h} requests remain in the rolling 24-hour allowance. Retries count toward these limits.</p>}
     <p>{selection.source === 'rentals'
-      ? historyError || `New rental collection follows ${timeframeLabel(selection).toLowerCase()}. It starts with the newest records and stops once it has passed the window, or reaches a safety limit.`
+      ? historyError || `Rental collection follows ${timeframeLabel(selection).toLowerCase()}. After a completed scan, refresh checks recent rentals with a 48-hour overlap and reuses older saved records. A refresh requested after seven days rechecks the full selected window. Safety limits still apply.`
       : 'Collection reads current asking prices. The timeframe filters saved observations; Marketapp cannot supply past listing snapshots for that window.'} Changing filters and reloading this view use saved data only.</p>
   </div></div>;
 }

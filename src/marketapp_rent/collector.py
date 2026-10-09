@@ -7,16 +7,19 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import quote
 
+from . import history_refresh
 from .api import ApiClient
 from .addresses import address_key, canonical_address, preferred_address
 from .config import Settings
 from .domain import ApiError, AuthError, BudgetExceeded, ValidationError
+from .history_refresh import (ORDER_UNVERIFIED, SCOPE_UNVERIFIED, build_history_refresh_plan,
+                              stream_cutoff, stream_refresh_mode, validate_saved_plan)
 from .models import parse_page
 from .storage import Store
 
 logger = logging.getLogger(__name__)
 
-_TIMEFRAME_UNVERIFIED = "history_timeframe_order_unverified"
+_TIMEFRAME_UNVERIFIED = ORDER_UNVERIFIED
 
 
 def _valid_history_timestamp(value: Any) -> bool:
@@ -30,7 +33,10 @@ def _valid_history_timestamp(value: Any) -> bool:
     return True
 
 
-def _history_window_complete(store: Store, run_id: int, stream_id: int, parsed: Any, since: int) -> bool:
+def _history_window_complete(
+    store: Store, run_id: int, stream_id: int, parsed: Any, since: int, collection: str | None = None,
+    *, maximum_timestamp: int | None = None,
+) -> bool:
     """Stop only after an ordered, interpretable page passes the inclusive cutoff.
 
     Empty pages can have continuations. An ordering or timestamp anomaly
@@ -38,21 +44,28 @@ def _history_window_complete(store: Store, run_id: int, stream_id: int, parsed: 
     The normal HTTP and run budgets continue to bound that conservative scan.
     """
     if not parsed.records or store.connection.execute(
-        "SELECT 1 FROM issues WHERE stream_id=? AND reason=? LIMIT 1", (stream_id, _TIMEFRAME_UNVERIFIED),
+        "SELECT 1 FROM issues WHERE stream_id=? AND reason IN (?,?) LIMIT 1",
+        (stream_id, _TIMEFRAME_UNVERIFIED, SCOPE_UNVERIFIED),
     ).fetchone():
+        return False
+    if collection is not None and any(address_key(record.data.get("collection_address")) != address_key(collection)
+                                      for record in parsed.records):
+        store.record_issue(run_id, stream_id, SCOPE_UNVERIFIED,
+                           "History includes an incompatible collection identity; timeframe stopping and history reuse are disabled.")
         return False
     timestamps = [record.data.get("ts") for record in parsed.records]
     previous = store.connection.execute("""SELECT r.data_json FROM observations o
         JOIN pages p ON p.id=o.page_id JOIN records r ON r.id=o.record_id
         WHERE p.stream_id=? ORDER BY p.id DESC,o.item_index DESC LIMIT 1""", (stream_id,)).fetchone()
     previous_ts = json.loads(previous[0]).get("ts") if previous else None
-    valid = all(_valid_history_timestamp(value) for value in timestamps)
+    valid = all(_valid_history_timestamp(value) and (maximum_timestamp is None or value <= maximum_timestamp)
+                for value in timestamps)
     ordered = valid and all(left >= right for left, right in zip(timestamps, timestamps[1:]))
     if previous is not None:
         ordered = ordered and _valid_history_timestamp(previous_ts) and previous_ts >= timestamps[0]
     if not ordered:
         store.record_issue(run_id, stream_id, _TIMEFRAME_UNVERIFIED,
-                           "History timestamps are invalid or not newest first; timeframe stopping is disabled for this stream.")
+                           "History timestamps are invalid, in the future, or not newest first; timeframe stopping is disabled for this stream.")
         return False
     return timestamps[-1] < since
 
@@ -208,6 +221,7 @@ def collect(
     if resume_id is not None:
         run = store.get_run(resume_id)
         saved = run["settings"]
+        validate_saved_plan(saved)
         if history_since is not None and saved.get("history_since") != history_since:
             raise ValueError("Cannot change history cutoff on resume; start a fresh collection")
         history_since = saved.get("history_since")
@@ -282,7 +296,10 @@ def collect(
         # Persist intended work before creating stream rows so an interrupted
         # initialization can recover every scope on the next invocation.
         stream_settings["streams"] = manifest
+        if history_since is not None:
+            stream_settings["history_refresh"] = build_history_refresh_plan(store, manifest, history_since)
         run_id = store.create_run(stream_settings, scopes, skipped)
+    saved_settings = store.get_run(run_id)["settings"]
     if on_run_created:
         on_run_created(run_id)
     for specification in manifest:
@@ -310,6 +327,10 @@ def collect(
                     continue
                 stream_id = stream["id"]
                 cursor = stream["next_cursor"]
+                history_scan_since = stream_cutoff(saved_settings, stream)
+                refresh_mode = stream_refresh_mode(saved_settings, stream)
+                window_reason = ("incremental_history_covered" if refresh_mode == "incremental"
+                                 else "timeframe_covered")
                 store.set_stream_state(stream_id, "running")
                 for _ in range(settings.max_pages):
                     params = dict(stream["params"])
@@ -323,10 +344,12 @@ def collect(
                             next_cursor == cursor or store.has_cursor(stream_id, next_cursor)
                         ):
                             raise ValidationError("Pagination cursor cycle detected; start a fresh collection")
-                        window_complete = (stream["kind"] == "history" and history_since is not None
+                        window_complete = (stream["kind"] == "history" and history_scan_since is not None
                                            and stream["params"].get("order_by") == "new_to_old"
-                                           and _history_window_complete(store, run_id, stream_id, parsed, history_since))
-                        completion_reason = "timeframe_covered" if window_complete and next_cursor is not None else None
+                                           and _history_window_complete(store, run_id, stream_id, parsed, history_scan_since,
+                                                                        stream["params"].get("collection_address"),
+                                                                        maximum_timestamp=history_refresh.utc_seconds() + 300 if refresh_mode else None))
+                        completion_reason = window_reason if window_complete and next_cursor is not None else None
                         if store.commit_page(stream_id, cursor, response, parsed, completion_reason=completion_reason):
                             pages += 1
                         cursor = next_cursor
@@ -367,7 +390,8 @@ def collect(
         state, reason = "failed", stop_reason
     elif all_complete and not skipped:
         state = "complete"
-        reason = "timeframe_covered" if any(stream["reason"] == "timeframe_covered" for stream in streams) else None
+        reason = ("incremental_history_covered" if any(stream["reason"] == "incremental_history_covered" for stream in streams)
+                  else "timeframe_covered" if any(stream["reason"] == "timeframe_covered" for stream in streams) else None)
     elif failed and not any(stream["pages"] for stream in streams):
         state, reason = "failed", stop_reason or "stream_failure"
     else:

@@ -1,7 +1,8 @@
 import {validatePage} from './engine.js';
 import {buildCloudDashboard, resolveCloudWindow, validateSavedCloudWindow, addressKey} from './cloud-pricing.js';
+import {planHistoryRefresh, validHistoryPlan, completedHistoryCoverage, historyRefreshProgress} from './history-refresh.js';
 
-export const CLOUD_LIMITS = Object.freeze({page_size: 10, invocation_attempts: 100, daily_attempts: 500, duration_ms: 300000, interval_ms: 1000, retry_attempts: 4, lease_ms: 120000, response_bytes: 1048576, import_bytes: 524288, import_records: 250});
+export const CLOUD_LIMITS = Object.freeze({page_size: 100, invocation_attempts: 100, daily_attempts: 500, duration_ms: 300000, interval_ms: 1000, retry_attempts: 4, lease_ms: 120000, response_bytes: 1048576, import_bytes: 524288, import_records: 250});
 export class CloudRequestError extends Error {}
 const BASE = 'https://api.marketapp.org';
 const ROUTES = Object.freeze({collection: '/v1/collections/gifts/', listing: '/v1/rent/gifts/', history: '/v1/rent/gifts/history/'});
@@ -27,6 +28,7 @@ const messages = {
   unexpected_redirect: 'The provider response came from an unexpected URL.',
   response_too_large: 'The provider response exceeded the page safety limit.',
   invalid_retry_after: 'The provider returned an unsupported retry deadline.',
+  incompatible_history_plan: 'The saved history refresh plan is incompatible. Start a fresh collection; saved records are retained.',
 };
 
 function validateHistory(item) {
@@ -99,6 +101,7 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
     progress: {
       provider: 'marketapp', pages: job.pages, observations: job.observations, streams_complete: job.streams.filter(s => s.complete).length, streams_total: job.streams.length,
       scopes: job.scopes.length, unresolved_collections: job.unresolved_collections, warnings: job.warnings,
+      history_refresh: historyRefreshProgress(job.streams),
       next_allowed_at: Math.max(state.next_allowed_at, job.lease_until || 0), server_time: now(),
       requires_resume: readonly && isActive(job) && (job.lease_until || 0) <= now(),
       marketapp_budget: {invocation_used: job.invocation_used, invocation_limit: cap.invocation_attempts, rolling_24h_used: budget(state).used_24h, rolling_24h_limit: cap.daily_attempts, resets_at: budget(state).resets_at, run_seconds: cap.duration_ms / 1000},
@@ -159,7 +162,9 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       const kinds = input.kind === 'prices' ? ['listing'] : input.kind === 'rental_prices' ? ['history'] : ['listing', 'history'];
       state.job = {id: state.next_job_id++, kind: input.kind, state: 'running', created_at: iso(now()), updated_at: iso(now()), reason: null,
         collection_window: window, scopes, unresolved_collections: unresolved, page_size: cap.page_size,
-        streams: [{kind: 'collection', scope: null}, ...scopes.flatMap(scope => kinds.map(kind => ({kind, scope})))].map(s => ({...s, cursor: null, started: false, complete: false, cursors: [], retry: 0, pages: 0, last_timestamp: null, ordered: true})),
+        streams: [{kind: 'collection', scope: null}, ...scopes.flatMap(scope => kinds.map(kind => ({kind, scope})))].map(s => ({...s, cursor: null, started: false, complete: false, cursors: [], retry: 0, pages: 0, last_timestamp: null, ordered: true, scope_verified: true,
+          ...(s.kind === 'history' ? {history_plan: planHistoryRefresh(state.history_coverage?.[stableKey(s.scope)], Math.floor(Date.parse(window.window_from) / 1000), Math.floor(now() / 1000))} : {}),
+        })),
         pages: 0, observations: 0, warnings: [], invocation_used: 0, invocation_deadline: now() + cap.duration_ms, invocation: 1, lease: null, lease_until: 0};
       pauseBudget(state, state.job);
     });
@@ -185,6 +190,7 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       const job = state.job?.id === id ? state.job : await repository.job(id);
       if (!job || !['partial', 'running', 'queued'].includes(job.state)) throw new CloudRequestError('This traversal cannot resume. Start a fresh collection.');
       try {validateSavedCloudWindow(job.collection_window);} catch (error) {throw new CloudRequestError(error.message);}
+      if (job.streams.some(stream => Object.hasOwn(stream, 'history_plan') && !validHistoryPlan(stream.history_plan, Math.floor(Date.parse(job.collection_window.window_from) / 1000), Math.floor(Date.parse(job.created_at) / 1000)))) throw new CloudRequestError(messages.incompatible_history_plan);
       // The stored window and stream parameters are immutable on Resume.
       for (const field of ['kind', 'timeframe', 'date_from', 'date_to', 'page_size']) if (Object.hasOwn(input, field)) throw new CloudRequestError('Resume uses the saved collection parameters.');
       job.state = 'running'; job.reason = null; job.updated_at = iso(now()); job.invocation++; job.invocation_used = 0; job.invocation_deadline = now() + cap.duration_ms; job.lease = null; job.lease_until = 0; state.job = job;
@@ -213,6 +219,7 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       const streamIndex = job.streams.findIndex(s => !s.complete);
       if (streamIndex < 0) {finish(job, 'complete'); return {};}
       const stream = job.streams[streamIndex];
+      if (Object.hasOwn(stream, 'history_plan') && !validHistoryPlan(stream.history_plan, Math.floor(Date.parse(job.collection_window.window_from) / 1000), Math.floor(Date.parse(job.created_at) / 1000))) {finish(job, 'failed', 'incompatible_history_plan'); return {};}
       if (stream.retry >= cap.retry_attempts) {finish(job, 'failed', 'retry_exhausted'); return {};}
       job.lease = lease; job.lease_until = now() + cap.lease_ms; job.invocation_used++; stream.retry++; job.updated_at = iso(now()); state.attempts.push(now()); state.next_allowed_at = now() + cap.interval_ms;
       return {value: {job: copy(job), stream: copy(stream), streamIndex}};
@@ -246,7 +253,12 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
     // Retry-After starts when the response was received, never at the request's
     // frozen V8 timestamp. Fresh SQL wall time also fences an expired lease.
     await refreshClock();
-    if (!failure) {try {parsed = parseCloudPage(stream.kind, body, stream.scope, iso(now()), `${id}:${streamIndex}:${stream.pages}`);} catch {failure = 'invalid_response';}}
+    if (!failure) {try {
+      parsed = parseCloudPage(stream.kind, body, stream.scope, iso(now()), `${id}:${streamIndex}:${stream.pages}`);
+      // Bound stored/projected payloads too: normalized wrappers may make an
+      // otherwise legal raw response exceed a safe host serialization size.
+      if (size(JSON.stringify(parsed.records)) > cap.response_bytes) failure = 'response_too_large';
+    } catch {failure = 'invalid_response';}}
     let retryable = ['network_error', 'transient_http'].includes(failure), deadline = retryable ? retryDeadline(response, stream.retry) : null;
     if (retryable && deadline === null) {failure = 'invalid_retry_after'; retryable = false;}
     const outcome = await mutate(state => {
@@ -268,11 +280,22 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       if (parsed.cursor !== null) current.cursors.push(parsed.cursor);
       if (current.kind === 'history') {
         const timestamps = parsed.items.map(item => item.ts);
-        if (timestamps.some(ts => ts <= 0 || ts > 8640000000000) || timestamps.some((ts, i) => i > 0 && ts > timestamps[i - 1]) || (timestamps.length && current.last_timestamp !== null && timestamps[0] > current.last_timestamp)) current.ordered = false;
+        if (parsed.items.some(item => stableKey(item.collection_address) !== stableKey(current.scope))) current.scope_verified = false;
+        if (current.scope_verified === false && !job.warnings.includes('History collection identity did not match its requested scope; the date cutoff and coverage reuse are disabled for this stream.')) job.warnings.push('History collection identity did not match its requested scope; the date cutoff and coverage reuse are disabled for this stream.');
+        if (timestamps.some(ts => ts <= 0 || ts > 8640000000000 || (current.history_plan && ts > Math.floor(now() / 1000) + 300)) || timestamps.some((ts, i) => i > 0 && ts > timestamps[i - 1]) || (timestamps.length && current.last_timestamp !== null && timestamps[0] > current.last_timestamp)) current.ordered = false;
         if (!current.ordered && !job.warnings.includes('History ordering was not reliable; the date cutoff is disabled for this stream.')) job.warnings.push('History ordering was not reliable; the date cutoff is disabled for this stream.');
         if (timestamps.length) current.last_timestamp = timestamps[timestamps.length - 1];
-        const since = Date.parse(job.collection_window.window_from) / 1000;
-        if (timestamps.length && current.ordered && current.last_timestamp < since) {current.complete = true; current.completion_reason = 'timeframe_covered';}
+        // Legacy resumes retain their original cutoff. New runs freeze their
+        // overlap/reconciliation plan, including its start-time watermark.
+        const since = current.history_plan?.scan_since ?? Date.parse(job.collection_window.window_from) / 1000;
+        if (timestamps.length && current.ordered && current.scope_verified !== false && current.last_timestamp < since) {current.complete = true; current.completion_reason = current.history_plan?.mode === 'incremental' ? 'incremental_history_covered' : 'timeframe_covered';}
+        const coverage = completedHistoryCoverage(current, job.id, streamIndex), key = stableKey(current.scope);
+        if (coverage && (!state.history_coverage?.[key] || coverage.checked_through >= state.history_coverage[key].checked_through)) {
+          // This state and the final valid page records share the same CAS
+          // append. Interrupted, malformed and unordered streams cannot move it.
+          state.history_coverage ||= {};
+          state.history_coverage[key] = coverage;
+        }
       }
       job.pages++; job.observations += parsed.records.length;
       finish(job, job.streams.every(s => s.complete) ? 'complete' : 'running');

@@ -61,12 +61,19 @@ export function createCloudRepository(db) {
     async records() {
       const result = []; let after = 0;
       for (;;) {
-        // The live host times out while serializing twenty imported chunks in
-        // one query (~5 MB). Five chunks keep each host result bounded while
-        // avoiding the CPU overhead of a separate call for every chunk.
-        const rows = await db.all("SELECT sequence,records_json FROM cloud_events WHERE sequence>:after AND records_json<>'[]' ORDER BY sequence LIMIT 5", {':after': after});
+        // Keep normal pages batched, but cap their combined bytes. Larger
+        // provider pages must not recreate the live host's ~5 MB result timeout.
+        // Always include the first row so an old oversized import can advance.
+        const rows = await db.all(`WITH pending AS (
+          SELECT sequence,records_json,length(CAST(records_json AS BLOB)) AS bytes
+          FROM cloud_events WHERE sequence>:after AND records_json<>'[]' ORDER BY sequence LIMIT 5
+        ), bounded AS (
+          SELECT sequence,records_json,SUM(bytes) OVER (ORDER BY sequence) AS total_bytes FROM pending
+        ) SELECT sequence,records_json FROM bounded
+          WHERE total_bytes<=1048576 OR sequence=(SELECT MIN(sequence) FROM pending)
+          ORDER BY sequence`, {':after': after});
         for (const row of rows) result.push(...JSON.parse(row.records_json));
-        if (rows.length < 5) return result;
+        if (!rows.length) return result;
         after = rows[rows.length - 1].sequence;
       }
     },

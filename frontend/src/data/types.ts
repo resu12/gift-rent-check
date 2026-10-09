@@ -154,7 +154,12 @@ export interface Job {
   updated_at: string;
   reason: string | null;
   run_id: number | null;
-  progress: DataRecord;
+  progress: DataRecord & { history_refresh?: {
+    incremental_streams: number;
+    full_streams: number;
+    overlap_seconds: number;
+    full_scan_interval_seconds: number;
+  } };
   stop_requested: boolean;
   collection_window?: {
     timeframe: PricingTimeframe;

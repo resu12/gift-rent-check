@@ -1,0 +1,125 @@
+{
+  "description": "Shared Python and JavaScript history-refresh planning vectors. Previous coverage is backed by a committed, collection-scoped Marketapp stream; adapters supply their native provenance. Times are integer Unix seconds. A full plan resets its clock only after successful ordered completion.",
+  "policy": {"version": 1, "overlap_seconds": 172800, "full_scan_interval_seconds": 604800},
+  "cases": [
+    {
+      "name": "no_completed_baseline",
+      "now": 1000000, "requested_since": 100000, "previous": null,
+      "expected": {"mode": "full", "scan_since": 100000, "full_scan_at": 1000000}
+    },
+    {
+      "name": "recent_completed_coverage_reuses_older_records",
+      "now": 1000000, "requested_since": 100000,
+      "previous": {"version": 1, "complete": true, "ordered": true, "coverage_since": 100000, "checked_through": 900000, "full_scan_at": 800000},
+      "expected": {"mode": "incremental", "scan_since": 727200, "full_scan_at": 800000}
+    },
+    {
+      "name": "one_second_of_request_saving_remains_incremental",
+      "now": 1000000, "requested_since": 727199,
+      "previous": {"version": 1, "complete": true, "ordered": true, "coverage_since": 100000, "checked_through": 900000, "full_scan_at": 800000},
+      "expected": {"mode": "incremental", "scan_since": 727200, "full_scan_at": 800000}
+    },
+    {
+      "name": "overlap_equal_to_requested_boundary_is_full",
+      "now": 1000000, "requested_since": 727200,
+      "previous": {"version": 1, "complete": true, "ordered": true, "coverage_since": 100000, "checked_through": 900000, "full_scan_at": 800000},
+      "expected": {"mode": "full", "scan_since": 727200, "full_scan_at": 1000000}
+    },
+    {
+      "name": "short_requested_window_is_fully_rescanned",
+      "now": 1000000, "requested_since": 800000,
+      "previous": {"version": 1, "complete": true, "ordered": true, "coverage_since": 100000, "checked_through": 900000, "full_scan_at": 800000},
+      "expected": {"mode": "full", "scan_since": 800000, "full_scan_at": 1000000}
+    },
+    {
+      "name": "narrowed_window_after_previous_head_does_not_claim_gap_coverage",
+      "now": 1000000, "requested_since": 950000,
+      "previous": {"version": 1, "complete": true, "ordered": true, "coverage_since": 100000, "checked_through": 900000, "full_scan_at": 800000},
+      "expected": {"mode": "full", "scan_since": 950000, "full_scan_at": 1000000}
+    },
+    {
+      "name": "wider_window_requires_full_collection",
+      "now": 1000000, "requested_since": 99999,
+      "previous": {"version": 1, "complete": true, "ordered": true, "coverage_since": 100000, "checked_through": 900000, "full_scan_at": 800000},
+      "expected": {"mode": "full", "scan_since": 99999, "full_scan_at": 1000000}
+    },
+    {
+      "name": "narrowed_coverage_can_start_after_original_full_scan",
+      "now": 1000000, "requested_since": 700000,
+      "previous": {"version": 1, "complete": true, "ordered": true, "coverage_since": 600000, "checked_through": 900000, "full_scan_at": 500000},
+      "expected": {"mode": "incremental", "scan_since": 727200, "full_scan_at": 500000}
+    },
+    {
+      "name": "full_recheck_not_yet_due_one_second_before_seven_days",
+      "now": 1404799, "requested_since": 100000,
+      "previous": {"version": 1, "complete": true, "ordered": true, "coverage_since": 100000, "checked_through": 1400000, "full_scan_at": 800000},
+      "expected": {"mode": "incremental", "scan_since": 1227200, "full_scan_at": 800000}
+    },
+    {
+      "name": "full_recheck_due_at_exactly_seven_days",
+      "now": 1404800, "requested_since": 100000,
+      "previous": {"version": 1, "complete": true, "ordered": true, "coverage_since": 100000, "checked_through": 1400000, "full_scan_at": 800000},
+      "expected": {"mode": "full", "scan_since": 100000, "full_scan_at": 1404800}
+    },
+    {
+      "name": "recent_increment_does_not_postpone_stale_full_recheck",
+      "now": 1500000, "requested_since": 100000,
+      "previous": {"version": 1, "complete": true, "ordered": true, "coverage_since": 100000, "checked_through": 1499999, "full_scan_at": 800000},
+      "expected": {"mode": "full", "scan_since": 100000, "full_scan_at": 1500000}
+    },
+    {
+      "name": "repeated_refresh_at_same_second_still_rechecks_overlap",
+      "now": 1000000, "requested_since": 100000,
+      "previous": {"version": 1, "complete": true, "ordered": true, "coverage_since": 100000, "checked_through": 1000000, "full_scan_at": 800000},
+      "expected": {"mode": "incremental", "scan_since": 827200, "full_scan_at": 800000}
+    },
+    {
+      "name": "partial_baseline_is_not_coverage",
+      "now": 1000000, "requested_since": 100000,
+      "previous": {"version": 1, "complete": false, "ordered": true, "coverage_since": 100000, "checked_through": 900000, "full_scan_at": 800000},
+      "expected": {"mode": "full", "scan_since": 100000, "full_scan_at": 1000000}
+    },
+    {
+      "name": "unordered_baseline_is_not_reused",
+      "now": 1000000, "requested_since": 100000,
+      "previous": {"version": 1, "complete": true, "ordered": false, "coverage_since": 100000, "checked_through": 900000, "full_scan_at": 800000},
+      "expected": {"mode": "full", "scan_since": 100000, "full_scan_at": 1000000}
+    },
+    {
+      "name": "unknown_policy_version_is_not_reused",
+      "now": 1000000, "requested_since": 100000,
+      "previous": {"version": 2, "complete": true, "ordered": true, "coverage_since": 100000, "checked_through": 900000, "full_scan_at": 800000},
+      "expected": {"mode": "full", "scan_since": 100000, "full_scan_at": 1000000}
+    },
+    {
+      "name": "future_head_timestamp_is_not_reused",
+      "now": 1000000, "requested_since": 100000,
+      "previous": {"version": 1, "complete": true, "ordered": true, "coverage_since": 100000, "checked_through": 1000001, "full_scan_at": 800000},
+      "expected": {"mode": "full", "scan_since": 100000, "full_scan_at": 1000000}
+    },
+    {
+      "name": "full_recheck_cannot_be_newer_than_checked_head",
+      "now": 1000000, "requested_since": 100000,
+      "previous": {"version": 1, "complete": true, "ordered": true, "coverage_since": 100000, "checked_through": 900000, "full_scan_at": 900001},
+      "expected": {"mode": "full", "scan_since": 100000, "full_scan_at": 1000000}
+    },
+    {
+      "name": "nonpositive_checked_timestamp_is_invalid",
+      "now": 1000000, "requested_since": 100000,
+      "previous": {"version": 1, "complete": true, "ordered": true, "coverage_since": 100000, "checked_through": 0, "full_scan_at": 800000},
+      "expected": {"mode": "full", "scan_since": 100000, "full_scan_at": 1000000}
+    },
+    {
+      "name": "noninteger_checked_timestamp_is_invalid",
+      "now": 1000000, "requested_since": 100000,
+      "previous": {"version": 1, "complete": true, "ordered": true, "coverage_since": 100000, "checked_through": 900000.5, "full_scan_at": 800000},
+      "expected": {"mode": "full", "scan_since": 100000, "full_scan_at": 1000000}
+    },
+    {
+      "name": "string_timestamp_is_not_coerced",
+      "now": 1000000, "requested_since": 100000,
+      "previous": {"version": 1, "complete": true, "ordered": true, "coverage_since": 100000, "checked_through": "900000", "full_scan_at": 800000},
+      "expected": {"mode": "full", "scan_since": 100000, "full_scan_at": 1000000}
+    }
+  ]
+}

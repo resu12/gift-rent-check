@@ -360,7 +360,7 @@ def test_price_job_links_collection_run_and_resumes_without_new_targets(jobs, mo
     def fake_prices(store, settings, **kwargs):
         calls.append(kwargs)
         assert settings.page_size == 100
-        run_id = kwargs["resume_id"] or 42
+        run_id = kwargs["resume_id"] or store.create_run({"mode": kind}, [COLLECTION], [])
         kwargs["on_run_created"](run_id)
         assert jobs.get(1)["run_id"] == run_id
         return CollectionResult(run_id, "partial" if len(calls) == 1 else "complete", None, 0)
@@ -371,7 +371,7 @@ def test_price_job_links_collection_run_and_resumes_without_new_targets(jobs, mo
     jobs.finish(first["id"], result["state"], result=result)
     resumed, _ = jobs.enqueue(resume_job_id=first["id"])
     assert execute_job(resumed, jobs, settings, DiscoverySettings())["state"] == "complete"
-    assert [call["resume_id"] for call in calls] == [None, 42]
+    assert [call["resume_id"] for call in calls] == [None, jobs.get(first["id"])["run_id"]]
 
 
 def test_rental_price_progress_uses_history_stream_checkpoints(jobs):
