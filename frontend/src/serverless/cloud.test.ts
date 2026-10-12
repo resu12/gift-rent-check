@@ -19,6 +19,19 @@ function mockTransport(call: (name: CloudEndpoint, input: Record<string, unknown
   return { call: async <T>(name: CloudEndpoint, input: Record<string, unknown> = {}) => await call(name, input) as T };
 }
 
+test('cloud dashboard revision is a lightweight read and rejects malformed tokens', async () => {
+  const calls: unknown[] = [];
+  let payload: unknown = { token: 'records-12-minute-3' };
+  const adapter = createCloudDashboardAdapter(mockTransport((name, input) => {
+    calls.push({ name, input });
+    return payload;
+  }));
+  assert.equal(await adapter.getUpdateToken!(), 'records-12-minute-3');
+  for (payload of [{}, { token: null }, { token: '' }, { token: 3 }, { token: 'x'.repeat(1025) }])
+    await assert.rejects(adapter.getUpdateToken!(), /unexpected dashboard revision/);
+  assert.ok(calls.every(call => JSON.stringify(call) === JSON.stringify({ name: 'getDashboardRevision', input: {} })));
+});
+
 test('cloud SDK transport sends only endpoint input and hides raw failures', async () => {
   const calls: unknown[] = [];
   const transport = createCloudTransport({ call(name, input, callback) { calls.push({ name, input }); callback(null, { jobs: [] }); } });
@@ -43,10 +56,29 @@ test('timeout ignores late callback without repeating mutation and cancelled rea
   assert.equal(calls, 1);
 });
 
+test('invitation denial gives the access action without provider or SDK details', async () => {
+  const transport = createCloudTransport({call(_name, _input, cb) {cb(null, {error: {code: 'PUBLIC_ACCESS_DENIED', message: 'sensitive internal state'}});}});
+  await assert.rejects(transport.call('getDashboard'), (error: CloudError) => error.code === 'PUBLIC_ACCESS_DENIED' && /not invited/.test(error.message) && /app owner/.test(error.message) && !error.message.includes('sensitive'));
+});
+
 test('invalid SDK response and expected backend errors fail without reflecting messages', async () => {
   for (const value of [null, [], 'unsafe', { error: { code: 'CONFIGURATION', message: 'secret' } }]) {
     const transport = createCloudTransport({ call(_n, _i, cb) { cb(null, value); } });
     await assert.rejects(transport.call('getJobs'), (error: CloudError) => !error.message.includes('secret'));
+  }
+});
+
+test('full storage explains the failure safely without retrying either refresh', async () => {
+  for (const endpoint of ['stepJob', 'startOwnedPriceRefresh', 'stepOwnedPriceRefresh', 'startGiftRefresh', 'stepGiftRefresh'] as const) {
+    let calls = 0;
+    const transport = createCloudTransport({ call(_name, _input, cb) {
+      calls++; cb(null, { error: { code: 'STORAGE_FULL', message: 'Private SQL token wallet raw body' } });
+    } });
+    await assert.rejects(transport.call(endpoint), (error: CloudError) => {
+      assert.equal(error.code, 'STORAGE_FULL'); assert.match(error.message, /storage is full.*progress.*maintenance/i);
+      assert.equal(error.message.includes('Private SQL'), false); return true;
+    });
+    assert.equal(calls, 1);
   }
 });
 
@@ -166,6 +198,151 @@ test('interruption and ambiguous failure only read progress, never retry a mutat
   assert.deepEqual(calls, ['stepJob', 'getJobs']); assert.deepEqual(errors, ['Timed out']);
 });
 
+test('an uncertain step confirms the saved pause once after its live lease ends', async () => {
+  let now = 1000, reads = 0;
+  const calls: CloudEndpoint[] = [], states: string[] = [], waits: number[] = [], interrupted: Job[] = [];
+  const transport = mockTransport(name => {
+    calls.push(name);
+    if (name === 'stepJob') throw new CloudError('TIMEOUT', 'Timed out');
+    assert.equal(name, 'getJobs');
+    return { jobs: [++reads === 1 ? saved('running', { server_time: 900000, lease_until: 903000, requires_resume: false })
+      : saved('partial', { server_time: 903001, lease_until: 0, requires_resume: false })] };
+  });
+  await new CloudCollectionDriver(saved(), { transport, now: () => now,
+    wait: async ms => { waits.push(ms); now -= ms; }, onJob: job => states.push(job.state), onError() {},
+    onInterrupted: job => interrupted.push(job),
+  }).run();
+  assert.deepEqual(calls, ['stepJob', 'getJobs', 'getJobs']);
+  assert.deepEqual(states, ['running', 'partial']); assert.equal(interrupted.length, 1);
+  assert.equal(waits.reduce((total, ms) => total + ms, 0), 3001, 'lease delay uses server-clock duration despite a device clock correction');
+});
+
+test('lease reconciliation never waits beyond 120 seconds or follows malformed clocks', async () => {
+  for (const progress of [{server_time: 1000, lease_until: 121000}, {server_time: 1000, lease_until: 121001},
+    {server_time: 1000, lease_until: Infinity}, {server_time: NaN, lease_until: 3000}, {server_time: 1000, lease_until: '3000'}]) {
+    let now = 1000, reads = 0, waited = 0;
+    await new CloudCollectionDriver(saved(), { transport: mockTransport(name => {
+      if (name === 'stepJob') throw new CloudError('TIMEOUT', 'Timed out');
+      assert.equal(name, 'getJobs'); reads++; return {jobs: [saved('running', progress)]};
+    }), now: () => now, wait: async ms => { now += ms; waited += ms; }, onJob() {}, onError() {} }).run();
+    assert.ok(waited <= 120000);
+    assert.equal(reads, progress.lease_until === 121000 ? 2 : 1);
+  }
+});
+
+test('hidden or changed views cancel lease reconciliation without another request', async () => {
+  let allowed = true, reads = 0;
+  const states: Job[] = [];
+  await new CloudCollectionDriver(saved(), { transport: mockTransport(name => {
+    if (name === 'stepJob') throw new CloudError('TIMEOUT', 'Timed out');
+    assert.equal(name, 'getJobs'); reads++; return {jobs: [saved('running', {server_time: 1000, lease_until: 100000})]};
+  }), canReconcile: () => allowed, now: () => 1000, wait: async () => { allowed = false; }, onJob: job => states.push(job), onError() {} }).run();
+  assert.equal(reads, 1); assert.equal(states.length, 1);
+});
+
+test('another local driver or explicit interruption cancels the delayed status read', async () => {
+  const waiting = deferred<void>(); let reads = 0, resolveWait!: () => void;
+  const driver = new CloudCollectionDriver(saved(), { transport: mockTransport(name => {
+    if (name === 'stepJob') throw new CloudError('TIMEOUT', 'Timed out');
+    assert.equal(name, 'getJobs'); reads++; return {jobs: [saved('running', {server_time: 1000, lease_until: 100000})]};
+  }), now: () => 1000, wait: async (_ms, signal) => {
+    waiting.resolve(); return new Promise<void>(resolve => { resolveWait = resolve; signal.addEventListener('abort', () => resolve(), {once: true}); });
+  }, onJob() {}, onError() {} });
+  const run = driver.run(); await waiting.promise; driver.interrupt(); resolveWait(); await run;
+  assert.equal(reads, 1);
+});
+
+test('automatic driver failure remains Waiting while a backend lease finishes, without step retry', async () => {
+  let reads = 0;
+  const calls: CloudEndpoint[] = [], updates: Job[] = [];
+  const finishing = saved('running', {server_time: 1000, lease_until: 121001, requires_resume: false});
+  const adapter = createCloudDashboardAdapter(mockTransport(name => {
+    calls.push(name);
+    if (name === 'refreshStartupComparisons') return {state: 'started', job: saved()};
+    if (name === 'stepJob') throw new CloudError('TIMEOUT', 'Timed out');
+    assert.equal(name, 'getJobs'); reads++; return {jobs: [finishing]};
+  }));
+  adapter.subscribe!(event => { if (event.job) updates.push(event.job); });
+  await adapter.startupComparisonRefresh!({source: 'listings', timeframe: '30d'});
+  for (let index = 0; index < 10; index++) await Promise.resolve();
+  const latest = updates.at(-1)!;
+  assert.equal(latest.state, 'running'); assert.equal(latest.progress.requires_resume, false);
+  assert.equal(latest.progress.client_interrupted, true);
+  assert.equal((await adapter.getJobs())[0].progress.client_interrupted, true, 'polling preserves the local interrupted marker');
+  assert.equal(calls.filter(name => name === 'stepJob').length, 1); assert.equal(calls.includes('stopJob'), false); assert.equal(reads, 2);
+});
+
+test('hiding a view retains its interrupted marker but fences delayed saved-status reads', async () => {
+  const pending = deferred<{job: Job}>();
+  const calls: CloudEndpoint[] = [];
+  const adapter = createCloudDashboardAdapter(mockTransport(name => {
+    calls.push(name);
+    if (name === 'startJob') return {job: saved()};
+    if (name === 'stepJob') return pending.promise;
+    assert.equal(name, 'getJobs'); return {jobs: [saved('running', {server_time: 1000, lease_until: 3000, requires_resume: false})]};
+  }));
+  await adapter.startJob('prices', ''); adapter.interrupt(); pending.resolve({job: saved()});
+  for (let index = 0; index < 10; index++) await Promise.resolve();
+  assert.deepEqual(calls, ['startJob', 'stepJob'], 'hidden generation does not schedule another status read');
+  const [job] = await adapter.getJobs();
+  assert.equal(job.progress.client_interrupted, true); assert.equal(job.progress.requires_resume, false);
+});
+
+test('interruption preserves a newer commit already observed by status polling', async () => {
+  let rejectStep!: (error: Error) => void;
+  const pending = new Promise<never>((_resolve, reject) => { rejectStep = reject; });
+  const seen = {...saved('running', {server_time: 1000, lease_until: 121001, requires_resume: false, pages: 1, observations: 100}), updated_at: '2026-10-09T00:01:00Z'};
+  const updates: Job[] = [];
+  const adapter = createCloudDashboardAdapter(mockTransport(name => {
+    if (name === 'startJob') return {job: saved('running', {pages: 0, observations: 0})};
+    if (name === 'stepJob') return pending;
+    assert.equal(name, 'getJobs'); return {jobs: [seen]};
+  }));
+  adapter.subscribe!(event => { if (event.job) updates.push(event.job); });
+  await adapter.startJob('prices', ''); await adapter.getJobs(); rejectStep(new CloudError('TIMEOUT', 'Timed out'));
+  for (let index = 0; index < 10; index++) await Promise.resolve();
+  const interrupted = updates.filter(job => job.progress.client_interrupted);
+  assert.ok(interrupted.length > 0); assert.ok(interrupted.every(job => job.progress.pages === 1 && job.progress.observations === 100));
+});
+
+test('a delayed saved status read cannot undo a completed step or reintroduce its active lease', async () => {
+  const step = deferred<{ job: Job }>(), polling = deferred<{ jobs: Job[] }>();
+  const complete = { ...saved('complete', { pages: 2, observations: 200, server_time: 3000 }), updated_at: '2026-10-09T00:00:02Z' };
+  const updates: Job[] = [];
+  const adapter = createCloudDashboardAdapter(mockTransport(name => {
+    if (name === 'startJob') return { job: saved() };
+    if (name === 'stepJob') return step.promise;
+    assert.equal(name, 'getJobs'); return polling.promise;
+  }));
+  adapter.subscribe!(event => { if (event.job) updates.push(event.job); });
+  await adapter.startJob('prices', '');
+  const pendingRead = adapter.getJobs();
+  step.resolve({ job: complete });
+  for (let index = 0; index < 10; index++) await Promise.resolve();
+  assert.equal(updates.at(-1)?.state, 'complete');
+  polling.resolve({ jobs: [saved('running', { pages: 1, observations: 100, server_time: 2000, lease_until: 122000 })] });
+  assert.deepEqual((await pendingRead)[0], { ...complete, progress: { ...complete.progress, requires_resume: false } },
+    'late polling keeps the completed state, records and cleared lease');
+});
+
+test('saved replies with the same commit time use server observation order without freezing later progress', async () => {
+  const values = [
+    saved('running', { pages: 1, server_time: 3000, lease_until: 0 }),
+    saved('running', { pages: 1, server_time: 2000, lease_until: 122000 }),
+    saved('running', { pages: 1, server_time: 4000, lease_until: 124000 }),
+    { ...saved('complete', { pages: 2, server_time: 4000, lease_until: 0 }), updated_at: '2026-10-09T00:00:02Z' },
+    { ...saved('running', { pages: 1, server_time: 5000, lease_until: 125000 }), updated_at: '2026-10-09T00:00:02Z' },
+    { ...saved('partial', { pages: 1, server_time: 6000, lease_until: 0 }), updated_at: '2026-10-09T00:00:02Z' },
+  ];
+  const adapter = createCloudDashboardAdapter(mockTransport(name => { assert.equal(name, 'getJobs'); return { jobs: [values.shift()] }; }));
+  const first = (await adapter.getJobs())[0];
+  assert.deepEqual((await adapter.getJobs())[0], first);
+  assert.equal((await adapter.getJobs())[0].progress.lease_until, 124000, 'a later provider request remains visible');
+  assert.equal((await adapter.getJobs())[0].state, 'complete');
+  assert.equal((await adapter.getJobs())[0].state, 'complete', 'terminal jobs cannot resume even when an older read was projected later');
+  assert.equal((await adapter.getJobs())[0].state, 'complete', 'an earlier pause cannot restore Continue for a finished traversal');
+});
+
 test('long Retry-After and maximum step budget pause before another provider step', async () => {
   for (const options of [{ next_allowed_at: 400000 }, {}]) {
     let steps = 0; let stops = 0;
@@ -204,6 +381,41 @@ test('new cloud job freezes selected window and driver starts only on explicit a
   await stepped.promise;
   assert.deepEqual(calls[0], { name: 'startJob', input: { kind: 'prices', timeframe: '60d' } });
   assert.equal(calls[1].name, 'stepJob');
+});
+
+test('manual comparison completion announces its final saved evidence without another provider step', async () => {
+  const pending = deferred<{ job: Job }>();
+  const calls: CloudEndpoint[] = [], events: { job?: Job; error?: string; savedDataChanged?: boolean }[] = [];
+  const adapter = createCloudDashboardAdapter(mockTransport(name => {
+    calls.push(name);
+    if (name === 'startJob') return { job: saved() };
+    assert.equal(name, 'stepJob'); return pending.promise;
+  }));
+  adapter.subscribe!(event => events.push(event));
+  await adapter.startJob('prices', '');
+  assert.equal(events.some(event => event.savedDataChanged), false);
+  pending.resolve({ job: saved('complete', { pages: 2, streams_complete: 1 }) });
+  for (let index = 0; index < 16; index++) await Promise.resolve();
+  assert.equal(events.filter(event => event.savedDataChanged).length, 1);
+  assert.equal(events.filter(event => event.job).at(-1)?.job?.state, 'complete');
+  assert.deepEqual(calls, ['startJob', 'stepJob']);
+});
+
+test('manual driver callbacks and final reload cannot cross an interrupted account context', async () => {
+  const pending = deferred<{ job: Job }>();
+  const events: { job?: Job; error?: string; savedDataChanged?: boolean }[] = [];
+  const adapter = createCloudDashboardAdapter(mockTransport(name => {
+    if (name === 'startJob') return { job: saved() };
+    assert.equal(name, 'stepJob'); return pending.promise;
+  }));
+  adapter.subscribe!(event => events.push(event));
+  await adapter.startJob('prices', '');
+  adapter.interrupt();
+  const count = events.length;
+  pending.resolve({ job: saved('complete') });
+  for (let index = 0; index < 16; index++) await Promise.resolve();
+  assert.equal(events.length, count, 'late mutation outcome belongs only to the previous view');
+  assert.equal(events.some(event => event.savedDataChanged), false);
 });
 
 test('forced comparison refresh is explicit on new cloud jobs and never carried into Resume', async () => {

@@ -8,18 +8,49 @@ class ApiFailure extends Error {
   constructor(message: string, status: number) { super(message); this.status = status; }
 }
 
+const REQUEST_TIMEOUT_MS = 45000;
+
+/** Bound the entire response, including its body, even if fetch ignores abort. */
+function withinDeadline<T>(signal: AbortSignal | null | undefined, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  if (signal?.aborted) return Promise.reject(new DOMException('Read cancelled', 'AbortError'));
+  return new Promise<T>((resolve, reject) => {
+    const controller = new AbortController();
+    let settled = false;
+    const finish = (error?: unknown, value?: T) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', cancel);
+      if (error) reject(error); else resolve(value!);
+    };
+    const cancel = () => { controller.abort(); finish(new DOMException('Read cancelled', 'AbortError')); };
+    const timer = setTimeout(() => {
+      controller.abort();
+      finish(new Error('The local service did not respond within 45 seconds. Try again. Saved actions are not restarted automatically.'));
+    }, REQUEST_TIMEOUT_MS);
+    signal?.addEventListener('abort', cancel, { once: true });
+    // A deadline releases the polling queue, while late results remain ignored.
+    void Promise.resolve().then(() => {
+      if (controller.signal.aborted) throw new DOMException('Read cancelled', 'AbortError');
+      return operation(controller.signal);
+    }).then(value => finish(undefined, value), error => finish(error));
+  });
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(path, { ...init, credentials: 'same-origin', cache: 'no-store' });
-  if (!response.ok) {
-    let detail = `The local service returned ${response.status}.`;
-    try {
-      const body = await response.json();
-      if (typeof body.detail === 'string') detail = body.detail;
-      else if (typeof body.error === 'string') detail = body.error;
-    } catch { /* The service may be starting or unavailable. */ }
-    throw new ApiFailure(detail, response.status);
-  }
-  return response.json() as Promise<T>;
+  return withinDeadline(init.signal, async signal => {
+    const response = await fetch(path, { ...init, signal, credentials: 'same-origin', cache: 'no-store' });
+    if (!response.ok) {
+      let detail = `The local service returned ${response.status}.`;
+      try {
+        const body = await response.json();
+        if (typeof body.detail === 'string') detail = body.detail;
+        else if (typeof body.error === 'string') detail = body.error;
+      } catch { /* The service may be starting or unavailable. */ }
+      throw new ApiFailure(detail, response.status);
+    }
+    return await response.json() as T;
+  });
 }
 
 type NewJobRequest = { kind: JobKind; timeframe?: PricingSelection['timeframe']; date_from?: string; date_to?: string };
@@ -33,7 +64,7 @@ async function postJob(body: NewJobRequest | { resume_job_id: number }, csrf: st
   return 'job' in result ? result.job : result;
 }
 
-const OWNED_PRICE_ROUTES: Record<OwnedPriceEndpoint, string> = {
+const OWNED_PRICE_ROUTES: Partial<Record<OwnedPriceEndpoint, string>> = {
   getOwnedPriceRefresh: '/api/owned-prices',
   startOwnedPriceRefresh: '/api/owned-prices/start',
   stepOwnedPriceRefresh: '/api/owned-prices/step',
@@ -46,18 +77,20 @@ export function createLocalDashboardAdapter(): DashboardAdapter & { ownedPriceTr
   let csrf = '';
   const settingsRequest = async (method: 'GET' | 'POST' | 'DELETE', token = '', input?: { api_key: string; persist: boolean }, signal?: AbortSignal) => {
     if (method !== 'GET' && !token) throw new Error('Reload the dashboard before changing API key settings.');
-    let response: Response;
-    try {
-      response = await fetch('/api/settings/marketapp', {
-        method, credentials: 'same-origin', cache: 'no-store', signal,
-        ...(method === 'GET' ? {} : { headers: { 'Content-Type': 'application/json', 'X-Dashboard-CSRF': token } }),
-        ...(input ? { body: JSON.stringify(input) } : {}),
-      });
-    } catch { throw new Error(marketappSettingsError()); }
-    // Do not read server error messages: validation output may contain a secret.
-    if (!response.ok) throw new Error(marketappSettingsError(response.status));
-    try { return publicMarketappSettings(await response.json()); }
-    catch { throw new Error('API key settings returned an invalid response.'); }
+    return withinDeadline(signal, async boundedSignal => {
+      let response: Response;
+      try {
+        response = await fetch('/api/settings/marketapp', {
+          method, credentials: 'same-origin', cache: 'no-store', signal: boundedSignal,
+          ...(method === 'GET' ? {} : { headers: { 'Content-Type': 'application/json', 'X-Dashboard-CSRF': token } }),
+          ...(input ? { body: JSON.stringify(input) } : {}),
+        });
+      } catch { throw new Error(marketappSettingsError()); }
+      // Do not read server error messages: validation output may contain a secret.
+      if (!response.ok) throw new Error(marketappSettingsError(response.status));
+      try { return publicMarketappSettings(await response.json()); }
+      catch { throw new Error('API key settings returned an invalid response.'); }
+    });
   };
   const marketappSettings: MarketappSettingsAdapter = {
     get: signal => settingsRequest('GET', '', undefined, signal),
@@ -67,26 +100,14 @@ export function createLocalDashboardAdapter(): DashboardAdapter & { ownedPriceTr
   const ownedPriceTransport: OwnedPriceTransport = {
     async call<T>(endpoint: OwnedPriceEndpoint, input: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
       const path = OWNED_PRICE_ROUTES[endpoint];
-      if (!Object.hasOwn(OWNED_PRICE_ROUTES, endpoint)) throw new Error('Unsupported rent price operation.');
+      if (!Object.hasOwn(OWNED_PRICE_ROUTES, endpoint) || !path) throw new Error('Unsupported rent price operation.');
       const read = endpoint === 'getOwnedPriceRefresh';
       if (!read && !csrf) throw new Error('Reload saved data before checking rent prices.');
-      // Match the cloud transport deadline. A timed-out mutation is reconciled
-      // by the shared driver, never automatically sent a second time.
-      const controller = new AbortController();
-      const cancel = () => controller.abort();
-      const timeout = setTimeout(cancel, 45000);
-      signal?.addEventListener('abort', cancel, { once: true });
-      if (signal?.aborted) cancel();
-      try {
-        return await request<T>(path, {
-          method: read ? 'GET' : 'POST',
-          signal: controller.signal,
-          ...(read ? {} : { headers: { 'Content-Type': 'application/json', 'X-Dashboard-CSRF': csrf }, body: JSON.stringify(input) }),
-        });
-      } finally {
-        clearTimeout(timeout);
-        signal?.removeEventListener('abort', cancel);
-      }
+      // A timed-out mutation is reconciled by the shared driver, never sent twice.
+      return request<T>(path, {
+        method: read ? 'GET' : 'POST', signal,
+        ...(read ? {} : { headers: { 'Content-Type': 'application/json', 'X-Dashboard-CSRF': csrf }, body: JSON.stringify(input) }),
+      });
     },
   };
   return {
@@ -106,6 +127,12 @@ export function createLocalDashboardAdapter(): DashboardAdapter & { ownedPriceTr
       const data = await request<Dashboard>(`/api/dashboard?${pricingQuery(selection)}`, { signal });
       if (!signal?.aborted) csrf = data.capabilities?.csrf_token ?? '';
       return data;
+    },
+    async getUpdateToken(signal) {
+      const response = await request<{ token: string }>('/api/dashboard-revision', { signal });
+      if (typeof response.token !== 'string' || !response.token || response.token.length > 1024)
+        throw new Error('The local service returned an unexpected dashboard revision. Try again.');
+      return response.token;
     },
     getJobs: async (signal) => (await request<{ jobs: Job[] }>('/api/jobs', { signal })).jobs,
     startJob: (kind, csrf, selection, options) => {

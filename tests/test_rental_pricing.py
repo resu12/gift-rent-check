@@ -11,7 +11,7 @@ from marketapp_rent.models import parse_page
 from marketapp_rent.pricing import enrich_pricing
 from marketapp_rent.pricing_window import pricing_window
 from test_pricing import (store, addr, gift, listing, listings, ton_traits, NOW,
-                          RECENT, COLLECTION, WALLET)
+                          RECENT, OLD, COLLECTION, WALLET)
 
 
 def event(nft=10, price="0.6", duration=259200, **changes):
@@ -46,6 +46,25 @@ def test_daily_rates_use_total_and_duration_not_current_asking_price(store):
     assert pricing["collection"]["distinct_nft_count"] == 3
     assert summary["source"] == "rentals" and summary["time_basis"] == "rental_event"
     assert summary["unit"] == "GRAM/day" and summary["rental_record_count"] == 3
+
+
+@pytest.mark.parametrize("backdrop", [None, "Black"])
+def test_rental_recommendations_keep_saved_target_and_peer_traits_after_a_day(store, backdrop):
+    old_subject, recent_subject = gift(), gift(addr(20))
+    ton_traits(store, when=OLD)
+    ton_traits(store, nft=addr(20), when=RECENT)
+    for number in range(10, 13):
+        ton_traits(store, nft=addr(number), when=OLD)
+    history(store, [event(i, price=p) for i, p in zip(range(10, 13), ("0.3", "0.6", "0.9"))])
+    enrich_pricing(store, [old_subject, recent_subject], WALLET, now=NOW,
+                   source="rentals", timeframe="30d", backdrop=backdrop)
+    for subject in (old_subject, recent_subject):
+        assert subject["pricing"]["recommended_price_per_day"] == "0.2"
+        assert subject["pricing"]["basis"] == "model_black"
+        assert subject["pricing"]["model_black"]["distinct_nft_count"] == 3
+    assert old_subject["traits_observed_at"] == OLD
+    assert any("older" in warning for warning in old_subject["trait_uncertainties"])
+    assert recent_subject["traits_observed_at"] == RECENT
 
 
 def test_identical_occurrences_aliases_and_hash_reuse_do_not_inflate_samples(store):

@@ -15,7 +15,7 @@ export function latestEvidenceAt(gifts: Gift[]): string | null {
   let latest: string | null = null;
   let latestTime = -Infinity;
   for (const gift of gifts) {
-    for (const value of [gift.observed_at, gift.market_observed_at, gift.price_observed_at]) {
+    for (const value of [gift.observed_at, gift.market_observed_at, gift.price_observed_at, gift.status_observed_at]) {
       if (!value) continue;
       const time = Date.parse(value);
       if (Number.isFinite(time) && time > latestTime) {

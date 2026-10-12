@@ -81,6 +81,7 @@ def test_total_attempt_cap_stops_auto_batches_and_resume_keeps_checkpoint(setup,
     assert len(attempts) == 3 and first["pages_committed"] == 3
     budget = jobs.get(job["id"])["progress"]["marketapp_budget"]
     assert budget["invocation_used"] == 3 and budget["rolling_24h_used"] == 3
+    assert budget["available_at"] is None
     jobs.finish(job["id"], "partial", first["reason"], first)
     resumed, _ = jobs.enqueue(resume_job_id=job["id"])
     second = execute_job(resumed, jobs, settings, DiscoverySettings())
@@ -252,6 +253,48 @@ def test_rolling_day_expiry_and_concurrent_reservations(tmp_path):
     assert jobs.marketapp_usage(3, now=186399)["remaining_24h"] == 0
     assert jobs.marketapp_usage(3, now=186400)["remaining_24h"] == 3
     assert jobs.reserve_marketapp_attempt(job["id"], "later", 100, 3, now=186400)["rolling_24h_used"] == 1
+
+
+@pytest.mark.parametrize("used,limit", [(3, 3), (705, 500)])
+def test_available_at_waits_for_enough_requests_to_expire(setup, used, limit):
+    jobs, settings, clock = setup
+    settings = replace(settings, dashboard_daily_max_attempts=limit)
+    now = jobs_module.time.time()
+    assert jobs.marketapp_usage(limit) == {
+        "used_24h": 0, "remaining_24h": limit, "resets_at": None, "available_at": None,
+    }
+    job, _ = jobs.enqueue("collect", WALLET)
+    oldest = now - used
+    with jobs.connect() as connection:
+        connection.executemany(
+            "INSERT INTO dashboard_marketapp_attempts(job_id,invocation,attempted_at) VALUES (?,?,?)",
+            [(job["id"], "previous", oldest + index) for index in range(used)],
+        )
+    first_expiry = oldest + 86400
+    available = first_expiry + used - limit
+    iso = lambda timestamp: datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+    usage = jobs.marketapp_usage(limit)
+    assert usage == {
+        "used_24h": used, "remaining_24h": 0,
+        "resets_at": iso(first_expiry), "available_at": iso(available),
+    }
+    jobs.start_marketapp_budget(job["id"], settings)
+    started = jobs.get(job["id"])["progress"]["marketapp_budget"]
+    assert started["resets_at"] == usage["resets_at"]
+    assert started["available_at"] == usage["available_at"]
+    with pytest.raises(BudgetExceeded) as blocked_attempt:
+        jobs.reserve_marketapp_attempt(job["id"], "next", 1000, limit, now=now)
+    assert iso(available) in str(blocked_attempt.value)
+    blocked = jobs.get(job["id"])["progress"]["marketapp_budget"]
+    assert blocked["rolling_24h_used"] == used
+    assert blocked["available_at"] == iso(available)
+    assert jobs.marketapp_usage(limit, now=available - 1)["remaining_24h"] == 0
+    ready = jobs.marketapp_usage(limit, now=available)
+    assert ready["used_24h"] == limit - 1 and ready["remaining_24h"] == 1
+    assert ready["available_at"] is None
+    reserved = jobs.reserve_marketapp_attempt(job["id"], "next", 1000, limit, now=available)
+    assert reserved["rolling_24h_used"] == limit
+    assert reserved["available_at"] == iso(available + 1)
 
 
 def test_progress_updates_cannot_erase_budget_and_collection_window_is_frozen(tmp_path):

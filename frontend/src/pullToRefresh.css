@@ -1,0 +1,9 @@
+html.telegram-pull-refresh,html.telegram-pull-refresh body{overscroll-behavior-y:none}
+.pull-refresh{overflow:hidden;display:flex;align-items:center;justify-content:center;color:#b3c8d8;transition:height .16s ease;pointer-events:none}
+.pull-refresh>div{display:flex;align-items:center;justify-content:center;gap:9px;padding:8px 12px;text-align:center;font-size:13px;line-height:1.4;max-width:100%}
+.pull-refresh svg{flex-shrink:0}
+.pull-refresh-pulling,.pull-refresh-armed{transition:none}
+.pull-refresh-armed{color:#8fe2c4}
+.pull-refresh-refreshing{color:#8fe2c4}
+.pull-refresh-notice{color:#b3c8d8}
+@media(prefers-reduced-motion:reduce){.pull-refresh{transition:none}.pull-refresh .spinning{animation:none}}

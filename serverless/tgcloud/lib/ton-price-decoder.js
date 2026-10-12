@@ -91,7 +91,7 @@ function crc32c(bytes) {
   return (~crc) >>> 0;
 }
 
-function ordinaryBoc(value) {
+export function ordinaryBoc(value) {
   if (typeof value !== 'string' || value.length > MAX_BOC_BYTES * 2) fail();
   const text = value.trim();
   const bytes = /^[0-9a-fA-F]+$/.test(text) && text.length % 2 === 0
@@ -162,7 +162,7 @@ function ordinaryBoc(value) {
   return cells[root];
 }
 
-class Slice {
+export class Slice {
   constructor(cell) {this.cell = cell; this.offset = 0;}
   bigint(bits) {
     if (this.offset + bits > this.cell.bitLength) fail();

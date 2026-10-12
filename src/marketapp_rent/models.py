@@ -7,23 +7,21 @@ explicitly null, and supplied zero values represent different evidence.
 from __future__ import annotations
 
 import json
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, TypeAdapter
 from pydantic import ValidationError as PydanticValidationError
 
 from .domain import NormalizedRecord, ParsedPage, ValidationError
+from .monetary import bounded_decimal, decimal_text
 from .util import canonical_json
 
 
 def _number(value: Any) -> Decimal:
     if isinstance(value, bool) or not isinstance(value, (int, Decimal)):
         raise ValueError("expected a JSON number")
-    number = Decimal(value)
-    if not number.is_finite():
-        raise ValueError("expected a finite JSON number")
-    return number
+    return bounded_decimal(value)
 
 
 Number = Annotated[Decimal, BeforeValidator(_number)]
@@ -123,13 +121,7 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _decimal_string(value: str) -> Decimal:
-    try:
-        result = Decimal(value)
-    except InvalidOperation as exc:
-        raise ValueError("invalid monetary decimal") from exc
-    if not result.is_finite():
-        raise ValueError("non-finite monetary decimal")
-    return result
+    return bounded_decimal(value)
 
 
 def _nano_to_gram(value: Decimal) -> Decimal:
@@ -141,7 +133,7 @@ def _nano_to_gram(value: Decimal) -> Decimal:
 
 def _json_safe(value: Any) -> Any:
     if isinstance(value, Decimal):
-        return format(value, "f")
+        return decimal_text(value)
     if isinstance(value, list):
         return [_json_safe(item) for item in value]
     if isinstance(value, dict):
@@ -164,7 +156,7 @@ def _listing(source: dict) -> NormalizedRecord:
     )
     data["min_duration_seconds"] = data.pop("min_duration")
     data["max_duration_seconds"] = data.pop("max_duration")
-    data["discount_per_day"] = format(Decimal(source["discount_per_day"]), "f")
+    data["discount_per_day"] = decimal_text(source["discount_per_day"])
     data["uncertainties"] = ["discount_calculation_unspecified"]
     return _record("listing", source["nft_address"], source, data)
 
@@ -216,7 +208,7 @@ def parse_page(kind: str, body: bytes) -> ParsedPage:
         raise ValidationError("Unsupported response kind")
     try:
         raw = json.loads(
-            body, parse_float=Decimal, parse_constant=_reject_constant,
+            body, parse_float=bounded_decimal, parse_constant=_reject_constant,
             object_pairs_hook=_unique_object,
         )
         if kind == "listing":

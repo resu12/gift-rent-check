@@ -2,7 +2,8 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createLocalDashboardAdapter } from './local.ts';
-import type { Job, PricingSelection } from './types.ts';
+import type { Dashboard, Job, PricingSelection } from './types.ts';
+import { createDashboardPoller } from './dashboardPolling.ts';
 import { createOwnedPriceStartupGate, OwnedPriceRefreshDriver } from './ownedPriceRefresh.ts';
 import type { OwnedPriceEndpoint } from './ownedPriceRefresh.ts';
 
@@ -148,7 +149,7 @@ test('local adapters isolate their CSRF state and cancelled dashboard reads cann
   await assert.rejects(second.ownedPriceTransport.call('startOwnedPriceRefresh'), /Reload saved data/);
   token = 'second'; await second.getDashboard(selection);
   const aborted = new AbortController(); aborted.abort();
-  token = 'discard'; await first.getDashboard(selection, aborted.signal);
+  token = 'discard'; await assert.rejects(first.getDashboard(selection, aborted.signal), { name: 'AbortError' });
   await first.ownedPriceTransport.call('startOwnedPriceRefresh', { session_id: 'first-page' });
   await second.ownedPriceTransport.call('startOwnedPriceRefresh', { session_id: 'second-page' });
   assert.deepEqual(tokens, ['first', 'second']);
@@ -193,4 +194,124 @@ test('an ambiguous local price mutation is read back once and never resubmitted'
   await driver.start(); await driver.start();
   assert.deepEqual(requests.slice(1), ['/api/owned-prices/start', '/api/owned-prices']);
   assert.equal(driver.getSnapshot().phase, 'complete');
+});
+
+test('dashboard revision uses the lightweight read-only route and validates its token', async context => {
+  const paths: string[] = [];
+  let payload: unknown = { token: 'records-8-minute-2' };
+  context.mock.method(globalThis, 'fetch', async (path: string, init: RequestInit) => {
+    paths.push(path);
+    assert.equal(init.method, undefined);
+    assert.equal(init.credentials, 'same-origin');
+    assert.equal(init.cache, 'no-store');
+    return new Response(JSON.stringify(payload));
+  });
+  const adapter = createLocalDashboardAdapter();
+  assert.equal(await adapter.getUpdateToken!(), 'records-8-minute-2');
+  payload = { token: '' };
+  await assert.rejects(adapter.getUpdateToken!(), /unexpected dashboard revision/);
+  assert.deepEqual(paths, ['/api/dashboard-revision', '/api/dashboard-revision']);
+});
+
+async function microtasks() { for (let i = 0; i < 20; i++) await Promise.resolve(); }
+
+test('a stalled desktop read releases at its deadline and the next read can recover', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const calls: RequestInit[] = [];
+  let recover = false;
+  let late!: (response: Response) => void;
+  context.mock.method(globalThis, 'fetch', async (_path: string, init: RequestInit) => {
+    calls.push(init);
+    if (recover) return new Response(JSON.stringify({ update_token: 'recovered', capabilities: { csrf_token: 'current' } }));
+    return new Promise<Response>(resolve => { late = resolve; }); // Simulates abort being ignored.
+  });
+  const adapter = createLocalDashboardAdapter();
+  const pending = adapter.getDashboard(selection);
+  const rejected = assert.rejects(pending, /within 45 seconds/);
+  await microtasks();
+  context.mock.timers.tick(45000);
+  await rejected;
+  assert.equal(calls[0].signal?.aborted, true);
+  recover = true;
+  assert.equal((await adapter.getDashboard(selection)).update_token, 'recovered');
+  late(new Response(JSON.stringify({ capabilities: { csrf_token: 'stale' } })));
+  await microtasks();
+  await adapter.ownedPriceTransport.call('startOwnedPriceRefresh');
+  assert.equal(new Headers(calls.at(-1)?.headers).get('X-Dashboard-CSRF'), 'current', 'late reads cannot replace the active CSRF');
+});
+
+test('the desktop deadline includes a stalled JSON response body', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  let requestSignal!: AbortSignal;
+  context.mock.method(globalThis, 'fetch', async (_path: string, init: RequestInit) => {
+    requestSignal = init.signal!;
+    return { ok: true, json: () => new Promise(() => {}) } as Response;
+  });
+  const pending = createLocalDashboardAdapter().getJobs();
+  const rejected = assert.rejects(pending, /within 45 seconds/);
+  await microtasks();
+  context.mock.timers.tick(45000);
+  await rejected;
+  assert.equal(requestSignal.aborted, true);
+});
+
+test('desktop cancellation is prompt even when the fetch implementation ignores abort', async context => {
+  let requests = 0;
+  let requestSignal!: AbortSignal;
+  context.mock.method(globalThis, 'fetch', async (_path: string, init: RequestInit) => {
+    requests++;
+    requestSignal = init.signal!;
+    return new Promise(() => {});
+  });
+  const controller = new AbortController();
+  const pending = createLocalDashboardAdapter().getDashboard(selection, controller.signal);
+  const rejected = assert.rejects(pending, { name: 'AbortError' });
+  await microtasks();
+  controller.abort();
+  await rejected;
+  assert.equal(requestSignal.aborted, true);
+  assert.equal(requests, 1);
+});
+
+test('a timed-out desktop job mutation is never submitted again automatically', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const paths: string[] = [];
+  context.mock.method(globalThis, 'fetch', async (path: string) => { paths.push(path); return new Promise(() => {}); });
+  const pending = createLocalDashboardAdapter().resumeJob(7, 'csrf');
+  const rejected = assert.rejects(pending, /Saved actions are not restarted automatically/);
+  await microtasks();
+  context.mock.timers.tick(45000);
+  await rejected;
+  assert.deepEqual(paths, ['/api/jobs']);
+});
+
+test('Retry queued behind a stalled desktop dashboard recovers after its bounded timeout', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  let dashboardReads = 0;
+  const state = { loading: false, error: null as string | null, dashboard: null as Dashboard | null };
+  context.mock.method(globalThis, 'fetch', async (path: string) => {
+    if (path === '/api/jobs') return new Response(JSON.stringify({ jobs: [] }));
+    dashboardReads++;
+    if (dashboardReads === 1) return new Promise(() => {});
+    return new Response(JSON.stringify({ update_token: 'recovered', capabilities: { csrf_token: 'csrf' } }));
+  });
+  const poller = createDashboardPoller(createLocalDashboardAdapter(), selection, {
+    dashboard(data) { state.dashboard = data; },
+    loading(pending) { state.loading = pending; },
+    error(message) { state.error = message; },
+    jobs() {},
+  }, { isVisible: () => true, setTimer: () => () => {} });
+  const initial = poller.reload();
+  await microtasks();
+  const retry = poller.reload();
+  await microtasks();
+  assert.equal(dashboardReads, 1);
+  assert.equal(state.loading, true);
+  context.mock.timers.tick(45000);
+  await Promise.all([initial, retry]);
+  assert.equal(dashboardReads, 2);
+  assert.equal(state.dashboard?.update_token, 'recovered');
+  assert.equal(state.loading, false);
+  assert.equal(state.error, null);
+  poller.dispose();
 });

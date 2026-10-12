@@ -84,6 +84,19 @@ export function decimal(value) {
   return exponent >= 0 ? rational(n * 10n ** BigInt(exponent)) : rational(n, 10n ** BigInt(-exponent));
 }
 export const plus = (a, b) => rational(a.n * b.d + b.n * a.d, a.d * b.d);
+// Rental rates divide by independently reported durations. Adding them in a
+// left fold repeatedly takes a GCD against an ever-growing common denominator.
+// Merge similarly sized groups instead: the result is the same exact rational,
+// while the expensive large-integer reductions occur only near the tree root.
+export function sumRationals(values) {
+  function range(from, to) {
+    if (to === from) return rational(0n);
+    if (to - from === 1) return values[from];
+    const middle = from + Math.floor((to - from) / 2);
+    return plus(range(from, middle), range(middle, to));
+  }
+  return range(0, values.length);
+}
 export const multiply = (a, n, d = 1n) => rational(a.n * n, a.d * d);
 export const compare = (a, b) => a.n * b.d < b.n * a.d ? -1 : a.n * b.d > b.n * a.d ? 1 : 0;
 export function decimalText(value, places = 9) {

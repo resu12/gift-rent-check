@@ -3,6 +3,7 @@
 import {canonicalAddress} from './cloud-pricing-core.js';
 import {configuredAnalyticsWallet, utf8Bytes} from './personal-analytics.js';
 import {sha256} from './ton-price-decoder.js';
+import {withStorageReservation} from './storage-admission.js';
 
 export const MARKETAPP_LOGIN_LIMITS = Object.freeze({response_bytes: 1048576, initializer_bytes: 16384,
   challenge_bytes: 2048, timeout_ms: 30000, expiry_ms: 300000, cooldown_ms: 60000, hourly_attempts: 5, clock_skew_ms: 30000});
@@ -92,6 +93,10 @@ export function createMarketappLoginEngine({repository, fetch: request, ownerTel
   async function now() {let value; try {value = await clock();} catch {throw safeError();} if (!Number.isSafeInteger(value) || value <= 0 || value > 8640000000000000 - cap.expiry_ms) throw safeError(); return value;}
   async function savedWallet() {const wallet = configuredAnalyticsWallet(await repository.records()); if (!wallet) throw new MarketappLoginRequestError('Configure a mainnet wallet before testing Marketapp connection.', 'MARKETAPP_LOGIN_WALLET_REQUIRED'); return wallet;}
   async function start(ctx, input = {}) {
+    authorize(ctx);if(!keys(input,[]))invalid();
+    return await withStorageReservation(repository,{kind:'marketapp_login_test',responseBytes:16384,checkpoint:false},()=>startReserved(ctx,input));
+  }
+  async function startReserved(ctx,input) {
     const owner = authorize(ctx); if (!keys(input, [])) invalid();
     const wallet = await savedWallet(), began = await now(), expires = began + cap.expiry_ms;
     // This opaque ID is not a credential. Private owner checks protect all use.
@@ -126,6 +131,10 @@ export function createMarketappLoginEngine({repository, fetch: request, ownerTel
     } finally {if (timer !== null) clearTimeout(timer);}
   }
   async function finish(ctx, input = {}) {
+    authorize(ctx);proofShape(input);
+    return await withStorageReservation(repository,{kind:'marketapp_login_test',responseBytes:16384,checkpoint:false},()=>finishReserved(ctx,input));
+  }
+  async function finishReserved(ctx,input) {
     const owner = authorize(ctx); proofShape(input);
     const wallet = await savedWallet();
     const attempt = await repository.marketappLoginAttempt(input.attempt_id, owner);

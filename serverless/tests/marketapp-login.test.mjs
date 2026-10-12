@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {createCloudRepository} from '../tgcloud/lib/cloud-repository.js';
+import {StorageCapacityError} from '../tgcloud/lib/storage-admission.js';
 import {createMarketappLoginEngine, parseMarketappChallenge, marketappLoginErrorResponse, MarketappLoginRequestError, MARKETAPP_LOGIN_LIMITS, MARKETAPP_LOGIN_MANIFEST} from '../tgcloud/lib/marketapp-login.js';
 
 const ctx = {initData: {user: {id: 12345}}}, wallet = `0:${'11'.repeat(32)}`;
@@ -55,6 +56,36 @@ test('owner authorization precedes database, clock and network for every endpoin
     for (const name of ['startMarketappLoginTest', 'finishMarketappLoginTest', 'cancelMarketappLoginTest']) await assert.rejects(engine[name](unauthorized, {}), /Private access denied/);
   }
   assert.equal(accesses, 0);
+});
+
+test('legacy connection test reserves before HTTP or rate metadata, and denied finish leaves its issued proof unused',async()=>{
+  const t=setup();let reservations=0;
+  t.repository.reserveStorage=async()=>{reservations++;throw new StorageCapacityError();};
+  t.repository.releaseStorage=async()=>assert.fail('a denied reservation cannot be released');
+  await assert.rejects(t.engine.startMarketappLoginTest(ctx),StorageCapacityError);
+  assert.equal(t.requests.length,0);
+  assert.equal(t.database.prepare('SELECT count(*) AS n FROM marketapp_login_attempts').get().n,0);
+  delete t.repository.reserveStorage;
+  const start=await t.engine.startMarketappLoginTest(ctx);
+  t.repository.reserveStorage=async()=>{reservations++;throw new StorageCapacityError();};
+  await assert.rejects(t.engine.finishMarketappLoginTest(ctx,submission(start,t.now())),StorageCapacityError);
+  assert.equal(t.database.prepare('SELECT state FROM marketapp_login_attempts').get().state,'issued');
+  assert.equal(t.requests.length,1);assert.equal(reservations,2);t.database.close();
+});
+
+test('legacy test keeps its operation reservation until the final metadata write and releases it without retaining wallet proof',async()=>{
+  const t=setup();let active=null,acquired=0,released=0;
+  t.repository.reserveStorage=async input=>{assert.equal(active,null);active=input.token;acquired++;};
+  t.repository.releaseStorage=async token=>{assert.equal(token,active);active=null;released++;};
+  const issue=t.repository.issueMarketappLoginAttempt,record=t.repository.recordMarketappLoginOutcome;
+  t.repository.issueMarketappLoginAttempt=async(...args)=>{assert.ok(active);return await issue(...args);};
+  t.repository.recordMarketappLoginOutcome=async(...args)=>{assert.ok(active);return await record(...args);};
+  const start=await t.engine.startMarketappLoginTest(ctx),input=submission(start,t.now());
+  assert.equal(active,null);
+  assert.equal((await t.engine.finishMarketappLoginTest(ctx,input)).compatible,true);
+  assert.equal(active,null);assert.equal(acquired,2);assert.equal(released,2);
+  const row=JSON.stringify(t.database.prepare('SELECT * FROM marketapp_login_attempts').get());
+  assert.ok(!row.includes(input.proof.signature));assert.ok(!row.includes(input.account.walletStateInit));t.database.close();
 });
 
 test('start performs one anonymous GET and persists only scoped expiring metadata', async () => {

@@ -8,7 +8,7 @@ const payload = {version:1,attempt_id:'a'.repeat(64),owner:'123',wallet:'0:'+'0'
 test('vendored cryptographic implementation matches the pinned upstream source checksum',()=>{
  const vendor = readFileSync(new URL('../tgcloud/lib/vendor/tweetnacl-secretbox.js',import.meta.url),'utf8');
  const start = vendor.indexOf('(function(nacl) {');
- const original = vendor.slice(start).replace('})(nacl);\nexport const secretbox = nacl.secretbox;', "})(typeof module !== 'undefined' && module.exports ? module.exports : (self.nacl = self.nacl || {}));");
+ const original = vendor.slice(start).replace(/\/\/ BEGIN PUBLIC ED25519 POINT ADAPTER[\s\S]*?\/\/ END PUBLIC ED25519 POINT ADAPTER\n/, '').replace('})(nacl);\nexport const secretbox = nacl.secretbox;\nexport const verifyDetached = nacl.sign.detached.verify;\nexport const isValidEd25519Point = nacl.isValidEd25519Point;', "})(typeof module !== 'undefined' && module.exports ? module.exports : (self.nacl = self.nacl || {}));");
  assert.equal(createHash('sha256').update(original).digest('hex'),'6bcd37a3b20dce913f82d4b23e4e2b661058b4b953df8a3f8c45d56ac4f72447');
 });
 test('encrypted session envelope round trip, secret is absent from output',()=>{

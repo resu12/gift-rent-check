@@ -11,6 +11,7 @@ from .models import History, _nano_to_gram
 from .pricing import _instant, _key, _load, _stats, _trait_key, _text_decimal, _NANO
 from .pricing_window import window_metadata
 from .util import canonical_json
+from .monetary import bounded_decimal
 
 
 SEMANTICS = "marketapp-rent-history-ui-v1"
@@ -70,10 +71,15 @@ def enrich_rental_pricing(store, gifts, wallet, *, window, context, min_samples=
             rejected["collection_conflict"] += 1
             continue
         # Canonical aliases and page replays must not add statistical weight.
-        normalized = {**item, "address": nft, "collection_address": collection,
-                      "src": _key(item["src"]), "dst": _key(item["dst"])}
-        key = (nft, item["ts"], normalized["src"], normalized["dst"], item.get("is_extend"))
-        groups[key][canonical_json(normalized)] = (item, nft, collection, when)
+        try:
+            normalized = {**item, "address": nft, "collection_address": collection,
+                          "src": _key(item["src"]), "dst": _key(item["dst"])}
+            key = (nft, item["ts"], normalized["src"], normalized["dst"], item.get("is_extend"))
+            groups[key][canonical_json(normalized)] = (item, nft, collection, when)
+        except (ValueError, TypeError):
+            # Legacy extension fields may contain out-of-range numeric values.
+            # Reject that evidence without losing the remaining saved samples.
+            rejected["malformed_history"] += 1
 
     peers = []
     for variants in groups.values():
@@ -92,7 +98,7 @@ def enrich_rental_pricing(store, gifts, wallet, *, window, context, min_samples=
             rejected["missing_or_nonpositive_duration"] += 1
             continue
         try:
-            amount, nano = Decimal(item["price"]), Decimal(item["price_nano"])
+            amount, nano = bounded_decimal(item["price"]), bounded_decimal(item["price_nano"])
             if not amount.is_finite() or not nano.is_finite() or amount < 0 or nano < 0:
                 raise ValueError
             if amount != _nano_to_gram(nano):
@@ -108,12 +114,12 @@ def enrich_rental_pricing(store, gifts, wallet, *, window, context, min_samples=
         if metadata.get("invalid"):
             rejected["invalid_or_conflicting_traits"] += 1
             continue
-        if backdrop and (not metadata.get("backdrop_fresh") or _trait_key(metadata.get("backdrop")) != "black"):
+        if backdrop and _trait_key(metadata.get("backdrop")) != "black":
             rejected["outside_backdrop_scope"] += 1
             continue
         peers.append({"nft": nft, "collection": collection, "when": when, "price": daily,
-                      "model": _trait_key(metadata.get("model")) if metadata.get("model_fresh") else None,
-                      "backdrop": _trait_key(metadata.get("backdrop")) if metadata.get("backdrop_fresh") else None,
+                      "model": _trait_key(metadata.get("model")),
+                      "backdrop": _trait_key(metadata.get("backdrop")),
                       "is_extend": item.get("is_extend"), "tx_hash": item.get("tx_hash")})
 
     metadata = {"source": "rentals", "unit": "GRAM/day", "sample_unit": "rental records", "daily_comparable": True,
@@ -124,7 +130,6 @@ def enrich_rental_pricing(store, gifts, wallet, *, window, context, min_samples=
     recommended = 0
     for gift in gifts:
         nft = _key(gift.get("nft_address"))
-        traits = context["traits"].get(nft, {})
         conflict = nft in context["conflicts"] or len(context["collections"][nft]) > 1
         collection = None if conflict else next(iter(context["collections"][nft]), None)
         comparable = [p for p in peers if p["collection"] == collection] if collection else []
@@ -139,13 +144,13 @@ def enrich_rental_pricing(store, gifts, wallet, *, window, context, min_samples=
             pricing["reason"] = "Portfolio membership is unresolved; comparisons are shown without a recommendation."
         elif collection is None:
             pricing["reason"] = "Collection evidence conflicts." if conflict else "Collection identity is unknown."
-        elif backdrop and (not traits.get("backdrop_fresh") or _trait_key(gift.get("backdrop")) != "black"):
-            pricing["reason"] = "This gift has no current evidence for the selected exact Black backdrop."
+        elif backdrop and _trait_key(gift.get("backdrop")) != "black":
+            pricing["reason"] = "This gift has no valid saved evidence for the selected exact Black backdrop."
         else:
             expected = "model_black" if model and _trait_key(gift.get("backdrop")) == "black" else "model" if model else "collection"
             choices = []
-            if traits.get("model_fresh"):
-                if traits.get("backdrop_fresh") and _trait_key(gift.get("backdrop")) == "black":
+            if model is not None:
+                if _trait_key(gift.get("backdrop")) == "black":
                     choices.append("model_black")
                 if not backdrop:
                     choices.append("model")

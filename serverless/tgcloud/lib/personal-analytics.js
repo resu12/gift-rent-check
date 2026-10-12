@@ -163,6 +163,34 @@ function chart(spec, dates, names, unit) {
   return series;
 }
 
+// Observed October 2026 layout: one daily activity chart supplies both counts
+// and gross volume on separate axes. Keep its raw spec in the snapshot and
+// project the exact parsed numeric lexemes only in memory. JSON.parse followed
+// by JSON.stringify would round financial values before verification.
+function activityCharts(spec) {
+  const fields = ['categories', 'combo', 'gran', 'kind', 'series', 'stacking', 'unit', 'x'];
+  if (!object(spec) || Object.keys(spec).some(key => !fields.includes(key)) || spec.categories !== null ||
+      spec.combo !== true || spec.gran !== 'day' || spec.kind !== 'column' || spec.stacking !== 'normal' || spec.unit !== '' ||
+      !Array.isArray(spec.x) || !Array.isArray(spec.series) || spec.series.length !== 3) invalid();
+  const expected = new Map([['New rentals', {type: 'column', axis: 0, unit: ''}],
+    ['Extensions', {type: 'column', axis: 0, unit: ''}], ['Rent volume', {type: 'line', axis: 1, unit: 'GRAM'}]]);
+  const rows = new Map();
+  for (const row of spec.series) {
+    const shape = object(row) ? expected.get(row.name) : null;
+    if (!shape || rows.has(row.name) || Object.keys(row).some(key => !['name', 'data', 'type', 'axis', 'unit', 'color', 'opacity'].includes(key)) ||
+        row.type !== shape.type || row.unit !== shape.unit || !(row.axis instanceof JsonNumber) || count(row.axis) !== shape.axis ||
+        !Array.isArray(row.data) || row.data.length !== spec.x.length) invalid();
+    // Decorative fields cannot change the interpreted identity, unit or axis.
+    if (row.color !== undefined && (!(row.color instanceof JsonNumber) || count(row.color) > 255)) invalid();
+    if (row.opacity !== undefined && (!(row.opacity instanceof JsonNumber) || fixed(row.opacity, true) > 10000n)) invalid();
+    rows.set(row.name, {name: row.name, data: row.data});
+  }
+  return {
+    income: {gran: 'day', unit: 'GRAM', x: spec.x, series: [rows.get('Rent volume')]},
+    rentals: {gran: 'day', unit: '', x: spec.x, series: [rows.get('New rentals'), rows.get('Extensions')]},
+  };
+}
+
 export function normalizePersonalAnalytics(raw, configuredWallet) {
   if (typeof raw !== 'string' || raw.length > PERSONAL_ANALYTICS_MAX_BYTES || utf8Bytes(raw).length > PERSONAL_ANALYTICS_MAX_BYTES) invalid();
   const source = parseExact(raw);
@@ -178,7 +206,10 @@ export function normalizePersonalAnalytics(raw, configuredWallet) {
     if (!object(entry) || typeof entry.key !== 'string' || typeof entry.spec_raw !== 'string' || charts.has(entry.key)) invalid();
     charts.set(entry.key, parseExact(entry.spec_raw));
   }
-  const income = charts.get('profile.rent.income'), rentals = charts.get('profile.rent.rentals');
+  const combined = charts.has('profile.rent.activity');
+  if (combined && (charts.has('profile.rent.income') || charts.has('profile.rent.rentals'))) invalid();
+  const projected = combined ? activityCharts(charts.get('profile.rent.activity')) : null;
+  const income = projected?.income ?? charts.get('profile.rent.income'), rentals = projected?.rentals ?? charts.get('profile.rent.rentals');
   if (!object(income) || !Array.isArray(income.x) || income.x.length < 1 || income.x.length > 366) invalid();
   const dates = income.x;
   for (let index = 0; index < dates.length; index++) {
@@ -200,7 +231,10 @@ export function normalizePersonalAnalytics(raw, configuredWallet) {
     return {date: day, rent_volume: money(amount), new_rentals: newRentals, extensions: extendsCount, rentals: newRentals + extendsCount};
   });
   const reportedVolume = fixed(summary.get('Rent volume').value);
-  const places = Math.max(2, (summary.get('Rent volume').value.trim().split('.')[1] || '').length);
+  // This observed combined layout renders annual volume as a whole GRAM.
+  // Reconcile at the precision actually displayed, with exact half-up rounding;
+  // keep the legacy separate-chart minimum of two places unchanged.
+  const places = Math.max(combined ? 0 : 2, (summary.get('Rent volume').value.trim().split('.')[1] || '').length);
   const quantum = 10n ** BigInt(4 - places);
   const roundedVolume = (volume + quantum / 2n) / quantum * quantum;
   if (reportedVolume !== roundedVolume || count(summary.get('Rentals').value, false) !== starts + extensions) invalid();

@@ -19,7 +19,7 @@ export function presentResumeSupport(job: Job) {
   };
 }
 
-/** Replaced paused scans stay in Activity; the main view emphasizes current work. */
+/** Saved scans remain intact; the main view emphasizes current work. */
 export function visibleDashboardJobs(jobs: Job[]): Job[] {
   const latestId = Math.max(0, ...jobs.map(job => job.id));
   const active = (job: Job) => job.state === 'running' || job.state === 'queued';

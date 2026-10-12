@@ -1,0 +1,38 @@
+.quick-price-actions{display:flex;align-items:center;gap:6px}
+.quick-price-actions.compact{position:absolute;left:0;top:calc(var(--quick-image-size) - 44px);z-index:1}
+.quick-price-actions.labelled{flex-wrap:wrap;margin:14px 0 0}
+.quick-price-icon{position:relative;display:grid;place-items:center;box-sizing:border-box;width:44px;height:44px;min-width:44px;min-height:44px;padding:6px;border:0;border-radius:8px;color:#e6f0fb;background:transparent;text-decoration:none;cursor:pointer}
+.quick-price-icon::before{content:"";position:absolute;inset:6px;border:1px solid #b2c4d34a;border-radius:8px;background:#101b2de6;box-shadow:0 1px 5px #0003}
+.quick-price-icon>svg{position:relative;width:16px;height:16px}
+.quick-price-icon:hover:not(:disabled){color:#9ceccc}
+.quick-price-icon:hover:not(:disabled)::before{background:#21384a}
+.quick-price-icon:focus-visible{outline:2px solid #79e1bf;outline-offset:3px}
+.quick-price-icon:disabled{opacity:.52;cursor:default}
+.quick-price-actions.labelled .button{min-height:44px}
+.recommended-price-copy{display:inline-flex;align-items:center;justify-content:flex-start;box-sizing:border-box;width:fit-content;min-width:44px;min-height:44px;padding:9px 4px;margin:-9px -4px;border:0;border-radius:5px;background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}
+.recommended-price-copy:hover:not(:disabled){text-decoration:underline;text-decoration-color:#8ee6c566;text-underline-offset:4px}
+.recommended-price-copy:focus-visible{outline:2px solid #79e1bf;outline-offset:2px}
+.recommended-price-copy:disabled{cursor:progress}
+/* Preserve the number's flow height while its transparent touch target stays 44px. */
+.pricing-gift-card-prices .recommended-price-copy,.inventory-card-prices .recommended-price-copy{font-size:21px;line-height:1.2;height:44px;padding:0 4px;margin:calc((1.2em - 44px)/2) -4px}
+.quick-price-toast{position:fixed;left:50%;bottom:100px;transform:translateX(-50%);z-index:30;white-space:nowrap;padding:10px 16px;border:1px solid #5caa92;border-radius:10px;background:#142b28;color:#a0eacc;box-shadow:0 4px 20px #0005;font-size:14px;pointer-events:none}
+.quick-price-range-warning{font-size:12px;line-height:1.5;color:#dfbf8c;margin:10px 0}
+.quick-price-copy-dialog{box-sizing:border-box;width:min(380px,calc(100% - 32px));border:1px solid #405569;border-radius:14px;background:#13202d;color:#e3edf8;padding:18px;box-shadow:0 10px 50px #0007}
+.quick-price-copy-dialog::backdrop{background:#050b13aa}
+.quick-price-copy-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.quick-price-copy-dialog p{font-size:13px;line-height:1.5;color:#b4c4d5}
+.quick-price-copy-dialog input{box-sizing:border-box;width:100%;min-height:48px;background:#0c1722;color:#e8f3fc;border:1px solid #4e6980;border-radius:8px;padding:10px;font-family:inherit;font-size:22px;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums}
+/* The image button determines overlay geometry; controls add no card height. */
+.pricing-gift-card.quick-actions,.inventory-gift-card.quick-actions{position:relative;--quick-image-size:100cqw;container-type:inline-size}
+.pricing-gift-card .quick-price-icon::before,.inventory-gift-card .quick-price-icon::before{inset:auto auto 4px 4px;box-sizing:border-box;width:24px;height:24px;border-radius:6px}
+.pricing-gift-card .quick-price-icon>svg,.inventory-gift-card .quick-price-icon>svg{position:absolute;left:9px;bottom:9px;width:14px;height:14px}
+.pricing-gift-card-main,.inventory-gift-card-main{display:flex;flex-direction:column;align-items:stretch;gap:0;min-width:0;width:100%;padding:0;border:0;border-radius:14px;background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}
+.pricing-gift-card-main:focus-visible,.inventory-gift-card-main:focus-visible{outline:2px solid #79e1bf;outline-offset:4px}
+.pricing-detail-cell .quick-price-actions.compact{position:static;display:flex;gap:4px}
+.pricing-detail-cell .quick-price-icon{background:transparent;box-shadow:none;border:0}
+.pricing-detail-cell .quick-price-icon::before{display:none}
+.pricing-detail-cell .pricing-row-actions{display:flex;align-items:center;gap:4px}
+@media(max-width:760px){.pricing-detail-cell .pricing-row-actions{gap:4px}.pricing-table .pricing-detail-cell:has(.pricing-row-actions){position:static;grid-column:1/-1;display:flex;justify-content:flex-end;margin-top:8px}.pricing-table:has(.pricing-row-actions) .pricing-identity{padding-right:0!important}}
+@media(max-width:700px){.pricing-gift-card-prices .recommended-price-copy,.inventory-card-prices .recommended-price-copy{font-size:20px}}
+@media(max-width:380px){.pricing-gift-card-prices .recommended-price-copy,.inventory-card-prices .recommended-price-copy{font-size:18px}}
+@media(prefers-reduced-motion:reduce){.pricing-gift-card-main,.inventory-gift-card-main{transition:none}}

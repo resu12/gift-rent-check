@@ -1,0 +1,31 @@
+.activity-connections{margin:0 0 24px;padding:20px 22px;border:1px solid var(--line,#252e3c);border-radius:16px;background:var(--panel,#131b26)}
+.activity-connections>h2{font-size:19px;margin:0 0 4px}
+.activity-refresh-history{margin:0 0 18px;color:var(--muted,#9badbf);font-size:13px}
+.activity-refresh-history>summary{cursor:pointer;min-height:44px;display:flex;align-items:center;gap:8px;list-style:none}
+.activity-refresh-history>summary::before{content:'▸'}
+.activity-refresh-history[open]>summary::before{transform:rotate(90deg)}
+.activity-refresh-history>summary::-webkit-details-marker{display:none}
+.activity-connection-row{padding:14px 0}
+.activity-connection-row+.activity-connection-row,.activity-wallet-slot+.activity-connection-row{border-top:1px solid var(--line,#252e3c)}
+.activity-connection-heading{display:flex;align-items:center;gap:10px;margin-bottom:5px;flex-wrap:wrap}
+.activity-connection-heading>svg{color:var(--teal);flex:none}
+.activity-connection-heading h3{font-size:16px;margin:0;flex:1}
+.connection-status{color:var(--muted,#9badbf);font-size:12px}
+.connection-status.warning{color:var(--amber)}
+.activity-connection-note{font-size:12px;color:var(--muted,#9badbf);line-height:1.5;margin:0 0 9px}
+.activity-connection-actions{display:inline-flex;vertical-align:middle;align-items:center;gap:14px;flex-wrap:wrap}
+.activity-wallet-address{display:block;color:var(--text);font-size:12px;margin-bottom:9px}
+.activity-access-details{display:inline-block;vertical-align:middle;margin:0 0 0 10px;color:var(--muted,#9badbf);font-size:12px;line-height:1.5}
+.activity-access-details[open]{display:block;margin:4px 0 0}
+.activity-connection-row>.button{vertical-align:middle}
+.activity-access-details>summary{cursor:pointer;min-height:44px;align-content:center;width:fit-content}
+.activity-access-details>p,.activity-access-details .marketapp-settings-note{margin:0 0 8px}
+.activity-access-details .wallet-connection-address{margin:0 0 10px}
+.activity-api-key form{margin-top:15px;max-width:550px}
+.activity-api-key input[type=password]{width:100%;min-height:44px;background:var(--input,#101823);color:var(--text);border:1px solid var(--line,#252e3c);border-radius:8px;padding:10px 12px}
+.activity-api-key .marketapp-settings-note,.activity-api-key .marketapp-network-note{font-size:12px;line-height:1.5;color:var(--muted,#9badbf)}
+.activity-api-key .marketapp-settings-actions{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:12px}
+.activity-api-key .marketapp-key-label{display:block;margin-bottom:7px;font-size:13px}
+.activity-api-key .marketapp-settings-error{color:#efb5b5}
+.activity-api-key .marketapp-settings-success{color:var(--teal)}
+@media(max-width:600px){.activity-connections{padding:16px;margin-bottom:20px}.activity-connections>h2{font-size:18px}.activity-connection-heading{gap:8px}.activity-connection-row{padding:12px 0}.activity-connection-actions .button{min-height:44px}}

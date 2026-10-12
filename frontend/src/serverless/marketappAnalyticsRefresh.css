@@ -1,5 +1,32 @@
-.marketapp-analytics-refresh-actions{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap}
-.marketapp-analytics-refresh-actions label{display:grid;gap:5px;font-size:12px;color:#95adbf}
-.marketapp-analytics-refresh-actions select{min-height:44px;min-width:146px;font-size:14px;background:#172332;color:#d4e6ec;border:1px solid #344d63;border-radius:7px;padding:7px 28px 7px 10px;color-scheme:dark}
+.marketapp-analytics-refresh-actions{display:flex;align-items:center;gap:8px}
+.marketapp-analytics-refresh-actions .button{white-space:nowrap;min-width:124px}
 .marketapp-analytics-refresh .marketapp-analytics-refreshed{display:flex;align-items:center;gap:7px;color:#a5dfc8}
-@media(max-width:380px){.marketapp-analytics-refresh-actions{gap:8px}.marketapp-analytics-refresh-actions select{min-width:128px}}
+.marketapp-connection-options{margin-top:8px;font-size:12px;color:#95adbf}
+.marketapp-connection-options>summary{display:flex;align-items:center;gap:7px;min-height:44px;cursor:pointer;list-style:none}
+.marketapp-connection-options>summary::-webkit-details-marker{display:none}
+.marketapp-connection-options>summary::before{content:'▸';font-size:13px;transition:transform .15s ease}
+.marketapp-connection-options[open]>summary::before{transform:rotate(90deg)}
+.marketapp-connection-options>summary>span{margin-left:auto;color:#adc3d3;font-size:11px}
+.marketapp-remembered-login{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px}
+.marketapp-remembered-login .marketapp-login-consent{flex:1}
+.marketapp-remembered-login .text-button{min-height:44px;padding:8px}
+.marketapp-remember-login{display:grid;gap:3px;margin-top:10px}
+.marketapp-remember-login label{display:flex;align-items:center;gap:8px;min-height:44px;font-size:13px;color:#d4e6ec;cursor:pointer}
+.marketapp-remember-login input{width:17px;height:17px;accent-color:#8acbb6}
+.marketapp-remember-login input:focus-visible{outline:2px solid #8acbb6;outline-offset:3px}
+.marketapp-remember-login small{font-size:11px;color:#95adbf}
+.marketapp-connection-options .marketapp-remember-login{margin-top:0;margin-bottom:8px}
+.marketapp-analytics-refresh .marketapp-login-consent{margin:7px 0 0}
+.marketapp-analytics-refresh.marketapp-activity-connection{margin-top:0;padding:14px 0;border-top:1px solid var(--line,#304054);font-size:14px}
+.marketapp-activity-connection .activity-connection-heading{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:5px}
+.marketapp-activity-connection .activity-connection-heading>svg{color:var(--teal,#80e1c7);flex:none}
+.marketapp-activity-connection .activity-connection-heading h3{margin:0;flex:1;font-size:16px}
+.marketapp-activity-connection .connection-status{margin-left:auto;color:var(--muted,#a1b3c4);font-size:12px}
+.public-account-connections .marketapp-activity-connection{border-top:0;border-bottom:1px solid var(--line,#304054)}
+.marketapp-activity-connection-actions{display:inline-flex;vertical-align:middle;align-items:center;flex-wrap:wrap;gap:10px;margin-top:0}
+.marketapp-activity-connection .marketapp-login-consent{font-size:12px;line-height:1.5}
+.marketapp-activity-connection .activity-connection-note{font-size:12px;line-height:1.5;margin:0 0 9px}
+.marketapp-activity-connection .marketapp-connection-approval{margin:0 0 9px}
+.marketapp-activity-connection .activity-access-details .marketapp-login-consent{margin:0 0 8px}
+.marketapp-activity-connection .button{min-height:44px}
+@media(max-width:600px){.marketapp-analytics-refresh.marketapp-activity-connection{padding:12px 0}}

@@ -26,6 +26,8 @@ function snapshot(days: MarketappAnalyticsPeriod = 30): PersonalRentalAnalytics 
 }
 const result = (days: MarketappAnalyticsPeriod = 30): MarketappAnalyticsRefreshResult => ({ attempt_id: id, authenticated: true, analytics_refreshed: true, snapshot: snapshot(days) });
 const status = (state: NonNullable<MarketappAnalyticsRefreshStatus['attempt']>['state'] = 'saved', error_code?: string): MarketappAnalyticsRefreshStatus => ({ attempt: { attempt_id: id, state, period_days: 30, updated_at: new Date(now).toISOString(), ...(error_code ? { error_code } : {}) } });
+const rememberedStatus = (remembered = true): MarketappAnalyticsRefreshStatus => ({ attempt: null,
+  session: { remembered, expires_at: remembered ? new Date(now + 86400000).toISOString() : null } });
 const tick = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 function setup(overrides: Partial<MarketappAnalyticsRefreshAdapter> = {}, factoryOverride?: MarketappWalletFactory, savedReload?: () => Promise<void>) {
@@ -59,7 +61,7 @@ test('remount reconciliation restores a visible failure without wallet or authen
   let reads = 0;
   const h = setup({ getStatus: async () => { reads++; return status('failed', 'MARKETAPP_REFRESH_PAGE_CHANGED'); } });
   assert.equal(await h.controller.reconcile(), true);
-  assert.deepEqual(h.controller.view, { phase: 'failed', periodDays: 30, failure: 'page_changed' });
+  assert.deepEqual(h.controller.view, { phase: 'failed', periodDays: 30, failure: 'page_changed', outcomeAt: new Date(now).toISOString() });
   assert.equal(marketappAnalyticsRefreshFailure(h.controller.view.failure).code, 'MA-PAGE');
   assert.equal(reads, 1); assert.equal(h.starts, 0); assert.equal(h.finishes.length, 0); assert.equal(h.callbacks.length, 0);
 });
@@ -104,7 +106,7 @@ test('status errors, malformed responses and lost read replies cannot disappear 
 test('a dashboard reload rejection remains a visible saved-but-reload-needed result', async () => {
   const h = setup({}, undefined, async () => { throw new Error('Private dashboard transport details'); });
   await h.controller.start(30); h.callbacks[0].approved(account, proof, device); await tick(); await tick();
-  assert.deepEqual(h.controller.view, { phase: 'saved', periodDays: 30, failure: 'reload_failed' });
+  assert.deepEqual(h.controller.view, { phase: 'saved', periodDays: 30, failure: 'reload_failed', capturedAt: snapshot().captured_at, fingerprint: snapshot().fingerprint, outcomeAt: new Date(now).toISOString() });
   assert.equal(marketappAnalyticsRefreshFailure(h.controller.view.failure).code, 'MA-RELOAD');
   assert.equal(JSON.stringify(h.views).includes('Private dashboard'), false);
 });
@@ -175,10 +177,39 @@ test('refresh starts only on explicit action and submits one full approval befor
   assert.equal(h.controller.view.periodDays, 365); assert.equal(h.controller.choose('synthetic'), 'https://wallet.example/connect');
   assert.equal(h.controller.choose('synthetic'), null); assert.equal(h.connects, 1);
   h.callbacks[0].approved(account, proof, device); h.callbacks[0].approved(account, proof, device); await tick();
-  assert.deepEqual(h.controller.view, { phase: 'saved', periodDays: 365 }); assert.equal(h.finishes.length, 1); assert.equal(h.saved.length, 1);
+  assert.deepEqual(h.controller.view, { phase: 'saved', periodDays: 365, capturedAt: snapshot(365).captured_at, fingerprint: snapshot(365).fingerprint, outcomeAt: new Date(now).toISOString() }); assert.equal(h.finishes.length, 1); assert.equal(h.saved.length, 1);
   assert.equal(h.saved[0].daily.length, 365); assert.equal(h.closes, 1); assert.deepEqual(h.cancelled, []);
   const visible = JSON.stringify(h.views);
   for (const secret of [challenge().session_envelope, proof.payload, proof.signature, account.walletStateInit, account.publicKey, device.appName]) assert.equal(visible.includes(secret), false);
+});
+
+test('validated manual save retains capture evidence while loading and does not start another refresh before the callback settles', async () => {
+  const reload = deferred<void>(), h = setup({}, undefined, () => reload.promise);
+  await h.controller.start(30); h.callbacks[0].approved(account, proof, device); await tick();
+  assert.deepEqual(h.controller.view, { phase: 'saved', periodDays: 30, capturedAt: snapshot().captured_at,
+    fingerprint: snapshot().fingerprint, loadingSaved: true, outcomeAt: new Date(now).toISOString() });
+  assert.equal(await h.controller.start(365), false); assert.equal(h.starts, 1);
+  reload.resolve(); await tick(); await tick();
+  assert.deepEqual(h.controller.view, { phase: 'saved', periodDays: 30, capturedAt: snapshot().captured_at, fingerprint: snapshot().fingerprint, outcomeAt: new Date(now).toISOString() });
+});
+
+test('status-only saved recovery never invents a capture or fingerprint', async () => {
+  const reload = deferred<void>(), h = setup({ getStatus: async () => status('saved') }, undefined, () => reload.promise);
+  const recovering = h.controller.reconcile(); await tick();
+  assert.deepEqual(h.controller.view, { phase: 'saved', periodDays: 30, loadingSaved: true, outcomeAt: new Date(now).toISOString() });
+  reload.resolve(); await recovering;
+  assert.deepEqual(h.controller.view, { phase: 'saved', periodDays: 30, outcomeAt: new Date(now).toISOString() });
+  await h.controller.reconcile(); assert.equal(h.controller.view.capturedAt, undefined); assert.equal(h.controller.view.fingerprint, undefined);
+});
+
+test('failed reload evidence survives same-attempt status reconciliation and a later successful reload', async () => {
+  let reloads = 0;
+  const h = setup({ getStatus: async () => status('saved') }, undefined, async () => { if (++reloads < 2) throw new Error('Private reload error'); });
+  await h.controller.start(30); h.callbacks[0].approved(account, proof, device); await tick(); await tick();
+  assert.equal(h.controller.view.failure, 'reload_failed'); assert.equal(h.controller.view.capturedAt, snapshot().captured_at);
+  await h.controller.reconcile(); assert.equal(h.controller.view.failure, undefined);
+  assert.equal(h.controller.view.capturedAt, snapshot().captured_at); assert.equal(h.controller.view.fingerprint, snapshot().fingerprint);
+  assert.equal(h.finishes.length, 1); assert.equal(h.saved.length, 1); assert.equal(h.recovered, 1);
 });
 
 test('missing public account evidence, wrong account and testnet approval never reach provider login', async () => {
@@ -197,6 +228,7 @@ test('safe backend errors preserve previous analytics and never reflect provider
     ['MARKETAPP_REFRESH_FAILED', 'update_failed'], ['MARKETAPP_REFRESH_RATE_LIMIT', 'rate_limited'], ['MARKETAPP_REFRESH_EXPIRED', 'expired'],
     ['MARKETAPP_REFRESH_INVALID_INPUT', 'invalid_input'], ['MARKETAPP_REFRESH_PRIVATE_ACCESS_DENIED', 'access_denied'],
     ['MARKETAPP_REFRESH_WALLET_REQUIRED', 'wallet_required'], ['MARKETAPP_REFRESH_AUTH_REJECTED', 'auth_rejected'], ['MARKETAPP_REFRESH_PAGE_CHANGED', 'page_changed'],
+    ['STORAGE_CAPACITY_PAUSED', 'storage_capacity'], ['STORAGE_FULL', 'storage_capacity'],
   ] as const;
   for (const [code, reason] of failures) {
     const h = setup({ finish: async () => { throw { code, message: 'Private cookies nonce signature state-init' }; } });
@@ -302,4 +334,119 @@ test('cloud refresh adapter sends only selected period, explicit evidence and op
   assert.deepEqual(calls[1].input.account, account); assert.deepEqual(calls[1].input.device, device);
   assert.deepEqual(calls[2].input, { attempt_id: id });
   assert.deepEqual(calls[3].input, {});
+});
+
+test('remembered login status accepts public expiry metadata and rejects credential-bearing or malformed envelopes', () => {
+  assert.equal(isSafeMarketappRefreshStatus(rememberedStatus()), true);
+  assert.equal(isSafeMarketappRefreshStatus(rememberedStatus(false)), true);
+  assert.equal(isSafeMarketappRefreshStatus({ ...status('failed', 'MARKETAPP_REFRESH_RECONNECT_REQUIRED'), session: rememberedStatus(false).session }), true);
+  for (const session of [null, {}, { remembered: true, expires_at: null }, { remembered: false, expires_at: new Date(now).toISOString() },
+    { remembered: 'true', expires_at: new Date(now).toISOString() }, { remembered: true, expires_at: '2026-02-30T12:00:00Z' },
+    { ...rememberedStatus().session, cookie: 'private cookie' }]) assert.equal(isSafeMarketappRefreshStatus({ attempt: null, session }), false);
+});
+
+test('opening checks remembered login before any approval and saved refresh bypasses the wallet SDK', async () => {
+  const pending = deferred<MarketappAnalyticsRefreshStatus>(); let reads = 0, requests = 0;
+  const h = setup({ getStatus: () => ++reads === 1 ? pending.promise : Promise.resolve({ ...status(), session: rememberedStatus().session }),
+    refreshSaved: async days => { requests++; return result(days); }, disconnectSession: async () => ({ disconnected: true }) });
+  assert.equal(await h.controller.start(30), false);
+  const checking = h.controller.reconcile(); assert.equal(await h.controller.start(30), false);
+  pending.resolve(rememberedStatus()); await checking;
+  assert.equal(h.controller.view.sessionReady, true); assert.equal(h.controller.view.session?.remembered, true);
+  assert.equal(await h.controller.start(30), true);
+  assert.equal(requests, 1); assert.equal(h.starts, 0); assert.equal(h.callbacks.length, 0); assert.equal(h.finishes.length, 0);
+  assert.equal(h.saved.length, 1); assert.equal(h.controller.view.phase, 'saved');
+});
+
+test('remember consent is explicit, travels only on new approval, and saved status confirms retention', async () => {
+  const consent: (boolean | undefined)[] = []; let stored = false;
+  const h = setup({ getStatus: async () => rememberedStatus(stored), refreshSaved: async days => result(days), disconnectSession: async () => ({ disconnected: true }),
+    start: async (days, _signal, remember) => { consent.push(remember); return challenge(days); },
+    finish: async issued => { stored = true; return result(issued.period_days); } });
+  await h.controller.reconcile(); await h.controller.start(365, true);
+  assert.deepEqual(consent, [true]); assert.equal(h.controller.view.session?.remembered, false);
+  h.callbacks[0].approved(account, proof, device); await tick(); await tick();
+  assert.equal(h.controller.view.session?.remembered, true); assert.equal(h.saved.length, 1);
+  const legacyConsent: (boolean | undefined)[] = [];
+  const old = setup({ start: async (days, _signal, remember) => { legacyConsent.push(remember); return challenge(days); } });
+  await old.controller.start(30, true); assert.deepEqual(legacyConsent, [false]);
+});
+
+test('expired saved login fails clearly and only the next explicit click opens fresh approval', async () => {
+  let requests = 0;
+  const h = setup({ getStatus: async () => rememberedStatus(), refreshSaved: async () => { requests++; throw { code: 'MARKETAPP_REFRESH_RECONNECT_REQUIRED', message: 'private cookie' }; }, disconnectSession: async () => ({ disconnected: true }) });
+  await h.controller.reconcile(); assert.equal(await h.controller.start(365), false);
+  assert.equal(h.controller.view.failure, 'reconnect_required'); assert.equal(h.controller.view.session?.remembered, false);
+  assert.equal(h.callbacks.length, 0); assert.equal(h.saved.length, 0); assert.equal(h.starts, 0);
+  assert.equal(JSON.stringify(h.views).includes('private cookie'), false);
+  assert.equal(await h.controller.start(365), true); assert.equal(h.starts, 1); assert.equal(h.callbacks.length, 1); assert.equal(requests, 1);
+});
+
+test('saved refresh keeps login after page errors and enforces the shared rate countdown', async () => {
+  let requests = 0;
+  const h = setup({ getStatus: async () => rememberedStatus(), refreshSaved: async () => { requests++; throw new CloudError('MARKETAPP_REFRESH_RATE_LIMIT', 'Fixed', { retry_at: '2030-01-01T12:00:42.000Z', retry_after_seconds: 42, reason: 'hourly' }); }, disconnectSession: async () => ({ disconnected: true }) });
+  await h.controller.reconcile(); await h.controller.start(30); assert.equal(h.controller.view.rateLimit?.remainingSeconds, 42);
+  assert.equal(h.controller.view.session?.remembered, true); assert.equal(await h.controller.start(365), false); assert.equal(requests, 1);
+  h.controller.dispose();
+  const page = setup({ getStatus: async () => rememberedStatus(), refreshSaved: async () => { throw { code: 'MARKETAPP_REFRESH_PAGE_CHANGED' }; } });
+  await page.controller.reconcile(); await page.controller.start(30); assert.equal(page.controller.view.failure, 'page_changed'); assert.equal(page.controller.view.session?.remembered, true);
+});
+
+test('saved refresh validates wallet period and result identity before importing', async () => {
+  for (const invalid of [{ ...result(), attempt_id: 'invalid' }, result(365), { ...result(), snapshot: { ...snapshot(), wallet: `0:${'34'.repeat(32)}` } }]) {
+    const h = setup({ getStatus: async () => rememberedStatus(), refreshSaved: async () => invalid });
+    await h.controller.reconcile(); await h.controller.start(30);
+    assert.equal(h.controller.view.failure, 'invalid_response'); assert.equal(h.saved.length, 0); assert.equal(h.callbacks.length, 0);
+  }
+});
+
+test('disconnect is bounded and prevents refresh overlap; success forgets login without deleting analytics', async () => {
+  const pending = deferred<{ disconnected: true }>(); let requests = 0;
+  const h = setup({ getStatus: async () => rememberedStatus(), refreshSaved: async days => result(days),
+    disconnectSession: async () => { requests++; return pending.promise; } });
+  await h.controller.reconcile(); const disconnecting = h.controller.disconnect();
+  assert.equal(h.controller.view.phase, 'disconnecting'); assert.equal(await h.controller.start(30), false); assert.equal(await h.controller.disconnect(), false);
+  pending.resolve({ disconnected: true }); assert.equal(await disconnecting, true);
+  assert.equal(h.controller.view.session?.remembered, false); assert.equal(h.controller.view.phase, 'ready'); assert.equal(requests, 1); assert.equal(h.saved.length, 0);
+  assert.equal(await h.controller.start(30), true); assert.equal(h.callbacks.length, 1);
+});
+
+test('disconnect failure remains visible and navigation aborts pending work without exposing session fields', async () => {
+  const h = setup({ getStatus: async () => rememberedStatus(), refreshSaved: async days => result(days), disconnectSession: async () => { throw new Error('private cookie credential'); } });
+  await h.controller.reconcile(); assert.equal(await h.controller.disconnect(), false);
+  assert.equal(h.controller.view.failure, 'disconnect_failed'); assert.equal(h.controller.view.session?.remembered, true); assert.equal(JSON.stringify(h.views).includes('private cookie'), false);
+  const pending = deferred<{ disconnected: true }>(); let signal: AbortSignal | undefined;
+  const disposal = setup({ getStatus: async () => rememberedStatus(), refreshSaved: async days => result(days), disconnectSession: async abort => { signal = abort; return pending.promise; } });
+  await disposal.controller.reconcile(); const disconnecting = disposal.controller.disconnect(); const count = disposal.views.length;
+  disposal.controller.dispose(); assert.equal(signal?.aborted, true); assert.equal(disposal.timers.size, 0);
+  pending.resolve({ disconnected: true }); assert.equal(await disconnecting, false); assert.equal(disposal.views.length, count);
+});
+
+test('cancelled and disposed saved refresh replies never import or silently restart login', async () => {
+  const pending = deferred<MarketappAnalyticsRefreshResult>(); let signal: AbortSignal | undefined;
+  const h = setup({ getStatus: async () => rememberedStatus(), refreshSaved: async (_days, abort) => { signal = abort; return pending.promise; } });
+  await h.controller.reconcile(); const refreshing = h.controller.start(30); assert.equal(await h.controller.start(30), false);
+  h.controller.cancel(); assert.equal(signal?.aborted, true); assert.equal(h.controller.view.phase, 'cancelled');
+  pending.resolve(result()); assert.equal(await refreshing, false); assert.equal(h.saved.length, 0); assert.equal(h.callbacks.length, 0);
+});
+
+test('legacy status leaves original approval usable and hides unsupported remembering', async () => {
+  const h = setup({ getStatus: async () => ({ attempt: null }), refreshSaved: async days => result(days), disconnectSession: async () => ({ disconnected: true }) });
+  await h.controller.reconcile(); await h.controller.start(30, true);
+  assert.equal(h.controller.view.session, undefined); assert.equal(h.starts, 1); assert.equal(h.callbacks.length, 1);
+});
+
+test('cloud adapter sends remembered consent and saved refresh through dedicated bounded routes', async () => {
+  const calls: { endpoint: CloudEndpoint; input: Record<string, unknown> }[] = [];
+  const adapter = createCloudDashboardAdapter({ async call<T>(endpoint: CloudEndpoint, input: Record<string, unknown> = {}) {
+    calls.push({ endpoint, input }); return (endpoint === 'startMarketappAnalyticsRefresh' ? challenge() : endpoint === 'refreshSavedMarketappAnalytics' ? result(365) : { disconnected: true }) as T;
+  } }).marketappAnalyticsRefresh!;
+  await adapter.start(30, undefined, true); await adapter.start(30, undefined, false);
+  await adapter.refreshSaved!(365); await adapter.disconnectSession!();
+  assert.deepEqual(calls, [
+    { endpoint: 'startMarketappAnalyticsRefresh', input: { period_days: 30, remember_login: true } },
+    { endpoint: 'startMarketappAnalyticsRefresh', input: { period_days: 30 } },
+    { endpoint: 'refreshSavedMarketappAnalytics', input: { period_days: 365 } },
+    { endpoint: 'disconnectMarketappAnalyticsSession', input: {} },
+  ]);
 });

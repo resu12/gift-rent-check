@@ -66,7 +66,7 @@ def test_nonblack_and_unknown_subjects_cannot_receive_black_scoped_recommendatio
     assert pricing["recommended_price_per_day"] is None
 
 
-def test_black_rental_collection_includes_own_gifts_and_other_models_only_with_fresh_black_traits(store):
+def test_black_rental_collection_includes_own_gifts_and_other_models_with_valid_saved_traits(store):
     ton_traits(store)
     ton_traits(store, nft=addr(10), model="Emerald")
     ton_traits(store, nft=addr(11), backdrop="Onyx Black")
@@ -74,10 +74,48 @@ def test_black_rental_collection_includes_own_gifts_and_other_models_only_with_f
     history(store, [event(2, price="0.3"), event(10, price="0.9"), event(11, price="30"),
                     event(12, price="30"), event(13, price="30")])
     pricing, summary = scoped_price(store, source="rentals", timeframe="30d")
-    assert pricing["collection"]["mean"] == "0.2"
-    assert pricing["collection"]["sample_count"] == pricing["collection"]["distinct_nft_count"] == 2
-    assert pricing["model"]["mean"] == pricing["model_black"]["mean"] == "0.1"
-    assert summary["rental_record_count"] == 2
+    assert pricing["collection"]["mean"] == "3.466666667"
+    assert pricing["collection"]["sample_count"] == pricing["collection"]["distinct_nft_count"] == 3
+    assert pricing["model"]["mean"] == pricing["model_black"]["mean"] == "5.05"
+    assert summary["rental_record_count"] == 3
+    assert pricing["recommended_price_per_day"] == "3.466666667"
+    assert pricing["basis"] == "collection"
+
+
+@pytest.mark.parametrize("source", ["listings", "rentals"])
+@pytest.mark.parametrize("invalid_attributes", [
+    [{"trait_type": "Backdrop", "value": "Black"}, {"trait_type": "Backdrop", "value": "Blue"}],
+    [{"trait_type": "Backdrop", "value": None}],
+])
+def test_newer_invalid_saved_backdrop_does_not_revive_older_black_evidence(store, source, invalid_attributes):
+    ton_traits(store, when=OLD)
+    for number in range(10, 13):
+        ton_traits(store, nft=addr(number), when=OLD)
+    # Even when both snapshots are old, a later invalid value is not replaced
+    # by the earlier good value. Apply this to both a subject and a peer.
+    for nft in (addr(2), addr(12)):
+        ton_traits(store, nft=nft, when="2026-10-07T10:00:00+00:00", values=invalid_attributes)
+    listings(store, [listing(i, model=None, backdrop=None) for i in range(10, 13)])
+    history(store, [event(i) for i in range(10, 13)])
+    subject = gift()
+    pricing, summary = scoped_price(store, subject, source=source, timeframe="24h")
+    assert subject["backdrop"] is None
+    assert pricing["collection"]["sample_count"] == 2
+    assert pricing["recommended_price_per_day"] is None
+    assert summary["excluded_counts"]["invalid_or_conflicting_traits"] == 1
+
+
+@pytest.mark.parametrize("source", ["listings", "rentals"])
+def test_future_saved_black_traits_never_supply_subject_or_peer_membership(store, source):
+    ton_traits(store, when="2026-10-09T11:00:00+00:00")
+    for number in range(10, 13):
+        ton_traits(store, nft=addr(number), when="2026-10-09T11:00:00+00:00")
+    listings(store, [listing(i, model=None, backdrop=None) for i in range(10, 13)])
+    history(store, [event(i) for i in range(10, 13)])
+    subject = gift()
+    pricing, _ = scoped_price(store, subject, source=source, timeframe="24h")
+    assert subject["model"] is subject["backdrop"] is None
+    assert pricing["collection"]["sample_count"] == 0
     assert pricing["recommended_price_per_day"] is None
 
 

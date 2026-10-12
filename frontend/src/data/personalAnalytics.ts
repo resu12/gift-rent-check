@@ -1,5 +1,5 @@
 import type { PersonalRentalAnalytics } from './types.ts';
-import { canonicalMainnetAddress } from '../serverless/walletIdentity.ts';
+import { canonicalMainnetAddress, friendlyMainnetAddress } from '../serverless/walletIdentity.ts';
 
 export type AnalyticsGrouping = 'day' | 'week' | 'month' | 'year';
 export interface AnalyticsBucket {
@@ -125,16 +125,8 @@ export function personalAnalyticsUrl(wallet: string | null, snapshot?: PersonalR
       }
     } catch { /* Only the fixed Marketapp origin is linked below. */ }
   }
-  const raw = canonicalMainnetAddress(wallet);
-  if (!raw) return 'https://marketapp.org/';
-  const [workchain, hash] = raw.split(':');
-  const bytes = Uint8Array.from([0x11, Number(workchain) & 255, ...hash.match(/../g)!.map(byte => Number.parseInt(byte, 16))]);
-  let crc = 0;
-  for (const byte of bytes) {
-    crc ^= byte << 8;
-    for (let bit = 0; bit < 8; bit++) crc = ((crc << 1) ^ ((crc & 0x8000) ? 0x1021 : 0)) & 0xffff;
-  }
-  const friendly = btoa(String.fromCharCode(...bytes, crc >> 8, crc & 255)).replace(/\+/g, '-').replace(/\//g, '_');
+  const friendly = friendlyMainnetAddress(wallet);
+  if (!friendly) return 'https://marketapp.org/';
   return `https://marketapp.org/user/${friendly}/?${query()}`;
 }
 

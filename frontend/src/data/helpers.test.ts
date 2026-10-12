@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { filterGifts, filterPricingGifts, formatAmount, formatPriceDifference, giftGroup, hasRecommendation, isExactBlack, priceDifference, pricingBasisLabel, relativeTime, safeExternalUrl, sortPricingGifts } from './helpers.ts';
+import { filterGifts, filterPricingGifts, formatAmount, formatPriceDifference, giftGroup, hasRecommendation, isAvailableForRent, isExactBlack, matchesGiftFilter, priceDifference, pricingBasisLabel, relativeTime, safeExternalUrl, sortPricingGifts } from './helpers.ts';
 import type { Gift } from './types.ts';
 import { DEFAULT_PRICING, historyCollectionError, pricingQuery, selectTimeframe, sourceDefaults, timeframeLabel, TIMEFRAME_OPTIONS, validDateRange } from './pricingSelection.ts';
 import { createLocalDashboardAdapter } from './local.ts';
@@ -34,6 +34,72 @@ test('sales remain distinct from rent listings and a supported UI observation ma
   assert.equal(giftGroup({ ...base, state: 'unknown', ui_state: 'for_rent' }), 'for_rent');
 });
 
+test('availability includes saved listings and verified idle contracts once while retaining their evidence groups', () => {
+  const listed = { ...base, id: 'listed', state: 'unknown', ui_state: 'for_rent' };
+  const idle = { ...base, id: 'current-idle', ui_state: null, status_is_historical: false };
+  const both = { ...idle, id: 'listed-idle', ui_state: 'for_rent' };
+  const gifts = [listed, idle, both], before = structuredClone(gifts);
+  assert.deepEqual(filterGifts(gifts, '', 'available', ''), gifts);
+  assert.deepEqual(filterGifts(gifts, '', 'for_rent', ''), [listed, both]);
+  assert.equal(giftGroup(idle), 'idle'); assert.equal(giftGroup(both), 'for_rent');
+  assert.equal(isAvailableForRent(listed), true); assert.equal(matchesGiftFilter(idle, 'available'), true);
+  assert.equal(matchesGiftFilter(idle, 'for_rent'), false); assert.equal(matchesGiftFilter(idle, 'all'), true);
+  assert.equal(filterGifts(gifts, '', 'available', '').length, 3, 'Listing and current idle evidence cannot double-count one gift');
+  assert.deepEqual(gifts, before);
+});
+
+test('availability excludes historical or unverified idle states, candidates, conflicts and unavailable current states', () => {
+  const idle = { ...base, ui_state: null, status_is_historical: false };
+  const excluded: Gift[] = [base, { ...idle, status_is_historical: true }, { ...idle, status_is_historical: undefined },
+    { ...idle, is_portfolio: false }, { ...idle, category: 'unresolved' }, { ...idle, collection_conflict: true },
+    { ...idle, state: 'unknown' }, { ...idle, state: 'expired_pending_return', ui_state: 'for_rent' },
+    { ...idle, state: 'rented', ui_state: 'for_rent' }, { ...idle, state: 'held_directly', ui_state: 'for_rent' },
+    { ...idle, state: 'listed_for_sale', ui_state: 'for_rent' }, { ...idle, ui_state: 'rented' },
+    { ...idle, state: 'unknown', ui_state: 'for_rent', status_is_historical: true }];
+  for (const gift of excluded) assert.equal(isAvailableForRent(gift), false, `${gift.state}/${gift.ui_state}/${gift.status_is_historical}`);
+  assert.deepEqual(filterGifts(excluded, '', 'available', ''), []);
+  assert.equal(giftGroup(base), 'idle', 'Legacy idle observations retain their original evidence group');
+});
+
+test('availability requires the explicit listing UI state rather than a substring in raw status text', () => {
+  const rawOnly = ['unavailable', 'available', 'for_rent'].map(state => ({ ...base, state, ui_state: null }));
+  for (const gift of rawOnly) assert.equal(isAvailableForRent(gift), false, gift.state);
+  assert.deepEqual(filterGifts(rawOnly, '', 'available', ''), []);
+  const supported = { ...base, state: 'unknown', ui_state: 'for_rent' };
+  assert.equal(isAvailableForRent(supported), true);
+  assert.deepEqual(filterGifts([...rawOnly, supported], '', 'available', ''), [supported]);
+  assert.equal(giftGroup(rawOnly[1]), 'for_rent', 'Existing raw-status grouping is unchanged outside the availability filter');
+});
+
+test('review and conflicting statuses cannot become available through inconsistent listing UI evidence', () => {
+  const conflicting: Gift[] = ['conflicting_ownership', 'unresolved_contract', 'uncertain', 'needs_review']
+    .map(state => ({ ...base, state, ui_state: 'for_rent', status_is_historical: false }));
+  conflicting.push({ ...base, ui_state: 'conflicting', status_is_historical: false },
+    { ...base, ui_state: 'unresolved', status_is_historical: false },
+    { ...base, ui_state: 'review', status_is_historical: false });
+  const before = structuredClone(conflicting);
+  for (const gift of conflicting) assert.equal(isAvailableForRent(gift), false, `${gift.state}/${gift.ui_state}`);
+  assert.deepEqual(filterGifts(conflicting, '', 'available', ''), []);
+  assert.deepEqual(conflicting, before);
+  assert.equal(isAvailableForRent({ ...base, state: 'unknown', ui_state: 'for_rent' }), true);
+});
+
+test('a refreshed portfolio with 69 verified idle contracts remains available when no newer listing is saved', () => {
+  const gifts: Gift[] = [];
+  for (const [state, count] of [['idle_rental_contract', 69], ['rented', 19], ['held_directly', 24], ['unknown', 49]] as const) {
+    for (let index = 0; index < count; index++) gifts.push({ ...base, id: `${state}-${index}`, state,
+      ui_state: state === 'rented' ? 'rented' : null, status_is_historical: state === 'unknown' });
+  }
+  for (let index = 0; index < 33; index++) gifts.push({ ...base, id: `candidate-${index}`, state: 'unknown',
+    ui_state: null, is_portfolio: false, category: 'unresolved', status_is_historical: true });
+  assert.equal(gifts.filter(gift => gift.is_portfolio).length, 161);
+  assert.equal(filterGifts(gifts, '', 'available', '').length, 69);
+  assert.equal(filterGifts(gifts, '', 'for_rent', '').length, 0, 'A fresh idle contract does not prove Marketapp visibility');
+  assert.equal(filterGifts(gifts, '', 'rented', '').length, 19);
+  assert.equal(filterGifts(gifts, '', 'direct', '').length, 24);
+  assert.equal(filterGifts(gifts, '', 'review', '').length, 82);
+});
+
 test('monetary display rounds exactly to three places and unknown is not zero', () => {
   assert.equal(formatAmount('12345678901234567890.000000001'), '12,345,678,901,234,567,890.000');
   assert.equal(formatAmount('0.001000'), '0.001');
@@ -45,6 +111,18 @@ test('monetary display rounds exactly to three places and unknown is not zero', 
   assert.equal(formatAmount('-0.0001'), '0.000');
   assert.equal(formatAmount('0'), '0.000');
   assert.equal(formatAmount(null), '—');
+});
+
+test('analytics volume rounds to one place without changing gift price precision', () => {
+  assert.equal(formatAmount('65.85', 1), '65.9');
+  assert.equal(formatAmount('590.9804', 1), '591.0');
+  assert.equal(formatAmount('9.9499', 1), '9.9');
+  assert.equal(formatAmount('9.95', 1), '10.0');
+  assert.equal(formatAmount('9007199254740993.0501', 1), '9,007,199,254,740,993.1');
+  assert.equal(formatAmount('0', 1), '0.0');
+  assert.equal(formatAmount('-0.04', 1), '0.0');
+  assert.equal(formatAmount(null, 1), '—');
+  assert.equal(formatAmount('0.1235'), '0.124');
 });
 
 function pricedGift(id: string, current: string | null, suggested: string | null): Gift {
@@ -216,7 +294,7 @@ test('Black comparison scope changes query identity and survives source and time
   assert.equal(pricingBasisLabel('model_black', 'Black'), 'Exact model + Black');
 });
 
-test('dashboard and CSV adapter use the identical source and timeframe, and forward cancellation', async () => {
+test('dashboard and CSV adapter use the identical source and timeframe with a bounded request signal', async () => {
   const originalFetch = globalThis.fetch;
   const controller = new AbortController();
   const requests: { url: string; init?: RequestInit }[] = [];
@@ -229,7 +307,8 @@ test('dashboard and CSV adapter use the identical source and timeframe, and forw
     await localAdapter.getDashboard(selection, controller.signal);
     assert.equal(requests[0].url.split('?')[1], localAdapter.exportUrl(selection).split('?')[1]);
     assert.equal(new URLSearchParams(requests[0].url.split('?')[1]).get('pricing_backdrop'), 'Black');
-    assert.equal(requests[0].init?.signal, controller.signal);
+    assert.ok(requests[0].init?.signal instanceof AbortSignal);
+    assert.equal(requests[0].init.signal.aborted, false);
     assert.equal(requests[0].init?.cache, 'no-store');
     assert.equal(requests[0].init?.credentials, 'same-origin');
   } finally { globalThis.fetch = originalFetch; }

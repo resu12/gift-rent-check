@@ -52,7 +52,7 @@ Your own portfolio NFTs and listings whose observed owner matches your wallet ar
 
 Repeated pages, overlapping queries, and later snapshots do not make one NFT count multiple times in a listing group. Comparison-source provenance matters: a targeted Black query does not supply a collection-wide or model-wide sample, and a model-only query does not supply a collection-wide sample. Broader averages require observations from appropriately broad streams. With Black scope selected, a collection-wide Black query or a broad collection query can supply the collection + Black group after trait filtering; a model-specific query still cannot supply that collection group.
 
-Listings can change or disappear after observation. A recently-touched, bounded scan can be biased and partial; even a completed traversal spans time and is not an instantaneous market snapshot. Stale or conflicting subject traits can prevent a model-specific recommendation.
+Listings can change or disappear after observation. A recently-touched, bounded scan can be biased and partial; even a completed traversal spans time and is not an instantaneous market snapshot. Valid saved model and backdrop information remains usable as it ages, for both the portfolio gift and comparison gifts. Its original timestamp and age warning remain visible. The latest applicable evidence wins; missing, malformed or conflicting traits cannot establish a model or exact Black match. Price observations still have to fall inside the selected comparison window.
 
 ## Actual rental evidence
 
@@ -76,7 +76,7 @@ The calculation excludes:
 
 Excluded counts are visible under sample coverage. Missing values remain empty rather than becoming zero. A supplied zero amount remains distinct from missing or invalid data.
 
-History's documented response has no model/backdrop fields. Narrower rental comparisons join saved, validated structured metadata for the same NFT and collection. That metadata may have been observed after the rental and may be absent; it is not presented as traits recorded with the historical event. Current metadata freshness checks remain separate from the rental event window.
+History's documented response has no model/backdrop fields. Narrower rental comparisons join saved, validated structured metadata for the same NFT and collection. That metadata may have been observed after the rental and may be absent; it is not presented as traits recorded with the historical event. Older valid traits remain eligible without another metadata request. Their age does not extend the rental event window or relax the minimum sample size.
 
 Reported amounts do not establish landlord net proceeds, fees, gas, refunds, or rental completion. An entry can describe an ongoing rental. Portfolio membership alone does not establish who received the proceeds of a historical rental.
 

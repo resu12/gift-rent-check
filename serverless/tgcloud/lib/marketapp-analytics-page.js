@@ -7,18 +7,19 @@ import {normalizePersonalAnalytics, utf8Bytes} from './personal-analytics.js';
 
 export const MARKETAPP_ANALYTICS_PAGE_MAX_BYTES = 1048576;
 export class MarketappAnalyticsPageError extends Error {
-  constructor(reason) {
+  constructor(reason, authenticationInvalid = false) {
     super('The signed-in Marketapp analytics page could not be verified.');
     this.name = 'MarketappAnalyticsPageError';
     this.reason = reason;
+    Object.defineProperty(this, 'authenticationInvalid', {value: authenticationInvalid});
   }
 }
-const fail = (reason = 'page_structure') => {throw new MarketappAnalyticsPageError(reason);};
+const fail = (reason = 'page_structure', authenticationInvalid = false) => {throw new MarketappAnalyticsPageError(reason, authenticationInvalid);};
 const space = character => /[\t\n\f\r ]/.test(character || 'x');
 const VOID = new Set('area base br col embed hr img input link meta param source track wbr'.split(' '));
 const RAW = new Set('script style textarea title iframe noscript xmp noembed noframes'.split(' '));
 const LABELS = new Set(['Rent volume', 'Rentals', 'Price per day', 'Average duration', 'Extensions', 'Spent on rent']);
-const CHARTS = new Set(['profile.rent.income', 'profile.rent.rentals', 'profile.rent.day_price', 'profile.rent.duration']);
+const CHARTS = new Set(['profile.rent.income', 'profile.rent.rentals', 'profile.rent.activity', 'profile.rent.day_price', 'profile.rent.duration']);
 // Marketapp also renders a duration histogram beside the daily series. Its
 // categories describe rental lengths, not dates; it is never financial input
 // for our saved daily statistics. Recognize this observed key explicitly.
@@ -198,7 +199,7 @@ function readPage(html) {
         const key = decode(attributes['data-key'] ?? ''), spec_raw = decode(attributes['data-spec'] ?? '');
         if ((!CHARTS.has(key) && !SUPPLEMENTARY_CHARTS.has(key)) || !spec_raw || chartKeys.has(key)) fail('analytics_shape');
         chartKeys.add(key);
-        if (CHARTS.has(key)) {charts.push({key, spec_raw}); if (charts.length > 4) fail('analytics_shape');}
+        if (CHARTS.has(key)) {charts.push({key, spec_raw}); if (charts.length > 5) fail('analytics_shape');}
       }
     }
     if (RAW.has(tag) && !selfClosing) {
@@ -219,6 +220,7 @@ function readPage(html) {
     else {stack.push(entry); if (stack.length > 128) fail();}
   }
   if (stack.length) fail();
+  if (identities.length === 1 && identities[0]?.address === false) fail('wallet_identity', true);
   if (identities.length !== 1 || !identities[0] || typeof identities[0].address !== 'string') fail('wallet_identity');
   return {summary, charts, address: identities[0].address};
 }
@@ -243,13 +245,22 @@ function checkOptions(options) {
   return expected;
 }
 
+// Reuse the same inert, duplicate-key-aware Wallet.init reader for other
+// authenticated pages. Only the canonical identity escapes this function;
+// challenges, proofs and the rest of the initializer are discarded.
+export function extractMarketappWalletIdentity(html) {
+  if (typeof html !== 'string' || utf8Bytes(html).length > MARKETAPP_ANALYTICS_PAGE_MAX_BYTES) fail('page_structure');
+  const {address} = readPage(html);
+  try {return canonicalAddress(address);} catch {fail('wallet_identity', true);}
+}
+
 export function extractMarketappAnalyticsPage(html, options) {
   const expected = checkOptions(options);
   if (typeof html !== 'string' || html.length > MARKETAPP_ANALYTICS_PAGE_MAX_BYTES) fail('page_structure');
   try {if (utf8Bytes(html).length > MARKETAPP_ANALYTICS_PAGE_MAX_BYTES) fail('page_structure');} catch {fail('page_structure');}
   const {summary, charts, address} = readPage(html);
   let observed; try {observed = canonicalAddress(address);} catch {fail('wallet_identity');}
-  if (observed !== expected) fail('wallet_identity');
+  if (observed !== expected) fail('wallet_identity', true);
   const snapshot = {version: 1, source: 'marketapp_personal_rent_page', source_url: options.sourceUrl,
     wallet: expected, captured_at: options.capturedAt, summary, charts};
   let normalized;

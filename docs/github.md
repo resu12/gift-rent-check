@@ -6,7 +6,7 @@ Use **Gift Rent Check** as the project title and **gift-rent-check** as the GitH
 
 The repository contains Python source, React source, Telegram backend modules, tests, dependency locks, API/decoder evidence, and setup scripts. CI runs tests and builds only; it has no deployment credentials and does not collect live market data.
 
-Git excludes `.env`, private backend configuration and refresh-encryption keys, personal analytics captures, `.tgcloud` snapshots, uploaded attachments, local databases, portfolio CSVs, exports, logs, virtual environments, dependencies, and generated bundles. `.env.example`, the blank portfolio template, and `serverless/private-config.example.js` are safe configuration examples. Keep personal backups outside version control; an ignore rule does not protect a file that was already committed.
+Git excludes `.env`, private backend configuration and refresh-encryption keys, the deployment's invitation/access configuration, personal analytics captures, `.tgcloud` snapshots, uploaded attachments, local databases, portfolio CSVs, exports, logs, virtual environments, dependencies, and generated bundles. `.env.example`, the blank portfolio template, `serverless/private-config.example.js`, and the disabled `serverless/public-release-config.example.js` are safe configuration examples. Keep personal backups outside version control; an ignore rule does not protect a file that was already committed.
 
 Public blockchain fixtures intentionally contain original contract/NFT addresses and BOCs for reproducible decoder checks. Their provenance is documented in `tests/fixtures/ton/README.md`. They are distinct from the private portfolio, raw discovery database, and credentials, which are excluded.
 
@@ -36,11 +36,11 @@ GitHub Actions checks Python 3.12, Node 24 tests, and both frontend builds on pu
 
 ## Release preparation
 
-The current application version is **0.3.0**. [CHANGELOG.md](../CHANGELOG.md) contains the release notes and can supply the body of a GitHub release.
+The current application version is **0.4.0**. [Release notes](releases/v0.4.0.md) are ready for a GitHub release; [CHANGELOG.md](../CHANGELOG.md) contains the full history. Mark the GitHub release as a **pre-release** while the hosted service remains an invitation-only development beta. A source release does not enable public registration.
 
 Keep `pyproject.toml`, `src/marketapp_rent/__init__.py`, `frontend/package.json`, and `serverless/package.json` on the same application version. Dependency and database schema versions are separate; a UI release does not change them. Add a dated changelog entry, run the fresh-clone checks above, and review the committed paths before pushing. Generated bundles and private operational data must remain ignored.
 
-Preparing a release commit locally does not publish a GitHub release or deploy the app. After pushing an approved release commit and checking GitHub Actions, use its matching version, such as `v0.3.0`, for the release tag.
+Preparing a release commit locally does not publish a GitHub release or deploy the app. After pushing the prepared commit and checking GitHub Actions, use the matching `v0.4.0` release tag. Do not attach local databases, deployment snapshots, generated credentials or analytics captures as release assets. Existing Telegram installations need the explicit storage upgrade sequence in the release notes; development resets are destructive, separately selected operations.
 
 ## First GitHub push
 

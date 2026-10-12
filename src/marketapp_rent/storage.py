@@ -90,6 +90,7 @@ class Store:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA busy_timeout = 30000")
+        self.connection.create_function("dashboard_address_key", 1, address_key, deterministic=True)
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
         if version > 2:
             self.connection.close()
@@ -449,25 +450,122 @@ class Store:
     def issues(self) -> list[dict[str, Any]]:
         return [dict(row) for row in self.connection.execute("SELECT * FROM issues ORDER BY id")]
 
-    def records(self, kind: str | None = None) -> list[dict[str, Any]]:
-        query = "SELECT * FROM records" + (" WHERE kind=?" if kind else "") + " ORDER BY id"
-        result = []
-        for row in self.connection.execute(query, (kind,) if kind else ()):
+    def _record_scope(self, identities):
+        # Canonicalize each distinct record identity, rather than every joined
+        # page occurrence. Friendly TON aliases and opaque legacy IDs retain
+        # the same matching semantics as the read models.
+        if identities is None:
+            return None
+        return _json(sorted({address_key(value) for value in identities if value is not None}))
+
+    def iter_records(self, kind: str | None = None, *, identities=None, max_id=None):
+        clauses, params = [], []
+        if kind:
+            clauses.append("kind=?")
+            params.append(kind)
+        scope = self._record_scope(identities)
+        if scope is not None:
+            clauses.append("dashboard_address_key(identity) IN (SELECT value FROM json_each(?))")
+            params.append(scope)
+        if max_id is not None:
+            clauses.append("id<=?")
+            params.append(max_id)
+        query = "SELECT * FROM records" + (" WHERE " + " AND ".join(clauses) if clauses else "") + " ORDER BY id"
+        for row in self.connection.execute(query, params):
             record = dict(row)
             record["data"] = json.loads(record.pop("data_json"))
-            result.append(record)
-        return result
+            yield record
 
-    def observations(self, kind: str | None = None) -> list[dict[str, Any]]:
+    def records(self, kind: str | None = None, *, identities=None) -> list[dict[str, Any]]:
+        return list(self.iter_records(kind, identities=identities))
+
+    def iter_observations(self, kind: str | None = None, *, identities=None, max_id=None):
         query = """SELECT o.*,p.observed_at,p.stream_id,s.run_id,s.params_json,r.kind,r.identity,
             r.fingerprint,r.source_json,r.data_json FROM observations o JOIN pages p ON p.id=o.page_id
             JOIN streams s ON s.id=p.stream_id JOIN records r ON r.id=o.record_id"""
+        clauses, params = [], []
         if kind:
-            query += " WHERE r.kind=?"
-        result = []
-        for row in self.connection.execute(query + " ORDER BY o.id", (kind,) if kind else ()):
+            clauses.append("r.kind=?")
+            params.append(kind)
+        scope = self._record_scope(identities)
+        if scope is not None:
+            scoped_kind = "kind=? AND " if kind else ""
+            clauses.append("r.id IN (SELECT id FROM records WHERE " + scoped_kind + "dashboard_address_key(identity) IN (SELECT value FROM json_each(?)))")
+            if kind:
+                params.append(kind)
+            params.append(scope)
+        if max_id is not None:
+            clauses.append("o.id<=?")
+            params.append(max_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        for row in self.connection.execute(query + " ORDER BY o.id", params):
             item = dict(row)
             for field in ("data", "params", "collection_evidence"):
                 item[field] = json.loads(item.pop(field + "_json"))
-            result.append(item)
-        return result
+            yield item
+
+    def observations(self, kind: str | None = None, *, identities=None) -> list[dict[str, Any]]:
+        return list(self.iter_observations(kind, identities=identities))
+
+
+class ProjectionContext:
+    """Request-local bounded evidence reuse; larger queries stream unchanged.
+
+    Cache limits bound retained rows and serialized payload, not the dataset:
+    exceeding a limit discards that cache candidate and continues yielding
+    every row. No truncation, persistent cache, or database writes are used.
+    """
+    def __init__(self, store, *, max_rows=20000, max_bytes=16 * 1024 * 1024):
+        self.store = store
+        self.connection = store.connection
+        self.max_rows, self.max_bytes = max_rows, max_bytes
+        self._cache = {}
+        self._uncached = set()
+        self._cached_rows = self._cached_bytes = 0
+        heads = self.connection.execute("SELECT (SELECT COALESCE(MAX(id),0) FROM records), "
+                                        "(SELECT COALESCE(MAX(id),0) FROM observations)").fetchone()
+        self._heads = dict(zip(("records", "observations"), heads))
+
+    def __getattr__(self, name):
+        return getattr(self.store, name)
+
+    def _read(self, table, kind, identities):
+        scope = None if identities is None else tuple(sorted({address_key(value) for value in identities if value is not None}))
+        if scope == ():
+            return iter(())
+        key = (table, kind, scope)
+        if key in self._cache:
+            return iter(self._cache[key])
+        whole = self._cache.get((table, kind, None))
+        if scope is not None and whole is not None:
+            wanted = set(scope)
+            return (row for row in whole if address_key(row.get("identity")) in wanted)
+
+        def load():
+            rows, size = [], 0
+            retain = key not in self._uncached
+            reader = self.store.iter_records if table == "records" else self.store.iter_observations
+            for row in reader(kind, identities=scope, max_id=self._heads[table]):
+                if retain:
+                    # Include per-row object overhead in addition to the exact
+                    # encoded payload. One oversized row is never retained.
+                    size += len(_json(row).encode("utf-8")) + 1024
+                    if self._cached_rows + len(rows) + 1 > self.max_rows or self._cached_bytes + size > self.max_bytes:
+                        rows.clear()
+                        retain = False
+                        self._uncached.add(key)
+                    else:
+                        rows.append(row)
+                yield row
+            if retain:
+                self._cache[key] = rows
+                self._cached_rows += len(rows)
+                self._cached_bytes += size
+        return load()
+
+    def records(self, kind=None, *, identities=None):
+        return self._read("records", kind, identities)
+
+    def observations(self, kind=None, *, identities=None):
+        return self._read("observations", kind, identities)

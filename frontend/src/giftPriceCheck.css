@@ -1,0 +1,8 @@
+.gift-price-actions{display:flex;flex-direction:column;gap:12px}
+.gift-price-actions .quick-gift-check .button{min-height:44px}
+.quick-gift-check p{margin:10px 0 0;color:#b4d5cb;font-size:14px;line-height:1.5}
+.gift-price-actions>.detail-disclosure{font-size:13px;color:#a9bed2}
+.gift-price-actions>.detail-disclosure p{line-height:1.5}
+.gift-row-actions{display:flex;align-items:center;justify-content:flex-end;gap:4px}
+.gift-row-actions .quick-price-actions.compact{position:static}
+.gift-row-actions .quick-price-icon{background:transparent;box-shadow:none;border:0}

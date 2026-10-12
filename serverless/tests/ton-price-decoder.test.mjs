@@ -16,6 +16,17 @@ for (const sample of cases) test(`Python parity: ${sample.name}`, () => {
   for (const [field, expected] of Object.entries(sample.expected)) assert.deepEqual(actual[field], expected, field);
 });
 
+test('both real rented BOC fixtures corroborate creation as expiry minus accumulated duration', () => {
+  for (const sample of [cases[1], cases[3]]) {
+    const result = run(sample);
+    assert.equal(result.verified, true);
+    assert.equal(result.role, 1);
+    assert.equal(result.status, 1);
+    assert.ok(result.rental_duration > 0);
+    assert.equal(result.created_at, result.rental_until - result.rental_duration);
+  }
+});
+
 test('configured asking terms are separate from the ongoing rental rate', () => {
   assert.equal(run(cases[0]).configured_price_per_day_raw, '80000000');
   assert.equal(run(cases[0]).price_per_day_raw, '0');

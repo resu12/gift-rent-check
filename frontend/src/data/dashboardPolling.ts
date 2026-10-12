@@ -21,7 +21,7 @@ interface PollCallbacks {
 }
 
 function pollingTask<T>(options: {
-  read(signal: AbortSignal): Promise<T>;
+  read(signal: AbortSignal, force: boolean): Promise<T>;
   success(value: T): void;
   failure(problem: unknown): void;
   loading?(pending: boolean): void;
@@ -31,7 +31,9 @@ function pollingTask<T>(options: {
   const controller = new AbortController();
   let inFlight: Promise<void> | null = null;
   let queued = false;
+  let queuedForce = false;
   let cancelTimer: (() => void) | undefined;
+  let failures = 0;
 
   function schedule() {
     if (controller.signal.aborted) return;
@@ -39,10 +41,10 @@ function pollingTask<T>(options: {
       cancelTimer = undefined;
       if (options.environment.isVisible()) void request();
       else schedule();
-    }, options.interval());
+    }, Math.min(30000, options.interval() * 2 ** Math.min(failures, 4)));
   }
 
-  function request(): Promise<void> {
+  function request(force = false): Promise<void> {
     if (controller.signal.aborted) return Promise.resolve();
     cancelTimer?.();
     cancelTimer = undefined;
@@ -50,18 +52,22 @@ function pollingTask<T>(options: {
       // A manual refresh or job completion during a read needs one trailing
       // read, but must never invalidate the useful response already underway.
       queued = true;
+      queuedForce ||= force;
       return inFlight;
     }
     inFlight = (async () => {
       options.loading?.(true);
+      let forceRead = force;
       do {
         queued = false;
+        queuedForce = false;
         try {
-          const value = await Promise.resolve().then(() => options.read(controller.signal));
-          if (!controller.signal.aborted) options.success(value);
+          const value = await Promise.resolve().then(() => options.read(controller.signal, forceRead));
+          if (!controller.signal.aborted) { failures = 0; options.success(value); }
         } catch (problem) {
-          if (!controller.signal.aborted) options.failure(problem);
+          if (!controller.signal.aborted) { failures = Math.min(failures + 1, 4); options.failure(problem); }
         }
+        forceRead = queuedForce;
       } while (queued && !controller.signal.aborted);
       if (!controller.signal.aborted) options.loading?.(false);
       inFlight = null;
@@ -90,19 +96,34 @@ export function createDashboardPoller(
   let active = false;
   let dashboardError: string | null = null;
   let jobsError: string | null = null;
+  let loadedToken: string | null = null;
   const message = (problem: unknown) => problem instanceof Error ? problem.message : 'The local service could not be reached.';
   const reportError = () => callbacks.error(dashboardError || jobsError);
-  const interval = () => active ? 2500 : 15000;
+  const progressInterval = () => active ? 2500 : 15000;
   const dashboard = pollingTask({
-    read: signal => adapter.getDashboard(selection, signal),
+    async read(signal, force) {
+      // The token read contains no comparison records. A full response carries
+      // its own token, so a commit during a slow read cannot be marked loaded.
+      if (!force && loadedToken !== null && adapter.getUpdateToken) {
+        const token = await adapter.getUpdateToken(signal);
+        if (token === loadedToken) return null;
+      }
+      callbacks.loading(true);
+      try { return await adapter.getDashboard(selection, signal); }
+      finally { if (!signal.aborted) callbacks.loading(false); }
+    },
     success(data) {
       dashboardError = null;
-      callbacks.dashboard(data);
+      if (data) {
+        loadedToken = typeof data.update_token === 'string' && data.update_token ? data.update_token : null;
+        callbacks.dashboard(data);
+      }
       reportError();
     },
     failure(problem) { dashboardError = message(problem); reportError(); },
-    loading: callbacks.loading,
-    interval,
+    // Rebuilding comparisons is more expensive than reading saved progress.
+    // Manual reloads and the final collection commit still request immediately.
+    interval: () => 15000,
     environment,
   });
   const jobs = pollingTask({
@@ -115,14 +136,14 @@ export function createDashboardPoller(
       reportError();
       // Read once more after the final commit, even when it landed during a
       // slower dashboard response. Job status itself stays responsive meanwhile.
-      if (wasActive !== active) void dashboard.request();
+      if (wasActive !== active) void dashboard.request(wasActive && !active);
     },
     failure(problem) { jobsError = message(problem); reportError(); },
-    interval,
+    interval: progressInterval,
     environment,
   });
   return {
-    async reload() { await Promise.all([dashboard.request(), jobs.request()]); },
+    async reload() { await Promise.all([dashboard.request(true), jobs.request()]); },
     dispose() { dashboard.dispose(); jobs.dispose(); },
   };
 }

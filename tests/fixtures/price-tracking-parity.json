@@ -1,0 +1,959 @@
+{
+  "description": "Public synthetic read-only price-tracking parity cases; no real wallet or credentials.",
+  "cases": [
+    {
+      "name": "duration weighted observed TON change",
+      "wallet": "0:0000000000000000000000000000000000000000000000000000000000000384",
+      "gift": {
+        "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+        "is_portfolio": true,
+        "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064"
+      },
+      "now": "2026-10-20T12:00:00+00:00",
+      "owned_prices": [
+        {
+          "wallet_address": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+          "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+          "holding_contract": "0:00000000000000000000000000000000000000000000000000000000000001f4",
+          "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "marketplace": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+          "code_hash_verified": true,
+          "data_hash_verified": true,
+          "verified": true,
+          "rental_state": "idle_rental_contract",
+          "configured_price_per_day_raw": "110000000",
+          "observed_at": "2026-10-01T12:00:00Z",
+          "reason": "verified_contract_price"
+        },
+        {
+          "wallet_address": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+          "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+          "holding_contract": "0:00000000000000000000000000000000000000000000000000000000000001f4",
+          "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "marketplace": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+          "code_hash_verified": true,
+          "data_hash_verified": true,
+          "verified": true,
+          "rental_state": "idle_rental_contract",
+          "configured_price_per_day_raw": "110000000",
+          "observed_at": "2026-10-09T12:00:00Z",
+          "reason": "verified_contract_price"
+        },
+        {
+          "wallet_address": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+          "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+          "holding_contract": "0:00000000000000000000000000000000000000000000000000000000000001f4",
+          "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "marketplace": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+          "code_hash_verified": true,
+          "data_hash_verified": true,
+          "verified": true,
+          "rental_state": "idle_rental_contract",
+          "configured_price_per_day_raw": "150000000",
+          "observed_at": "2026-10-10T12:00:00Z",
+          "reason": "verified_contract_price"
+        }
+      ],
+      "listings": [],
+      "history": [
+        {
+          "items": [
+            {
+              "address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+              "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+              "name": "Example #1",
+              "src": "0:0000000000000000000000000000000000000000000000000000000000000385",
+              "dst": "0:0000000000000000000000000000000000000000000000000000000000000386",
+              "ts": 1791201600,
+              "price": "0.11",
+              "price_nano": "110000000.00",
+              "currency": "GRAM",
+              "is_extend": false,
+              "duration": 86400,
+              "tx_hash": null
+            },
+            {
+              "address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+              "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+              "name": "Example #1",
+              "src": "0:0000000000000000000000000000000000000000000000000000000000000385",
+              "dst": "0:0000000000000000000000000000000000000000000000000000000000000386",
+              "ts": 1791720000,
+              "price": "0.3",
+              "price_nano": "300000000.0",
+              "currency": "GRAM",
+              "is_extend": false,
+              "duration": 259200,
+              "tx_hash": null
+            },
+            {
+              "address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+              "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+              "name": "Example #1",
+              "src": "0:0000000000000000000000000000000000000000000000000000000000000385",
+              "dst": "0:0000000000000000000000000000000000000000000000000000000000000386",
+              "ts": 1791806400,
+              "price": "0.2",
+              "price_nano": "200000000.0",
+              "currency": "GRAM",
+              "is_extend": false,
+              "duration": 86400,
+              "tx_hash": null
+            },
+            {
+              "address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+              "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+              "name": "Example #1",
+              "src": "0:0000000000000000000000000000000000000000000000000000000000000385",
+              "dst": "0:0000000000000000000000000000000000000000000000000000000000000386",
+              "ts": 1792065600,
+              "price": "1",
+              "price_nano": "1000000000",
+              "currency": "GRAM",
+              "is_extend": true,
+              "duration": 86400,
+              "tx_hash": null
+            },
+            {
+              "address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+              "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+              "name": "Example #1",
+              "src": "0:0000000000000000000000000000000000000000000000000000000000000385",
+              "dst": "0:0000000000000000000000000000000000000000000000000000000000000386",
+              "ts": 1791720000,
+              "price": "0.3",
+              "price_nano": "300000000.0",
+              "currency": "GRAM",
+              "is_extend": false,
+              "duration": 259200,
+              "tx_hash": null
+            }
+          ],
+          "observed_at": "2026-10-20T11:00:00Z"
+        }
+      ],
+      "expected": {
+        "version": 1,
+        "semantics_version": "observed-price-performance-v1",
+        "source": "TON contract",
+        "unit": "GRAM/day",
+        "observation_count": 3,
+        "change_count": 1,
+        "last_observed_at": "2026-10-10T12:00:00.000000Z",
+        "baseline_price_per_day": "0.11",
+        "baseline_observed_at": "2026-10-01T12:00:00.000000Z",
+        "coverage": "observed_sample",
+        "changes": [
+          {
+            "id": "[\"0:0000000000000000000000000000000000000000000000000000000000000001\",\"TON contract\",\"2026-10-10T12:00:00.000000Z\"]",
+            "observed_at": "2026-10-10T12:00:00.000000Z",
+            "previous_observed_at": "2026-10-09T12:00:00.000000Z",
+            "from_price_per_day": "0.11",
+            "to_price_per_day": "0.15",
+            "delta_per_day": "0.04",
+            "percent_change": "36.363636364",
+            "comparisons": [
+              {
+                "days": 7,
+                "status": "ready",
+                "comparable_days": "7",
+                "before": {
+                  "window_from": "2026-10-02T12:00:00.000000Z",
+                  "window_to": "2026-10-09T12:00:00.000000Z",
+                  "recorded_rentals": 1,
+                  "recorded_volume": "0.11",
+                  "average_daily_rate": "0.11",
+                  "rental_days": "1",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                },
+                "after": {
+                  "window_from": "2026-10-10T12:00:00.000000Z",
+                  "window_to": "2026-10-17T12:00:00.000000Z",
+                  "recorded_rentals": 2,
+                  "recorded_volume": "0.5",
+                  "average_daily_rate": "0.125",
+                  "rental_days": "4",
+                  "excluded_counts": {
+                    "extensions": 1
+                  },
+                  "coverage": "observed_sample"
+                }
+              },
+              {
+                "days": 14,
+                "status": "pending",
+                "comparable_days": "10",
+                "before": {
+                  "window_from": "2026-09-29T12:00:00.000000Z",
+                  "window_to": "2026-10-09T12:00:00.000000Z",
+                  "recorded_rentals": 1,
+                  "recorded_volume": "0.11",
+                  "average_daily_rate": "0.11",
+                  "rental_days": "1",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                },
+                "after": {
+                  "window_from": "2026-10-10T12:00:00.000000Z",
+                  "window_to": "2026-10-20T12:00:00.000000Z",
+                  "recorded_rentals": 2,
+                  "recorded_volume": "0.5",
+                  "average_daily_rate": "0.125",
+                  "rental_days": "4",
+                  "excluded_counts": {
+                    "extensions": 1
+                  },
+                  "coverage": "observed_sample"
+                }
+              },
+              {
+                "days": 30,
+                "status": "pending",
+                "comparable_days": "10",
+                "before": {
+                  "window_from": "2026-09-29T12:00:00.000000Z",
+                  "window_to": "2026-10-09T12:00:00.000000Z",
+                  "recorded_rentals": 1,
+                  "recorded_volume": "0.11",
+                  "average_daily_rate": "0.11",
+                  "rental_days": "1",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                },
+                "after": {
+                  "window_from": "2026-10-10T12:00:00.000000Z",
+                  "window_to": "2026-10-20T12:00:00.000000Z",
+                  "recorded_rentals": 2,
+                  "recorded_volume": "0.5",
+                  "average_daily_rate": "0.125",
+                  "rental_days": "4",
+                  "excluded_counts": {
+                    "extensions": 1
+                  },
+                  "coverage": "observed_sample"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "microsecond boundaries and uncertain segments",
+      "wallet": "0:0000000000000000000000000000000000000000000000000000000000000384",
+      "gift": {
+        "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+        "is_portfolio": true,
+        "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064"
+      },
+      "now": "2026-10-20T12:00:00+00:00",
+      "owned_prices": [
+        {
+          "wallet_address": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+          "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+          "holding_contract": "0:00000000000000000000000000000000000000000000000000000000000001f4",
+          "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "marketplace": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+          "code_hash_verified": true,
+          "data_hash_verified": true,
+          "verified": true,
+          "rental_state": "idle_rental_contract",
+          "configured_price_per_day_raw": "100000001",
+          "observed_at": "2026-10-01T12:00:00.000001Z",
+          "reason": "verified_contract_price"
+        },
+        {
+          "wallet_address": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+          "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+          "holding_contract": "0:00000000000000000000000000000000000000000000000000000000000001f4",
+          "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "marketplace": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+          "code_hash_verified": true,
+          "data_hash_verified": true,
+          "verified": true,
+          "rental_state": "idle_rental_contract",
+          "configured_price_per_day_raw": "100000001",
+          "observed_at": "2026-10-09T12:00:00.000002Z",
+          "reason": "verified_contract_price"
+        },
+        {
+          "wallet_address": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+          "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+          "holding_contract": "0:00000000000000000000000000000000000000000000000000000000000001f4",
+          "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "marketplace": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+          "code_hash_verified": true,
+          "data_hash_verified": true,
+          "verified": true,
+          "rental_state": "idle_rental_contract",
+          "configured_price_per_day_raw": "170000001",
+          "observed_at": "2026-10-10T12:00:00.000003Z",
+          "reason": "verified_contract_price"
+        },
+        {
+          "wallet_address": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+          "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+          "holding_contract": "0:00000000000000000000000000000000000000000000000000000000000001f4",
+          "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "marketplace": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+          "code_hash_verified": true,
+          "data_hash_verified": true,
+          "verified": true,
+          "rental_state": "idle_rental_contract",
+          "configured_price_per_day_raw": "170000001",
+          "observed_at": "2026-10-11T12:00:00.000004Z",
+          "reason": "verified_contract_price"
+        },
+        {
+          "wallet_address": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+          "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+          "holding_contract": "0:00000000000000000000000000000000000000000000000000000000000001f4",
+          "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "marketplace": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+          "code_hash_verified": true,
+          "data_hash_verified": true,
+          "verified": false,
+          "rental_state": "idle_rental_contract",
+          "configured_price_per_day_raw": "170000001",
+          "observed_at": "2026-10-12T12:00:00.000005Z",
+          "reason": "verified_contract_price"
+        },
+        {
+          "wallet_address": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+          "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+          "holding_contract": "0:00000000000000000000000000000000000000000000000000000000000001f4",
+          "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "marketplace": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+          "code_hash_verified": true,
+          "data_hash_verified": true,
+          "verified": true,
+          "rental_state": "idle_rental_contract",
+          "configured_price_per_day_raw": "170000001",
+          "observed_at": "2026-10-14T12:00:00.000006Z",
+          "reason": "verified_contract_price"
+        },
+        {
+          "wallet_address": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+          "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+          "holding_contract": "0:00000000000000000000000000000000000000000000000000000000000001f4",
+          "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "marketplace": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+          "code_hash_verified": true,
+          "data_hash_verified": true,
+          "verified": true,
+          "rental_state": "idle_rental_contract",
+          "configured_price_per_day_raw": "170000001",
+          "observed_at": "2026-10-16T12:00:00.000007Z",
+          "reason": "verified_contract_price"
+        },
+        {
+          "wallet_address": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+          "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+          "holding_contract": "0:00000000000000000000000000000000000000000000000000000000000001f4",
+          "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "marketplace": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+          "code_hash_verified": true,
+          "data_hash_verified": true,
+          "verified": true,
+          "rental_state": "idle_rental_contract",
+          "configured_price_per_day_raw": "190000001",
+          "observed_at": "2026-10-17T12:00:00.000008Z",
+          "reason": "verified_contract_price"
+        }
+      ],
+      "listings": [],
+      "history": [],
+      "expected": {
+        "version": 1,
+        "semantics_version": "observed-price-performance-v1",
+        "source": "TON contract",
+        "unit": "GRAM/day",
+        "observation_count": 7,
+        "change_count": 2,
+        "last_observed_at": "2026-10-17T12:00:00.000008Z",
+        "baseline_price_per_day": "0.100000001",
+        "baseline_observed_at": "2026-10-01T12:00:00.000001Z",
+        "coverage": "observed_sample",
+        "changes": [
+          {
+            "id": "[\"0:0000000000000000000000000000000000000000000000000000000000000001\",\"TON contract\",\"2026-10-17T12:00:00.000008Z\"]",
+            "observed_at": "2026-10-17T12:00:00.000008Z",
+            "previous_observed_at": "2026-10-16T12:00:00.000007Z",
+            "from_price_per_day": "0.170000001",
+            "to_price_per_day": "0.190000001",
+            "delta_per_day": "0.02",
+            "percent_change": "11.764705813",
+            "comparisons": [
+              {
+                "days": 7,
+                "status": "partial",
+                "comparable_days": "2",
+                "before": {
+                  "window_from": "2026-10-14T12:00:00.000006Z",
+                  "window_to": "2026-10-16T12:00:00.000007Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                },
+                "after": {
+                  "window_from": "2026-10-17T12:00:00.000008Z",
+                  "window_to": "2026-10-19T12:00:00.000009Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                }
+              },
+              {
+                "days": 14,
+                "status": "partial",
+                "comparable_days": "2",
+                "before": {
+                  "window_from": "2026-10-14T12:00:00.000006Z",
+                  "window_to": "2026-10-16T12:00:00.000007Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                },
+                "after": {
+                  "window_from": "2026-10-17T12:00:00.000008Z",
+                  "window_to": "2026-10-19T12:00:00.000009Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                }
+              },
+              {
+                "days": 30,
+                "status": "partial",
+                "comparable_days": "2",
+                "before": {
+                  "window_from": "2026-10-14T12:00:00.000006Z",
+                  "window_to": "2026-10-16T12:00:00.000007Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                },
+                "after": {
+                  "window_from": "2026-10-17T12:00:00.000008Z",
+                  "window_to": "2026-10-19T12:00:00.000009Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                }
+              }
+            ]
+          },
+          {
+            "id": "[\"0:0000000000000000000000000000000000000000000000000000000000000001\",\"TON contract\",\"2026-10-10T12:00:00.000003Z\"]",
+            "observed_at": "2026-10-10T12:00:00.000003Z",
+            "previous_observed_at": "2026-10-09T12:00:00.000002Z",
+            "from_price_per_day": "0.100000001",
+            "to_price_per_day": "0.170000001",
+            "delta_per_day": "0.07",
+            "percent_change": "69.9999993",
+            "comparisons": [
+              {
+                "days": 7,
+                "status": "partial",
+                "comparable_days": "1",
+                "before": {
+                  "window_from": "2026-10-08T12:00:00.000001Z",
+                  "window_to": "2026-10-09T12:00:00.000002Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                },
+                "after": {
+                  "window_from": "2026-10-10T12:00:00.000003Z",
+                  "window_to": "2026-10-11T12:00:00.000004Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                }
+              },
+              {
+                "days": 14,
+                "status": "partial",
+                "comparable_days": "1",
+                "before": {
+                  "window_from": "2026-10-08T12:00:00.000001Z",
+                  "window_to": "2026-10-09T12:00:00.000002Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                },
+                "after": {
+                  "window_from": "2026-10-10T12:00:00.000003Z",
+                  "window_to": "2026-10-11T12:00:00.000004Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                }
+              },
+              {
+                "days": 30,
+                "status": "partial",
+                "comparable_days": "1",
+                "before": {
+                  "window_from": "2026-10-08T12:00:00.000001Z",
+                  "window_to": "2026-10-09T12:00:00.000002Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                },
+                "after": {
+                  "window_from": "2026-10-10T12:00:00.000003Z",
+                  "window_to": "2026-10-11T12:00:00.000004Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "listing fallback and changed owner boundary",
+      "wallet": "0:0000000000000000000000000000000000000000000000000000000000000384",
+      "gift": {
+        "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+        "is_portfolio": true,
+        "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064"
+      },
+      "now": "2026-10-20T12:00:00+00:00",
+      "owned_prices": [
+        {
+          "wallet_address": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+          "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+          "holding_contract": "0:00000000000000000000000000000000000000000000000000000000000001f4",
+          "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "marketplace": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+          "code_hash_verified": true,
+          "data_hash_verified": true,
+          "verified": false,
+          "rental_state": "idle_rental_contract",
+          "configured_price_per_day_raw": "100000000",
+          "observed_at": "2026-10-01T12:00:00Z",
+          "reason": "verified_contract_price"
+        }
+      ],
+      "listings": [
+        {
+          "item": {
+            "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+            "nft_name": "Example #1",
+            "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+            "attributes": [],
+            "min_duration": 86400,
+            "max_duration": 2592000,
+            "price_per_day": "100000000",
+            "discount_per_day": 0,
+            "listed_at": null
+          },
+          "observed_at": "2026-10-01T12:00:00Z"
+        },
+        {
+          "item": {
+            "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+            "nft_name": "Example #1",
+            "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+            "attributes": [],
+            "min_duration": 86400,
+            "max_duration": 2592000,
+            "price_per_day": "100000000",
+            "discount_per_day": 0,
+            "listed_at": null
+          },
+          "observed_at": "2026-10-09T12:00:00Z"
+        },
+        {
+          "item": {
+            "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+            "nft_name": "Example #1",
+            "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+            "attributes": [],
+            "min_duration": 86400,
+            "max_duration": 2592000,
+            "price_per_day": "170000000",
+            "discount_per_day": 0,
+            "listed_at": null
+          },
+          "observed_at": "2026-10-10T12:00:00Z"
+        },
+        {
+          "item": {
+            "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+            "nft_name": "Example #1",
+            "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+            "attributes": [],
+            "min_duration": 86400,
+            "max_duration": 2592000,
+            "price_per_day": "170000000",
+            "discount_per_day": 0,
+            "listed_at": null
+          },
+          "observed_at": "2026-10-11T12:00:00Z"
+        },
+        {
+          "item": {
+            "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+            "nft_name": "Example #1",
+            "owner": "0:7777777777777777777777777777777777777777777777777777777777777777",
+            "attributes": [],
+            "min_duration": 86400,
+            "max_duration": 2592000,
+            "price_per_day": "290000000",
+            "discount_per_day": 0,
+            "listed_at": null
+          },
+          "observed_at": "2026-10-12T12:00:00Z"
+        }
+      ],
+      "history": [],
+      "expected": {
+        "version": 1,
+        "semantics_version": "observed-price-performance-v1",
+        "source": "Marketapp listing",
+        "unit": "GRAM/day",
+        "observation_count": 5,
+        "change_count": 1,
+        "last_observed_at": "2026-10-12T12:00:00.000000Z",
+        "baseline_price_per_day": "0.1",
+        "baseline_observed_at": "2026-10-01T12:00:00.000000Z",
+        "coverage": "observed_sample",
+        "changes": [
+          {
+            "id": "[\"0:0000000000000000000000000000000000000000000000000000000000000001\",\"Marketapp listing\",\"2026-10-10T12:00:00.000000Z\"]",
+            "observed_at": "2026-10-10T12:00:00.000000Z",
+            "previous_observed_at": "2026-10-09T12:00:00.000000Z",
+            "from_price_per_day": "0.1",
+            "to_price_per_day": "0.17",
+            "delta_per_day": "0.07",
+            "percent_change": "70",
+            "comparisons": [
+              {
+                "days": 7,
+                "status": "partial",
+                "comparable_days": "1",
+                "before": {
+                  "window_from": "2026-10-08T12:00:00.000000Z",
+                  "window_to": "2026-10-09T12:00:00.000000Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                },
+                "after": {
+                  "window_from": "2026-10-10T12:00:00.000000Z",
+                  "window_to": "2026-10-11T12:00:00.000000Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                }
+              },
+              {
+                "days": 14,
+                "status": "partial",
+                "comparable_days": "1",
+                "before": {
+                  "window_from": "2026-10-08T12:00:00.000000Z",
+                  "window_to": "2026-10-09T12:00:00.000000Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                },
+                "after": {
+                  "window_from": "2026-10-10T12:00:00.000000Z",
+                  "window_to": "2026-10-11T12:00:00.000000Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                }
+              },
+              {
+                "days": 30,
+                "status": "partial",
+                "comparable_days": "1",
+                "before": {
+                  "window_from": "2026-10-08T12:00:00.000000Z",
+                  "window_to": "2026-10-09T12:00:00.000000Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                },
+                "after": {
+                  "window_from": "2026-10-10T12:00:00.000000Z",
+                  "window_to": "2026-10-11T12:00:00.000000Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "exact terminating volume across distant scales",
+      "wallet": "0:0000000000000000000000000000000000000000000000000000000000000384",
+      "gift": {
+        "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+        "is_portfolio": true,
+        "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064"
+      },
+      "now": "2026-10-20T12:00:00+00:00",
+      "owned_prices": [
+        {
+          "wallet_address": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+          "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+          "holding_contract": "0:00000000000000000000000000000000000000000000000000000000000001f4",
+          "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "marketplace": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+          "code_hash_verified": true,
+          "data_hash_verified": true,
+          "verified": true,
+          "rental_state": "idle_rental_contract",
+          "configured_price_per_day_raw": "100000000",
+          "observed_at": "2026-10-01T12:00:00Z",
+          "reason": "verified_contract_price"
+        },
+        {
+          "wallet_address": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+          "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+          "holding_contract": "0:00000000000000000000000000000000000000000000000000000000000001f4",
+          "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "marketplace": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+          "code_hash_verified": true,
+          "data_hash_verified": true,
+          "verified": true,
+          "rental_state": "idle_rental_contract",
+          "configured_price_per_day_raw": "100000000",
+          "observed_at": "2026-10-09T12:00:00Z",
+          "reason": "verified_contract_price"
+        },
+        {
+          "wallet_address": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "nft_address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+          "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+          "holding_contract": "0:00000000000000000000000000000000000000000000000000000000000001f4",
+          "owner": "0:0000000000000000000000000000000000000000000000000000000000000384",
+          "marketplace": "0:9a9cb80adfbd1662f5108766d73355ac2c03304fda1d25a479670e34efcd72b3",
+          "code_hash_verified": true,
+          "data_hash_verified": true,
+          "verified": true,
+          "rental_state": "idle_rental_contract",
+          "configured_price_per_day_raw": "170000001",
+          "observed_at": "2026-10-10T12:00:00Z",
+          "reason": "verified_contract_price"
+        }
+      ],
+      "listings": [],
+      "history": [
+        {
+          "items": [
+            {
+              "address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+              "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+              "name": "Example #1",
+              "src": "0:0000000000000000000000000000000000000000000000000000000000000385",
+              "dst": "0:0000000000000000000000000000000000000000000000000000000000000386",
+              "ts": 1791720000,
+              "price": "1",
+              "price_nano": "1000000000",
+              "currency": "GRAM",
+              "is_extend": false,
+              "duration": 86400,
+              "tx_hash": null
+            },
+            {
+              "address": "0:0000000000000000000000000000000000000000000000000000000000000001",
+              "collection_address": "0:0000000000000000000000000000000000000000000000000000000000000064",
+              "name": "Example #1",
+              "src": "0:0000000000000000000000000000000000000000000000000000000000000385",
+              "dst": "0:0000000000000000000000000000000000000000000000000000000000000386",
+              "ts": 1791806400,
+              "price": "1e-1000",
+              "price_nano": "1e-991",
+              "currency": "GRAM",
+              "is_extend": false,
+              "duration": 86400,
+              "tx_hash": null
+            }
+          ],
+          "observed_at": "2026-10-20T11:00:00Z"
+        }
+      ],
+      "expected": {
+        "version": 1,
+        "semantics_version": "observed-price-performance-v1",
+        "source": "TON contract",
+        "unit": "GRAM/day",
+        "observation_count": 3,
+        "change_count": 1,
+        "last_observed_at": "2026-10-10T12:00:00.000000Z",
+        "baseline_price_per_day": "0.1",
+        "baseline_observed_at": "2026-10-01T12:00:00.000000Z",
+        "coverage": "observed_sample",
+        "changes": [
+          {
+            "id": "[\"0:0000000000000000000000000000000000000000000000000000000000000001\",\"TON contract\",\"2026-10-10T12:00:00.000000Z\"]",
+            "observed_at": "2026-10-10T12:00:00.000000Z",
+            "previous_observed_at": "2026-10-09T12:00:00.000000Z",
+            "from_price_per_day": "0.1",
+            "to_price_per_day": "0.170000001",
+            "delta_per_day": "0.070000001",
+            "percent_change": "70.000001",
+            "comparisons": [
+              {
+                "days": 7,
+                "status": "ready",
+                "comparable_days": "7",
+                "before": {
+                  "window_from": "2026-10-02T12:00:00.000000Z",
+                  "window_to": "2026-10-09T12:00:00.000000Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                },
+                "after": {
+                  "window_from": "2026-10-10T12:00:00.000000Z",
+                  "window_to": "2026-10-17T12:00:00.000000Z",
+                  "recorded_rentals": 2,
+                  "recorded_volume": "1.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+                  "average_daily_rate": "0.5",
+                  "rental_days": "2",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                }
+              },
+              {
+                "days": 14,
+                "status": "pending",
+                "comparable_days": "10",
+                "before": {
+                  "window_from": "2026-09-29T12:00:00.000000Z",
+                  "window_to": "2026-10-09T12:00:00.000000Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                },
+                "after": {
+                  "window_from": "2026-10-10T12:00:00.000000Z",
+                  "window_to": "2026-10-20T12:00:00.000000Z",
+                  "recorded_rentals": 2,
+                  "recorded_volume": "1.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+                  "average_daily_rate": "0.5",
+                  "rental_days": "2",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                }
+              },
+              {
+                "days": 30,
+                "status": "pending",
+                "comparable_days": "10",
+                "before": {
+                  "window_from": "2026-09-29T12:00:00.000000Z",
+                  "window_to": "2026-10-09T12:00:00.000000Z",
+                  "recorded_rentals": 0,
+                  "recorded_volume": "0",
+                  "average_daily_rate": null,
+                  "rental_days": "0",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                },
+                "after": {
+                  "window_from": "2026-10-10T12:00:00.000000Z",
+                  "window_to": "2026-10-20T12:00:00.000000Z",
+                  "recorded_rentals": 2,
+                  "recorded_volume": "1.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+                  "average_daily_rate": "0.5",
+                  "rental_days": "2",
+                  "excluded_counts": {},
+                  "coverage": "observed_sample"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -2391,5 +2391,23 @@ nacl.setPRNG = function(fn) {
   }
 })();
 
+// BEGIN PUBLIC ED25519 POINT ADAPTER
+// Use the unchanged upstream point routines to require a canonical, nonzero
+// point in the prime-order subgroup. No field/signature algorithm is replaced.
+nacl.isValidEd25519Point = function(encoded) {
+  if (!(encoded instanceof Uint8Array) || encoded.length !== 32) return false;
+  var q = [gf(), gf(), gf(), gf()], p = [gf(), gf(), gf(), gf()];
+  if (unpackneg(q, encoded)) return false;
+  var canonical = new Uint8Array(32), identity = new Uint8Array(32);
+  identity[0] = 1; pack(canonical, q);
+  canonical[31] &= 127;
+  var y = new Uint8Array(encoded); y[31] &= 127;
+  if (vn(canonical, 0, y, 0, 32) !== 0 || vn(y, 0, identity, 0, 32) === 0) return false;
+  scalarmult(p, q, new Uint8Array(L)); pack(canonical, p);
+  return vn(canonical, 0, identity, 0, 32) === 0;
+};
+// END PUBLIC ED25519 POINT ADAPTER
 })(nacl);
 export const secretbox = nacl.secretbox;
+export const verifyDetached = nacl.sign.detached.verify;
+export const isValidEd25519Point = nacl.isValidEd25519Point;

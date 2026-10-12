@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +12,7 @@ from .addresses import address_key
 from .discovery_store import DiscoveryStore
 from .history_refresh import history_refresh_summary
 from .listing_plan import listing_refresh_summary
+from .monetary import decimal_text
 from .storage import Store
 
 
@@ -31,15 +32,16 @@ def _cell(key: str, value: Any) -> str:
     elif isinstance(value, bool):
         return "true" if value else "false"
     elif isinstance(value, Decimal):
-        return format(value, "f")
+        try:
+            return decimal_text(value)
+        except ValueError:
+            value = str(value)
     else:
         value = str(value)
     if key in _MONEY_FIELDS:
         try:
-            numeric = Decimal(value)
-            if numeric.is_finite():
-                return format(numeric, "f")
-        except InvalidOperation:
+            return decimal_text(value)
+        except ValueError:
             pass
     # Prevent spreadsheet formulas in remote strings, labels and identifiers.
     if value and (value[0] in "\t\r\n" or value.lstrip().startswith(("=", "+", "-", "@"))):

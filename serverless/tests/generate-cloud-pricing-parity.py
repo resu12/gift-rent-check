@@ -20,27 +20,38 @@ from test_rental_pricing import event, history
 
 NOW = datetime(2026, 10, 8, 12, tzinfo=timezone.utc)
 RECENT = "2026-10-08T11:00:00+00:00"
+OLD = "2026-10-06T08:00:00+00:00"
 
 
 def main():
     temporary_root = ROOT / ".tmp"
     temporary_root.mkdir(exist_ok=True)
     with TemporaryDirectory(prefix="cloud-pricing-parity-", dir=temporary_root) as directory, Store(Path(directory) / "fixture.sqlite3") as store:
-        gifts = [gift(), gift(addr(10)), gift(addr(99), is_portfolio=False)]
+        gifts = [gift(), gift(addr(10)), gift(addr(98)), gift(addr(99), is_portfolio=False)]
         ton_traits(store)
         rows = [{"kind": "portfolio", "observed_at": RECENT, "record": item} for item in gifts]
         rows.append({"kind": "metadata", "observed_at": RECENT, "record": {
             "nft_address": addr(2), "collection_address": COLLECTION,
             "attributes": attributes(), "source": "TON metadata",
         }})
+        # Saved immutable traits remain usable after the 24-hour pricing
+        # window for both subjects and peers, with their age warnings intact.
+        for number in (98, 27, 28, 29):
+            ton_traits(store, nft=addr(number), when=OLD)
+            rows.append({"kind": "metadata", "observed_at": OLD, "record": {
+                "nft_address": addr(number), "collection_address": COLLECTION,
+                "attributes": attributes(), "source": "TON metadata",
+            }})
         values = [listing(n, str((n - 9) * 100000000), model="Ruby" if n < 16 else "Other",
                           backdrop="Black" if n < 13 or n >= 16 else "Onyx Black") for n in range(10, 19)]
         listings(store, values)
+        listings(store, [listing(n, "250000000", model=None, backdrop=None) for n in (27, 28, 29)])
         listings(store, [listing(10, "900000000")], when="2026-10-06T09:00:00+00:00")
         listings(store, [listing(22, "500000000")], filters={"model": "Ruby", "backdrop": "Black"})
         rentals = [event(n, price=str((n - 9) / 10), duration=86400, tx_hash="shared-hash") for n in range(10, 19)]
         history(store, rentals)
         history(store, rentals)
+        history(store, [event(n, price="0.25", duration=86400) for n in (27, 28, 29)])
         history(store, [event(10, ts=int(NOW.timestamp()) - 2 * 86400, duration=7 * 86400, price="1")])
         history(store, [event(10, ts=int(NOW.timestamp()) - 4 * 86400, is_extend=True)])
         history(store, [event(23, price="1", price_nano="1"), event(24, currency="TON"), event(25, duration=0)])

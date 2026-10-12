@@ -9,6 +9,7 @@ import {option, requireId, validateAuthenticatedDestination, validateServerlessE
 const commands = {
   status: ['status'],
   publish: ['push', 'tgcloud/schema.js', 'tgcloud/lib/', 'tgcloud/endpoints/', 'dist/'],
+  'publish-schema': ['push', 'tgcloud/schema.js'],
   'migrate-check': ['migrate', '--dry-run'],
   'migrate-safe': ['migrate', '--safe'],
   login: ['login'],
@@ -27,7 +28,7 @@ async function main() {
     if (!['--action', '--app-id'].includes(args[i])) throw new Error('Use --action and --app-id; extra CLI arguments are not forwarded.');
   }
   const action = option(args, '--action');
-  if (!Object.hasOwn(commands, action)) throw new Error('Choose status, publish, migrate-check, migrate-safe, or login.');
+  if (!Object.hasOwn(commands, action)) throw new Error('Choose status, publish, publish-schema, migrate-check, migrate-safe, or login.');
   validateServerlessEnvironment();
   const appId = action === 'login' ? null : requireId(option(args, '--app-id'), '--app-id');
   if (action === 'login' && option(args, '--app-id') !== null) throw new Error('Login uses the token entered at its prompt. Supply --app-id when publishing or inspecting the app.');
@@ -75,7 +76,7 @@ main().then(status => {process.exitCode = status;}).catch(error => {
     'Unset TGCLOUD_TOKEN before interactive login so the entered token also selects the snapshot.',
     'Login uses the token entered at its prompt. Supply --app-id when publishing or inspecting the app.',
     'Use --action and --app-id; extra CLI arguments are not forwarded.',
-    'Choose status, publish, migrate-check, migrate-safe, or login.',
+    'Choose status, publish, publish-schema, migrate-check, migrate-safe, or login.',
     'Install the locked serverless dependencies first.',
     'Build with scripts/build-serverless.ps1 first.',
     'The local .tgcloud path must be an ordinary directory.',

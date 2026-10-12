@@ -35,6 +35,20 @@ export function shortWalletAddress(address: string): string {
   return address.length > 20 ? `${address.slice(0, 7)}…${address.slice(-6)}` : address;
 }
 
+/** A checksum-valid, bounceable mainnet address suitable for fixed explorer routes. */
+export function friendlyMainnetAddress(value: unknown): string | null {
+  const raw = canonicalMainnetAddress(value);
+  if (!raw) return null;
+  const [workchain, hash] = raw.split(':');
+  const bytes = Uint8Array.from([0x11, Number(workchain) & 255, ...hash.match(/../g)!.map(byte => Number.parseInt(byte, 16))]);
+  let crc = 0;
+  for (const byte of bytes) {
+    crc ^= byte << 8;
+    for (let bit = 0; bit < 8; bit++) crc = ((crc << 1) ^ ((crc & 0x8000) ? 0x1021 : 0)) & 0xffff;
+  }
+  return btoa(String.fromCharCode(...bytes, crc >> 8, crc & 255)).replace(/\+/g, '-').replace(/\//g, '_');
+}
+
 export interface WalletAccountIdentity { address: string; chain: string }
 export type WalletBinding =
   | { state: 'restoring' | 'disconnected' | 'unsupported_network' | 'invalid_address'; address: null }

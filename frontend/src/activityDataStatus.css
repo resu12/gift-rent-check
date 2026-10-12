@@ -1,0 +1,37 @@
+.activity-data-status{margin:0 0 24px;border:1px solid var(--line,#252e3c);border-radius:16px;background:var(--panel,#131a25);overflow:hidden}
+.activity-data-status-heading{padding:16px 20px}
+.activity-data-status-heading h2{font-size:18px;font-weight:600;letter-spacing:-.2px;margin:0}
+.activity-data-status .fresh{--status-color:#86ddb0}
+.activity-data-status .older{--status-color:#f0ad64}
+.activity-data-status-list{list-style:none;padding:0;margin:0}
+.activity-data-status-row{display:flex;align-items:flex-start;gap:16px;padding:10px 16px 10px 20px;border-top:1px solid var(--line,#252e3c);box-shadow:inset 3px 0 0 var(--status-color)}
+.activity-data-status-main{flex:1;min-width:0}
+.activity-data-status-row-details>summary{display:block;min-height:44px;padding:3px 0;cursor:pointer;list-style:none;outline-offset:3px;border-radius:4px}
+.activity-data-status-row-details>summary::-webkit-details-marker{display:none}
+.activity-data-status-row-details>summary:focus-visible{outline:2px solid var(--teal,#6be5c5)}
+.activity-data-status-name{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
+.activity-data-status-title{font-size:15px;font-weight:600;line-height:1.5;color:var(--text,#e8edf5)}
+.activity-data-status-state{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border:1px solid color-mix(in srgb,var(--status-color) 30%,transparent);border-radius:6px;color:var(--status-color);background:color-mix(in srgb,var(--status-color) 7%,transparent);font-size:11px;line-height:1.4;white-space:nowrap}
+.activity-data-status-state.pending{color:var(--muted,#9baac0);border-color:var(--line,#304153);background:#1a2635}
+.activity-data-status-meta{display:flex;align-items:center;gap:0;flex-wrap:wrap;min-width:0;margin-top:3px;font-size:12px;line-height:1.5;color:var(--muted,#8b97aa)}
+.activity-data-status-updated{font-variant-numeric:tabular-nums}
+.activity-data-status-coverage>span{padding-inline:3px}
+.activity-data-status-coverage.warning{color:#f0ad64}
+.activity-data-status-expand{flex:none;margin-left:6px;color:var(--muted,#8b97aa);transform:rotate(90deg);transition:transform .15s}
+.activity-data-status-row-details[open] .activity-data-status-expand{transform:rotate(270deg)}
+.activity-data-status-detail-content{margin:9px 0 3px;padding:10px 12px;border-radius:8px;background:var(--base,#0f151f);font-size:12px;line-height:1.6;color:var(--muted,#8b97aa)}
+.activity-data-status-detail-content dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 14px;margin:0}
+.activity-data-status-detail-content dt{color:var(--muted,#8b97aa)}
+.activity-data-status-detail-content dd{margin:0;color:var(--text,#d3dce8);overflow-wrap:anywhere}
+.activity-data-status-detail-content p{margin:9px 0 0;max-width:650px}
+.activity-data-status-feedback{display:flex;align-items:flex-start;gap:5px;margin:4px 0 2px;font-size:12px;line-height:1.5;color:var(--muted,#8b97aa)}
+.activity-data-status-feedback>svg{flex:none;margin-top:2px}
+.activity-data-status-feedback.success{color:#86ddb0}
+.activity-data-status-feedback.warning{color:#f0ad64}
+.activity-data-status-feedback.error{color:#efb5b5}
+.activity-data-status-disabled-reason{font-size:12px;line-height:1.5;color:var(--muted,#8b97aa);margin:4px 0 2px}
+.activity-data-status-action{min-width:88px;min-height:44px;flex:none;display:inline-flex;align-items:center;justify-content:center;gap:7px;background:#192330;border:1px solid #304153;border-radius:9px;padding:10px 12px;color:var(--text,#e8edf5);font-size:12px;font-weight:500}
+.activity-data-status-action:not(:disabled):hover{background:#233141;border-color:#4b647a}
+.activity-data-status-action:focus-visible{outline:2px solid var(--teal,#6be5c5);outline-offset:3px}
+@media(max-width:600px){.activity-data-status{margin-bottom:20px}.activity-data-status-heading{padding:14px 16px}.activity-data-status-heading h2{font-size:17px}.activity-data-status-row{gap:10px;padding:9px 12px 9px 16px}.activity-data-status-name{gap:4px 8px}.activity-data-status-state{padding:2px 6px}.activity-data-status-action{min-width:76px;padding:9px 10px;gap:5px;font-size:12px}.activity-data-status-action>svg{width:15px;height:15px}.activity-data-status-detail-content{padding:9px 10px}.activity-data-status-detail-content dl{grid-template-columns:minmax(0,1fr);gap:1px}.activity-data-status-detail-content dd+dt{margin-top:5px}}
+@media(prefers-reduced-motion:reduce){.activity-data-status-expand{transition:none}}

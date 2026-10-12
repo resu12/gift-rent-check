@@ -41,6 +41,7 @@ node_modules/
 .tgcloud/
 serverless/tgcloud/lib/private-config.js
 serverless/tgcloud/lib/private-refresh-key.js
+serverless/tgcloud/lib/public-release-config.js
 serverless/.private-config-*
 .private-config-*
 

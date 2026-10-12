@@ -40,7 +40,7 @@ def enrich_rental_counts(store, gifts, *, now=None):
     wanted.discard(None)
     observed = defaultdict(dict)
     latest = {}
-    for observation in store.observations("history"):
+    for observation in store.observations("history", identities=wanted):
         nft = _key(observation["identity"])
         if nft not in wanted:
             continue
@@ -51,7 +51,7 @@ def enrich_rental_counts(store, gifts, *, now=None):
 
     groups = defaultdict(dict)
     excluded = defaultdict(Counter)
-    for record in store.records("history"):
+    for record in store.records("history", identities=wanted):
         nft = _key(record["identity"])
         if nft not in wanted or record["fingerprint"] not in observed[nft]:
             continue

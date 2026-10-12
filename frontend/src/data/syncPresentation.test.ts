@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {compactJobMessage, presentJobSync, presentOwnedPriceSync} from './syncPresentation.ts';
+import {availableAgainMessage, compactJobMessage, marketappAvailableAt, presentJobSync, presentOwnedPriceSync} from './syncPresentation.ts';
 import type {Job, JobKind} from './types.ts';
 import type {OwnedPriceSnapshot} from './ownedPriceRefresh.ts';
 
@@ -18,11 +18,44 @@ test('purpose distinguishes current owned prices, listings, actual rentals, stat
   const model = presentOwnedPriceSync(owned()); assert.equal(model.title, 'Updating your gift prices'); assert.equal(model.objective, 'Checking daily prices for gifts you already own.');
   assert.doesNotMatch(model.objective, /comparison|Marketapp|TON/);
 });
+test('a shared public allowance can block collection even while the user has individual requests left', () => {
+  const next='2026-10-11T12:00:00.000Z';
+  const paused=job({state:'partial',reason:'The daily provider allowance was reached. Your progress is saved.',progress:{provider_budget:{rolling_24h_used:5,rolling_24h_limit:500,provider_allowance_blocked:true,available_at:next}}});
+  const view=presentJobSync(paused);assert.equal(view.availableAt,next);assert.doesNotMatch(view.message,/available again/);
+  assert.match(compactJobMessage(paused,view,Date.parse('2026-10-10T12:00:00Z')),/Available again/);
+});
 
 test('known collection progress is an honest percentage with a friendly current collection', () => {
   const model = presentJobSync(job());
   assert.deepEqual(model.progress, {completed: 3, total: 12, percent: 25, label: '3 of 12 collections checked', indeterminate: false});
   assert.equal(model.message, 'Checking Low Riders. 120 records read.'); assert.equal(model.stateLabel, 'In progress');
+});
+
+test('interrupted local work waits for its observed lease without claiming automatic retries', () => {
+  const finishing = job({progress: {client_interrupted: true, requires_resume: false, server_time: 1000, lease_until: 3000,
+    sync: {phase: 'rentals', completed: 0, total: 45, unit: 'collections', current_collection: 'Snoop Cigars', processed_items: 1300}}});
+  const view = presentJobSync(finishing);
+  assert.equal(view.state, 'waiting'); assert.equal(view.stateLabel, 'Waiting');
+  assert.match(compactJobMessage(finishing, view), /last request is still finishing/);
+  assert.doesNotMatch(compactJobMessage(finishing, view), /retrying automatically|Checking Snoop/);
+  assert.equal(view.actionLabel, null); assert.equal(view.progress.percent, 0);
+  const uncertain = job({progress: {...finishing.progress, lease_until: 0}});
+  assert.equal(compactJobMessage(uncertain, presentJobSync(uncertain)), 'Checking saved progress…');
+  const paused = job({state: 'partial', reason: 'duration_limit', progress: {...finishing.progress, lease_until: 0}});
+  assert.equal(presentJobSync(paused).state, 'paused'); assert.equal(presentJobSync(paused).actionLabel, 'Continue');
+  const resumable = job({progress: {...finishing.progress, requires_resume: true, lease_until: 0}});
+  assert.equal(presentJobSync(resumable).state, 'paused');
+});
+
+test('reading the first collection shows real records without inventing completed collections', () => {
+  const current = job({progress: {sync: {phase: 'rentals', completed: 0, total: 45, unit: 'collections', current_collection: 'Snoop Cigars', processed_items: 1300}}});
+  const view = presentJobSync(current);
+  assert.equal(view.progress.percent, 0); assert.equal(view.progress.label, '0 of 45 collections checked');
+  assert.equal(compactJobMessage(current, view), 'Checking Snoop Cigars · 1,300 records read');
+  for (const processed_items of [0, -1, null, Infinity]) {
+    const empty = job({progress: {...current.progress, sync: {...current.progress.sync!, processed_items}}});
+    assert.equal(compactJobMessage(empty, presentJobSync(empty)), 'Checking Snoop Cigars');
+  }
 });
 
 test('request allowance is never converted to completion and legacy stream units stay checks', () => {
@@ -104,7 +137,7 @@ test('provider retry is distinct from a request in flight or ordinary pacing', (
 
 test('known machine and cloud human reasons explain actions without exposing raw technical text', () => {
   for (const reason of ['invocation_limit', 'The 100-request invocation limit was reached. Resume when ready.', 'Dashboard Marketapp request budget reached; resume saved work later']) assert.match(presentJobSync(job({state: 'partial', reason})).message, /batch reached its limit/);
-  for (const reason of ['daily_limit', 'The rolling 24-hour request allowance was reached. Resume after its reset.']) assert.match(presentJobSync(job({state: 'partial', reason})).message, /daily request allowance/);
+  for (const reason of ['daily_limit', 'The rolling 24-hour request allowance was reached. Resume after its reset.']) assert.match(presentJobSync(job({state: 'partial', reason})).message, /rolling 24-hour request allowance/);
   for (const reason of ['authentication_failed', 'Marketapp rejected authentication. Check the private backend token.']) assert.match(presentJobSync(job({state: 'failed', reason})).message, /Access was rejected/);
   for (const reason of ['cursor_cycle', 'Marketapp rejected the saved cursor. Start a fresh collection.']) {const model = presentJobSync(job({state: 'failed', reason})); assert.equal(model.actionLabel, 'Start again'); assert.match(model.message, /Start a new refresh/);}
   const technical = 'schema_failed: internal_field_983'; const model = presentJobSync(job({state: 'failed', reason: technical}));
@@ -152,7 +185,7 @@ test('a saved daily-limit pause reflects restored allowance after reset or rolli
   }
   for (const used of [500, null, '0', -1]) {
     const saved = job({state: 'partial', reason: 'daily_limit', progress: {marketapp_budget: {rolling_24h_used: used, rolling_24h_limit: 500}}});
-    assert.match(presentJobSync(saved).message, /daily request allowance is used up/);
+    assert.match(presentJobSync(saved).message, /rolling 24-hour request allowance is used up/);
   }
 });
 
@@ -167,6 +200,80 @@ test('owned price check counts fixed gifts and treats unavailable updates conser
   const none = presentOwnedPriceSync(owned({run: null})); assert.equal(none.state, 'preparing'); assert.equal(none.progress.indeterminate, true);
 });
 
+test('combined TON refresh describes rental status independently of prices and retains legacy uncertainty', () => {
+  const done = owned({ phase: 'complete' });
+  done.run = { ...done.run!, state: 'complete', checked: 160, updated: 100, unresolved: 60, status_updated: 150, status_unresolved: 10 };
+  const combined = presentOwnedPriceSync(done, { rentalStatus: true });
+  assert.equal(combined.title, 'Your gifts');
+  assert.equal(combined.message, '150 rental statuses checked. 10 could not be updated.');
+  assert.equal(combined.progress.percent, 100);
+  assert.match(presentOwnedPriceSync(owned(), { rentalStatus: true }).message, /rental status and daily prices/);
+  delete done.run.status_updated;
+  delete done.run.status_unresolved;
+  assert.match(presentOwnedPriceSync(done, { rentalStatus: true }).message, /status was not confirmed/);
+  assert.equal(presentOwnedPriceSync(done).message, '100 gift prices refreshed. 60 could not be updated.');
+});
+
+test('supplemental TON work reports its own progress rather than holding complete website coverage at 99 percent', () => {
+  const snapshot = owned({ provider: 'marketapp_website', verification: { stage: 'ton', checked: 50, total: 93, waiting: false } });
+  snapshot.run = { ...snapshot.run!, total: 161, checked: 161, updated: 88, unresolved: 73 };
+  const view = presentOwnedPriceSync(snapshot, { rentalStatus: true });
+  assert.equal(view.title, 'Checking additional gift details');
+  assert.equal(view.message, 'Marketapp data saved. Checking missing details and rental expiry on TON.');
+  assert.deepEqual(view.progress, { completed: 50, total: 93, percent: 53, indeterminate: false,
+    label: '50 of 93 additional TON checks finished' });
+  const waiting = presentOwnedPriceSync({ ...snapshot, verification: { ...snapshot.verification!, waiting: true } }, { rentalStatus: true });
+  assert.equal(waiting.state, 'waiting');
+  assert.equal(waiting.message, 'TON requested a pause. Saved gift data is already available.');
+  assert.equal(waiting.progress.percent, 53);
+  const finishing = presentOwnedPriceSync({ ...snapshot, verification: { ...snapshot.verification!, checked: 93 } }, { rentalStatus: true });
+  assert.equal(finishing.progress.percent, null); assert.equal(finishing.progress.indeterminate, true);
+  assert.equal(finishing.progress.label, 'Finishing gift checks…');
+  assert.match(finishing.message, /confirming saved results/);
+});
+
+test('TON-only and legacy running checks avoid implying completion or Marketapp data that was never saved', () => {
+  const snapshot = owned({ provider: 'toncenter', verification: { stage: 'ton', checked: 50, total: 160, waiting: true } });
+  const view = presentOwnedPriceSync(snapshot, { rentalStatus: true });
+  assert.equal(view.state, 'waiting'); assert.equal(view.progress.percent, 31);
+  assert.equal(view.progress.label, '50 of 160 checks finished');
+  assert.doesNotMatch(view.message, /Marketapp|already available/);
+  const legacy = owned({ provider: 'marketapp_website' }); legacy.run = { ...legacy.run!, checked: legacy.run!.total };
+  const finalizing = presentOwnedPriceSync(legacy, { rentalStatus: true });
+  assert.equal(finalizing.progress.percent, null); assert.equal(finalizing.progress.indeterminate, true);
+  const complete = presentOwnedPriceSync({ ...legacy, phase: 'complete', run: { ...legacy.run!, state: 'complete' } }, { rentalStatus: true });
+  assert.equal(complete.progress.percent, 100); assert.equal(complete.progress.indeterminate, false);
+  const paused = presentOwnedPriceSync({ ...legacy, phase: 'partial', run: { ...legacy.run!, state: 'partial', reason: 'provider_wait' } }, { rentalStatus: true });
+  assert.equal(paused.state, 'paused'); assert.match(paused.message, /TON requested a pause.*Try refreshing again later/);
+  assert.equal(paused.progress.percent, null); assert.equal(paused.progress.indeterminate, false);
+  assert.equal(paused.progress.label, 'Gift data saved · Check incomplete');
+  const failed = presentOwnedPriceSync({ ...legacy, phase: 'unavailable', run: { ...legacy.run!, state: 'failed' } }, { rentalStatus: true });
+  assert.equal(failed.progress.percent, null); assert.equal(failed.progress.indeterminate, false);
+  assert.equal(failed.progress.label, 'Gift data saved · Check incomplete');
+});
+
+test('targeted gift activity stays singular with one-gift workload instead of a portfolio scan', () => {
+  const snapshot = owned();
+  snapshot.run = { ...snapshot.run!, scope: 'gift', nft_address: `0:${'1'.repeat(64)}`, wallet: `0:${'2'.repeat(64)}`,
+    session_id: 'targeted-gift-session', total: 1, checked: 0, updated: 0, unresolved: 0 };
+  const checking = presentOwnedPriceSync(snapshot, { rentalStatus: true });
+  assert.equal(checking.title, 'Checking selected gift');
+  assert.equal(checking.objective, 'Checking only the selected gift through TON.');
+  assert.deepEqual(checking.progress, { completed: 0, total: 1, percent: 0, label: '0 of 1 gifts checked', indeterminate: false });
+  assert.doesNotMatch(checking.message, /your saved gifts|more gifts/);
+  const waiting = presentOwnedPriceSync({ ...snapshot, run: { ...snapshot.run, reason: 'retry_wait' } }, { rentalStatus: true });
+  assert.equal(waiting.state, 'waiting'); assert.equal(waiting.title, 'Checking selected gift');
+  assert.doesNotMatch(waiting.message, /your saved gifts|more gifts/);
+  const done = presentOwnedPriceSync({ ...snapshot, phase: 'complete', canStop: false, run: { ...snapshot.run, state: 'complete', checked: 1, updated: 1, status_updated: 1, status_unresolved: 0 } }, { rentalStatus: true });
+  assert.equal(done.title, 'Selected gift'); assert.equal(done.progress.percent, 100);
+  assert.equal(done.progress.total, 1); assert.match(done.message, /1 rental status/);
+  const incomplete = presentOwnedPriceSync({ ...snapshot, phase: 'partial', canStop: false, run: { ...snapshot.run, state: 'partial' } }, { rentalStatus: true });
+  assert.equal(incomplete.title, 'Selected gift'); assert.equal(incomplete.progress.percent, 0);
+  assert.equal(incomplete.actionLabel, null, 'targeted checks never offer portfolio continuation');
+  const failed = presentOwnedPriceSync({ ...snapshot, phase: 'unavailable', canStop: false }, { rentalStatus: true });
+  assert.equal(failed.title, 'Selected gift'); assert.equal(failed.state, 'failed');
+});
+
 test('custom rental timeframes affect purpose while listing purpose stays current', () => {
   assert.match(presentJobSync(job({collection_window: {timeframe: 'custom'}})).objective, /selected dates/);
   assert.match(presentJobSync(job(), {timeframeLabel: 'Last 7 days'}).objective, /last 7 days/);
@@ -176,10 +283,40 @@ test('custom rental timeframes affect purpose while listing purpose stays curren
 test('compact status retains pause cause, restored allowance, failures and the current collection', () => {
   const compact = (value: Job) => compactJobMessage(value, presentJobSync(value));
   assert.equal(compact(job()), 'Checking Low Riders');
-  assert.equal(compact(job({state: 'partial', reason: 'daily_limit'})), 'Daily allowance used · progress saved.');
+  assert.equal(compact(job({state: 'partial', reason: 'daily_limit'})), 'Rolling 24-hour allowance used · progress saved.');
   assert.equal(compact(job({state: 'partial', reason: 'daily_limit', progress: {marketapp_budget: {rolling_24h_used: 0, rolling_24h_limit: 500}}})), 'Allowance available · ready to continue.');
   assert.equal(compact(job({state: 'partial', reason: 'retry_wait'})), 'Provider cooldown · continue later.');
   assert.equal(compact(job({reason: 'retry_wait'})), 'Provider cooldown · retrying automatically.');
   assert.equal(compact(job({state: 'failed', reason: 'authentication_failed'})), 'Access rejected · check the API connection.');
   assert.equal(compact(job({state: 'failed', reason: 'cursor_rejected'})), 'Cannot resume · start a new refresh.');
+});
+
+test('daily pause shows usable availability rather than the first request expiry', () => {
+  const at = new Date(2026, 9, 10, 11, 33).toISOString(), now = new Date(2026, 9, 10, 9).getTime();
+  const saved = job({state: 'partial', reason: 'daily_limit', progress: {marketapp_budget: {
+    rolling_24h_used: 705, rolling_24h_limit: 500, available_at: at,
+    resets_at: new Date(2026, 9, 10, 9, 27).toISOString(),
+  }}});
+  const view = presentJobSync(saved, {now});
+  assert.equal(view.availableAt, at);
+  assert.equal(compactJobMessage(saved, view, now), availableAgainMessage(at, now));
+  assert.match(compactJobMessage(saved, view, now), /^Available again today at /);
+  assert.match(availableAgainMessage(new Date(2026, 9, 11, 11, 33).toISOString(), now), /^Available again tomorrow at /);
+  assert.doesNotMatch(availableAgainMessage(new Date(2026, 9, 12, 11, 33).toISOString(), now), /today|tomorrow/);
+  assert.equal(compactJobMessage(saved, view, Date.parse(at)), 'Availability time reached · try Continue.');
+  assert.equal(view.actionLabel, 'Continue'); // Display never starts provider collection.
+});
+
+test('availability stays unknown for old data or malformed metadata and clears with restored capacity', () => {
+  const at = '2026-10-10T09:33:02Z';
+  for (const bad of [undefined, null, '', 'not-a-date', '0', 1791624782000]) assert.equal(marketappAvailableAt(705, 500, bad), null);
+  for (const [used, limit] of [[499, 500], [null, 500], [705, '500'], [705, 0], [-1, 500]]) assert.equal(marketappAvailableAt(used, limit, at), null);
+  const saved = job({state: 'partial', reason: 'daily_limit', progress: {marketapp_budget: {rolling_24h_used: 499, rolling_24h_limit: 500, available_at: at}}});
+  assert.equal(presentJobSync(saved).availableAt, null);
+  assert.equal(compactJobMessage(saved, presentJobSync(saved)), 'Allowance available · ready to continue.');
+  saved.progress.marketapp_budget = {rolling_24h_used: 705, rolling_24h_limit: 500, resets_at: at};
+  assert.equal(presentJobSync(saved).availableAt, null); // Never promise an older server's first-expiry timestamp.
+  saved.progress.marketapp_budget = {rolling_24h_used: 705, rolling_24h_limit: 500, available_at: at};
+  for (const state of ['running', 'complete', 'failed'] as const) assert.equal(presentJobSync({...saved, state}).availableAt, null);
+  assert.equal(presentJobSync({...saved, reason: 'retry_wait'}).availableAt, null);
 });

@@ -4,6 +4,7 @@ import {mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync,
 import {join, resolve, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
+import {stagePublicReleaseModules, writePublicReleaseConfig, syntheticPublicReleaseConfig} from './fixtures/public-release-modules.mjs';
 
 const token = 'app54321:synthetic_cli_secret';
 const otherToken = 'app65432:synthetic_other_secret';
@@ -19,6 +20,7 @@ function fixture(t) {
   writeFileSync(join(project, 'package.json'), '{"type":"module"}');
   writeFileSync(join(project, 'node_modules/@tgcloud/cli/package.json'), '{"type":"module"}');
   for (const file of ['manage.mjs', 'destination.mjs', 'preflight.mjs']) writeFileSync(join(project, 'tools', file), readFileSync(new URL('../tools/' + file, import.meta.url)));
+  stagePublicReleaseModules(project);
   writeFileSync(join(project, '.tgcloud/credentials'), JSON.stringify({token}));
   writeFileSync(join(project, 'dist/index.html'), '<script src="https://telegram.org/js/telegram-web-app.js?64"></script>');
   writeFileSync(join(project, 'tgcloud/lib/private-config.js'), `export const ownerTelegramId=42;export const marketappToken=${JSON.stringify(providerToken)};`);
@@ -59,7 +61,7 @@ function removeSyntheticState(f) {
 }
 
 test('transport and argument guards run before CLI imports, even for login/status', t => {
-  for (const action of ['login', 'status', 'publish', 'migrate-check', 'migrate-safe']) {
+  for (const action of ['login', 'status', 'publish', 'publish-schema', 'migrate-check', 'migrate-safe']) {
     const f = fixture(t);
     const args = ['--action', action, ...(action === 'login' ? [] : ['--app-id', '54321'])];
     for (const env of [{TG_CLOUD_API_URL: 'https://other.invalid'}, {TG_CLOUD_API_URL: 'https://cloud.telegram.org.evil.invalid'}, {TGCLOUD_BETA: '1'}]) rejected(f.run(args, env));
@@ -71,7 +73,7 @@ test('transport and argument guards run before CLI imports, even for login/statu
 });
 
 test('mismatched environment credentials cannot fall back to matching saved credentials', t => {
-  for (const action of ['status', 'publish', 'migrate-check', 'migrate-safe']) {
+  for (const action of ['status', 'publish', 'publish-schema', 'migrate-check', 'migrate-safe']) {
     const f = fixture(t);
     const result = f.run(['--action', action, '--app-id', '54321'], {TGCLOUD_TOKEN: otherToken});
     rejected(result);
@@ -90,7 +92,7 @@ test('mismatched or malformed saved credentials stop before CLI/preflight execut
 });
 
 test('valid operations pin credentials and production transport and preserve targeted CLI arguments', t => {
-  const expected = {status: ['status'], publish: ['push', 'tgcloud/schema.js', 'tgcloud/lib/', 'tgcloud/endpoints/', 'dist/'], 'migrate-check': ['migrate', '--dry-run'], 'migrate-safe': ['migrate', '--safe']};
+  const expected = {status: ['status'], publish: ['push', 'tgcloud/schema.js', 'tgcloud/lib/', 'tgcloud/endpoints/', 'dist/'], 'publish-schema': ['push', 'tgcloud/schema.js'], 'migrate-check': ['migrate', '--dry-run'], 'migrate-safe': ['migrate', '--safe']};
   for (const [action, args] of Object.entries(expected)) {
     const f = fixture(t);
     const result = f.run(['--action', action, '--app-id', '54321'], {TGCLOUD_DEBUG: '1', TEST_ROTATE_SAVED: otherToken});
@@ -120,6 +122,21 @@ test('publication passes its guarded app ID to the TON Connect manifest check', 
   rejected(f.run(['--action', 'publish', '--app-id', '54321']));
   assert.equal(f.calls().some(c => c.stage === 'cli'), false);
   writeFileSync(path, JSON.stringify({...manifest, url: 'https://app54321.tgcloud.ai', iconUrl: 'https://app54321.tgcloud.ai/wallet-icon.png'}));
+  assert.equal(f.run(['--action', 'publish', '--app-id', '54321']).status, 0);
+  assert.equal(f.calls().filter(c => c.stage === 'cli').length, 1);
+});
+
+test('public release configuration blocks publication before any CLI request', t => {
+  const f = fixture(t);
+  stagePublicReleaseModules(f.project, {runtime: true});
+  writeFileSync(join(f.project, 'dist/tonconnect-manifest.json'), JSON.stringify({url: 'https://app54321.tgcloud.ai', name: 'Gift Rent Check', iconUrl: 'https://app54321.tgcloud.ai/wallet-icon.png'}));
+  writeFileSync(join(f.project, 'dist/wallet-icon.png'), readFileSync(new URL('../../frontend/public/wallet-icon.png', import.meta.url)));
+  for (const invalid of [{storageEncryptionConfirmed: false}, {providerUseApproved: false}, {origin: 'https://app65432.tgcloud.ai'}]) {
+    writePublicReleaseConfig(f.project, {...syntheticPublicReleaseConfig, ...invalid});
+    rejected(f.run(['--action', 'publish', '--app-id', '54321']));
+    assert.equal(f.calls().some(c => c.stage === 'cli'), false);
+  }
+  writePublicReleaseConfig(f.project, syntheticPublicReleaseConfig);
   assert.equal(f.run(['--action', 'publish', '--app-id', '54321']).status, 0);
   assert.equal(f.calls().filter(c => c.stage === 'cli').length, 1);
 });

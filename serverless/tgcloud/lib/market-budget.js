@@ -4,13 +4,19 @@ const DAY = 86400000;
 const validTime = value => Number.isSafeInteger(value) && value > 0 && value <= 8640000000000000;
 const validId = value => typeof value === 'string' && /^[a-zA-Z0-9-]{8,80}$/.test(value);
 
-export function effectiveMarketAttempts(state, now) {
-  const attempts = (state.attempts || []).filter(at => at > now - DAY);
+function activeMarketBudgetReset(state, now) {
   const reset = state.marketapp_budget_reset;
   if (!reset || !validId(reset.id) || !validTime(reset.at) || !validTime(reset.expires_at)
     || reset.at > now || now >= reset.expires_at || reset.expires_at <= reset.at
     || reset.expires_at - reset.at > 26 * 3600000 || !Array.isArray(reset.excluded_attempts)
-    || reset.excluded_attempts.length > 10000 || reset.excluded_attempts.some(at => !validTime(at) || at > reset.at)) return attempts;
+    || reset.excluded_attempts.length > 10000 || reset.excluded_attempts.some(at => !validTime(at) || at > reset.at)) return null;
+  return reset;
+}
+
+export function effectiveMarketAttempts(state, now) {
+  const attempts = (state.attempts || []).filter(at => at > now - DAY);
+  const reset = activeMarketBudgetReset(state, now);
+  if (!reset) return attempts;
   const remaining = new Map();
   for (const at of reset.excluded_attempts) remaining.set(at, (remaining.get(at) || 0) + 1);
   return attempts.filter(at => {
@@ -18,6 +24,23 @@ export function effectiveMarketAttempts(state, now) {
     if (count) {remaining.set(at, count - 1); return false;}
     return true;
   });
+}
+
+/** Earliest capacity for one request, assuming no further requests are made. */
+export function marketBudgetAvailableAt(state, now, limit) {
+  const used = effectiveMarketAttempts(state, now).sort((a, b) => a - b);
+  if (used.length < limit) return null;
+  // At the cap one request must expire; above the cap enough must expire to
+  // leave strictly fewer than the cap. Equal timestamps expire together.
+  let available = used[used.length - limit] + DAY;
+  const reset = activeMarketBudgetReset(state, now);
+  if (reset && reset.expires_at <= available) {
+    // Reset expiry can restore excluded requests before capacity returns.
+    // Reevaluate with the same effective ledger rules at that exact boundary.
+    const restored = effectiveMarketAttempts(state, reset.expires_at).sort((a, b) => a - b);
+    available = restored.length < limit ? reset.expires_at : restored[restored.length - limit] + DAY;
+  }
+  return available;
 }
 
 /** Private CLI only: one append-only event, idempotent by explicit reset ID. */

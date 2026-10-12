@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased
+
+## 0.4.0 — 2026-10-12
+
+Development / invitation-only beta. See [release notes and upgrade steps](docs/releases/v0.4.0.md).
+
+### Added
+
+- **Status** replaces Activity with separate freshness, last-check dates and actions for gifts, current prices, comparison averages and each analytics period. Connections clearly separate wallet verification, Marketapp login and API-key management.
+- **My gifts** offers Simple and Detailed views, search, filters and remembered sorting. Last rented is the default; verified current rental starts remain stable during refreshes. Rented cards show a live remaining-time badge, with `≈` for website estimates.
+- Telegram supports pull-to-refresh and bounded checks on opening. The private owner's remembered Marketapp login can refresh known gifts and personal analytics; TON checks fill missing gift details and rental expiry. Eligible comparison checks follow using the account's API key. Each source retains its own limits, cooldowns and saved dates.
+- Quick price actions copy a recommendation when tapped, open the gift on Marketapp and verify an individual gift after a manual edit. Observed price changes include saved rental performance over equal 7-, 14- or 30-day periods; no automatic price changes are made.
+- Analytics charts show period, volume and rental count when pressed or dragged. Volume displays to one decimal; gift prices retain three. The private owner can remember an encrypted Marketapp login for up to seven days and disconnect it separately.
+- Invitation-only accounts verify their own wallet and use their own encrypted API key, isolated portfolios and resumable discovery. Account export, confirmed deletion and explicit reactivation are available. Open registration remains disabled.
+- Storage monitoring shows estimated usage, cleanup progress and bounded daily growth samples. Capacity forecasts require enough recent observations; application budgets remain distinct from verified hosting capacity.
+
+### Changed
+
+- Compact Telegram storage retains full operational state only at the current checkpoint, the latest resumable scan bodies and the newest 20 terminal scan bodies. Event identities, replay bindings, request usage and small refresh summaries remain available.
+- Repeated structured evidence shares an exact canonical payload within an account generation. Immutable occurrences retain dates, envelopes and order; conflicting or distinct source fields remain distinct. Full HTTP response copies are discarded after validated observations are saved.
+- Storage admission accounts for normalized data and atomic checkpoint retirement. Cleanup runs bounded, resumable batches and skips legacy history compaction for compact accounts. Fresh accounts use the compact layout once its required triggers are installed; an existing account changes layout only through the explicit development-reset procedure.
+- Dashboard reads use bounded evidence batches, compact lossless responses and lighter revision polling. Failed reads retry within a deadline and expose fixed diagnostics without private runtime details.
+- Recommendations continue to use valid saved model/backdrop traits regardless of age. Source dates and age warnings remain visible; comparison windows, minimum samples and conflicting-evidence exclusions are unchanged.
+
+### Fixed
+
+- Gift refresh no longer looks stuck at 99% after Marketapp has read every card: additional TON checks have separate progress, provider waits show **Waiting**, and an incomplete check remains distinct from saved gift data. This includes the deployed revision 103 progress fix.
+- Gift checks retain verified rental starts across intermediate website results and failed TON lookups. Cached checks retain their original dates, and a completed check can be green while unavailable values remain separate warnings.
+- Continue, Stop and comparison progress respect saved request leases and reject stale replies. Empty final pages finish coverage immediately; retained Telegram pages can recheck gifts after a completed check and a sufficiently long absence.
+- Cleanup buttons remain stable between batches and show **Waiting** during other updates. Paused, failed and completed cycles have distinct actions, and delayed scheduling cannot indefinitely postpone the next batch.
+- Account generations, credential versions, wallet/session checks and atomic writes fence old workers after account deletion, wallet changes or key removal. Request ledgers and encryption nonce counters survive removal; keys never return to the browser.
+- Stop and key revocation remain available through bounded recovery writes when collection storage is paused. Rebuildable cache can be reclaimed without erasing saved financial evidence or resetting allowances.
+- Desktop pricing and exports bound malformed decimal expansion, reuse request-local calculations and filter rental performance by canonical gift identity.
+
+### Upgrade and limitations
+
+- Deploy the additive schema, safe migration and compact-storage accounting/triggers before the new runtime. The development reset is a separate, explicit destructive operation: it removes comparison history, owned price/status observations and scan progress while preserving credentials, wallet settings, portfolio/traits, analytics and request/security ledgers. Normal publication does not reset data.
+- Compact storage is not compatible with an older writer; do not roll back the runtime over compact accounts. The legacy private-owner copy tool rejects compact sources.
+- Marketapp website login is undocumented and remains private-owner-only. Invited accounts use TON for gift checks and their own API key for comparisons; website analytics is disabled for them. Closed-app background collection is not promised.
+- Public registration remains gated on verified hosting capacity, backup/recovery validation and operator/provider review. Logical byte budgets exclude some database/index overhead and do not establish a supported public user count.
+
 ## 0.3.0 — 2026-10-09
 
 This release adds personal rental analytics to Overview, including a wallet-approved refresh in Telegram, and makes desktop setup and saved sync recovery easier.

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -9,6 +10,7 @@ import math
 import secrets
 import sqlite3
 import threading
+import time
 from contextlib import asynccontextmanager, closing
 from dataclasses import replace
 from datetime import datetime
@@ -102,10 +104,25 @@ def _ton_price_cooldown(database):
                milliseconds(observed) + 1000 if observed is not None else 0)
 
 
+def _revision_stat(path, *, minimum_size=0):
+    """Small metadata reads only; neither SQLite rows nor evidence are loaded."""
+    try:
+        stat = Path(path).stat()
+        if stat.st_size < minimum_size:
+            return None
+        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        # Keep failures private and stable. The full view supplies its ordinary
+        # safe error if the database or review evidence cannot be read.
+        return ("unavailable", exc.errno)
+
+
 def create_app(settings, discovery_settings=None, *, wallet=None, review_path=None,
                allow_network=False, static_dir=None, jobs_path=None, start_worker=True,
                execute=None, allow_price_refresh=False, owned_price_service=None,
-               credential_store=None):
+               credential_store=None, revision_clock=None):
     """Local development adapter. Do not expose it through a tunnel or public bind.
 
     Telegram Serverless will supply its own transport/authentication adapter;
@@ -122,6 +139,11 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
     credentials = DashboardCredentials(database, settings.token, credential_store)
     settings = replace(settings, token=credentials.key)
     credential_lock = threading.RLock()
+    revision_clock = revision_clock or time.time
+    service_generation = secrets.token_urlsafe(24)
+    credential_revision = 0
+    revision_cache = {}
+    revision_cache_lock = threading.RLock()
     with Store(database) as store:
         store.connection.execute("PRAGMA journal_mode=WAL")
         selected_wallet = choose_wallet(store, wallet or settings.owner_address)
@@ -151,7 +173,7 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
         retained_secrets.update(getattr(handler.formatter, "secrets", ()))
 
     def set_runtime_token(key):
-        nonlocal settings
+        nonlocal settings, credential_revision
         from .logging_setup import configure_logging
         if key:
             retained_secrets.add(key)
@@ -160,6 +182,7 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
         worker.secrets = tuple(sorted(retained_secrets, key=len, reverse=True))
         configure_logging(*worker.secrets)
         settings = replace(settings, token=key)
+        credential_revision += 1
 
     set_runtime_token(settings.token)
 
@@ -296,6 +319,66 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
             raise HTTPException(422, "The remove-key request must not contain a body.")
         return await run_in_threadpool(change_credential, remove=True)
 
+    def business_revision(path):
+        # Lease heartbeats change the jobs database every few seconds. Only
+        # these append-only business tables change dashboard gift/analytics or
+        # allowance data; indexed primary-key maxima never load their records.
+        metadata = (_revision_stat(path), _revision_stat(str(path) + "-wal", minimum_size=33))
+        tables = ("owned_price_observations", "personal_analytics_snapshots", "dashboard_marketapp_attempts")
+        with revision_cache_lock:
+            cached = revision_cache.get(path)
+            if cached is not None and cached[0] == metadata:
+                return cached[1]
+            if metadata[0] is None:
+                markers = tuple((False, None) for _ in tables)
+            else:
+                with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)) as connection:
+                    connection.execute("BEGIN")
+                    present = {row[0] for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?,?,?)", tables,
+                    )}
+                    markers = tuple((table in present,
+                                     connection.execute(f'SELECT MAX(id) FROM "{table}"').fetchone()[0]
+                                     if table in present else None) for table in tables)
+            identity = metadata[0][:2] if metadata[0] is not None else None
+            result = (identity, markers)
+            # Keep the metadata captured before the read. A commit during it
+            # therefore triggers another marker check instead of being hidden.
+            revision_cache[path] = (metadata, result)
+            return result
+
+    def dashboard_revision():
+        # Main collector writes contain actual data. Queue/owned-price writes
+        # also contain housekeeping, so use semantic markers for those files.
+        # Capture before a full projection so later commits remain observable.
+        databases = [Path(jobs.path).resolve()]
+        owned_database = getattr(owned_prices, "path", None)
+        if owned_database is not None:
+            databases.append(Path(owned_database).resolve())
+        database_stats = [(_revision_stat(database), _revision_stat(str(database) + "-wal", minimum_size=33))]
+        database_stats.extend(business_revision(path) for path in dict.fromkeys(databases))
+        review_stats = []
+        if review_path is not None:
+            from .dashboard_view import _REVIEW_FILES
+            review_stats.extend(_revision_stat(review_path / filename) for filename in _REVIEW_FILES)
+            folder = review_path / "evidence" / "live-recheck"
+            review_stats.extend(_revision_stat(folder / filename) for filename in
+                                ("result.json", "nft-before.json", "holding-account.json", "nft-after.json"))
+            review_stats.extend(_revision_stat(path) for path in
+                                (review_path, review_path / "evidence", folder))
+        now = revision_clock()
+        if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(now) or now < 0:
+            raise ValueError("Dashboard clock is unavailable")
+        with credential_lock:
+            capabilities = (allow_network, price_refresh_enabled, bool(settings.token),
+                            bool(discovery_settings.api_key), bool(selected_wallet), credential_revision)
+        descriptor = (service_generation, int(now // 60), capabilities, database_stats, review_stats)
+        return "desktop-v1:" + hashlib.sha256(json.dumps(descriptor, separators=(",", ":")).encode()).hexdigest()
+
+    @app.get("/api/dashboard-revision")
+    def dashboard_revision_data():
+        return {"token": dashboard_revision()}
+
     @app.post("/api/personal-analytics")
     async def save_personal_analytics(request: Request):
         if not selected_wallet:
@@ -326,6 +409,7 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
             dashboard_window(timeframe, date_from, date_to)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
+        update_token = dashboard_revision()
         with Store(database) as store:
             store.connection.execute("PRAGMA query_only=ON")
             result = build_dashboard(store, selected_wallet, review_path, pricing_source=pricing_source, timeframe=timeframe, date_from=date_from, date_to=date_to, pricing_backdrop=pricing_backdrop,
@@ -346,6 +430,7 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
         analytics_snapshots = snapshot_options(jobs.path, selected_wallet) if selected_wallet else []
         result["personal_analytics_snapshots"] = analytics_snapshots
         result["personal_analytics"] = analytics_snapshots[0] if analytics_snapshots else None
+        result["update_token"] = update_token
         return result
 
     @app.get("/api/dashboard")

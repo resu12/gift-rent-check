@@ -1,8 +1,266 @@
-import {safeMarketappRefreshOutcome} from './marketapp-refresh-status.js';
-const initial = () => ({version: 2, next_job_id: 1, job: null, attempts: [], next_allowed_at: 0});
+import {safeMarketappRefreshOutcome} from './marketapp-refresh-outcome.js';
+import {createDashboardCache} from './dashboard-cache.js';
+import {createOwnedRefreshArchive} from './owned-refresh-archive.js';
+import {encodeCheckpoint, decodeCheckpoint, createCheckpointStorage, OWNED_SOURCE_FENCE, OWNED_TARGET_SOURCE_FENCE, GIFT_SOURCE_FENCE, usesCompactOperationalStorage, COMPACT_OPERATIONAL_READY_SQL} from './checkpoint-storage.js';
+import {createMarketappWebsiteGate} from './marketapp-website-gate.js';
+import {createGiftRefreshStorage} from './gift-refresh-storage.js';
+import {BUDGET_RESET_SOURCE_FENCE} from './budget-reset-checkpoint-storage.js';
+import {utf8Size} from './bounded-response.js';
+import {ownedScopeRecordFilter} from './owned-price-engine.js';
+import {canonicalJSON} from './cloud-pricing-core.js';
+import {sha256} from './ton-price-decoder.js';
+import {utf8Bytes} from './personal-analytics.js';
 
-export function createCloudRepository(db) {
+// The opt-in layout keeps immutable observations separate from the latest
+// operational checkpoint. Payload identity includes every source field; it
+// must never erase a contradictory variant or a filtered listing query.
+export const NORMALIZED_RECORD_KINDS = Object.freeze(['listing','history','metadata','ownership','collection','attribute','owned_price','owned_status','personal_gift']);
+export const RESET_EVIDENCE_KINDS = Object.freeze(['listing','history','owned_price','owned_status','personal_gift']);
+export const NORMALIZED_RECORD_TRIGGER_NAMES = Object.freeze(['normalized_records_v1_private_insert','normalized_records_v1_public_insert']);
+export const NORMALIZED_RECORD_READY_SQL = `(SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN(${NORMALIZED_RECORD_TRIGGER_NAMES.map(name=>`'${name}'`).join(',')}))=2`;
+export function compactStorageGuard(table,where='1') {
+  const head=`SELECT state_json FROM ${table} WHERE ${where} ORDER BY sequence DESC LIMIT 1`;
+  return `(:compact_mode=0 OR (${COMPACT_OPERATIONAL_READY_SQL}) AND (${NORMALIZED_RECORD_READY_SQL})
+    AND :record_floor BETWEEN 0 AND :sequence)
+    AND (COALESCE(json_extract((${head}),'$.operational_storage_version'),0)<>1 OR :compact_mode=1
+      AND :record_floor>=COALESCE(json_extract((${head}),'$.record_storage_floor'),0))`;
+}
+export function compactStorageParameters(state) {
+  const compact=usesCompactOperationalStorage(state),floor=state?.record_storage_floor??0;
+  if(compact&&(!Number.isSafeInteger(floor)||floor<0))throw new Error('Invalid saved record boundary');
+  return {':compact_mode':compact?1:0,':record_floor':compact?floor:0};
+}
+export function normalizedRecordOverhead(records,eventKey,compact) {
+  return compact?(records||[]).filter(value=>NORMALIZED_RECORD_KINDS.includes(value?.kind)&&Object.hasOwn(value,'record')).length*(1024+utf8Size(eventKey||'')):0;
+}
+// These are the fixed fields copied by the compact operational archive
+// trigger. Reserve their complete JSON plus keys, IDs, sessions and watermark;
+// large resumable target arrays remain only in the replacement checkpoint.
+const CONTROL_OWN_KEYS=['id','state','total','checked','updated','unresolved','status_updated','status_unresolved','reason','started_at','completed_at','scope','nft_address','wallet','session_id'];
+const CONTROL_GIFT_KEYS=[...CONTROL_OWN_KEYS,'scope_signature','check_started_at','provider','cache_hit','fallback_reason','deadline','stage','next_allowed_at'];
+export async function compactControlRetirement(get,{table,where='1',expected,event,stateJson,bytes,publicScope=false}) {
+  let archives=4096;
+  for(const [group,keys] of [[event.state?.owned_prices,CONTROL_OWN_KEYS],...(publicScope?[]:[[event.state?.gift_refresh,CONTROL_GIFT_KEYS]])]) {
+    for(const run of [group?.previous_run,group?.run])if(run&&typeof run==='object')
+      archives+=utf8Size(JSON.stringify(Object.fromEntries(keys.filter(key=>Object.hasOwn(run,key)).map(key=>[key,run[key]]))));
+  }
+  const sql=`COALESCE((SELECT MAX(0,length(CAST(state_json AS BLOB))-2)
+    +CASE WHEN job_id=:control_job_id THEN COALESCE(length(CAST(job_json AS BLOB)),0) ELSE 0 END
+    FROM ${table} WHERE ${where} AND sequence=:expected AND json_extract(state_json,'$.operational_storage_version')=1),0)`;
+  const parameters={':expected':expected,':control_job_id':event.job?event.job.id??null:null};
+  const previous=await get(`SELECT ${sql} AS bytes`,parameters);
+  if(!Number.isSafeInteger(previous?.bytes)||previous.bytes<=0)return null;
+  // Replace the ordinary conservative archive allowance with the bounded
+  // summary allowance, then credit only bytes this exact INSERT retires.
+  const net=Math.max(0,bytes-utf8Size(stateJson)-4096+archives-previous.bytes);
+  if(net>262144)return null;
+  return {bytes:net,sql:`${sql}=:control_retirement_bytes`,parameters:{':control_job_id':parameters[':control_job_id'],':control_retirement_bytes':previous.bytes}};
+}
+export function preparedRecordJSON(records, compact) {
+  const values=JSON.parse(JSON.stringify(records||[]));
+  if(!compact)return JSON.stringify(values);
+  return JSON.stringify(values.map(value=>{
+    // All input envelopes are wrapped, including protected kinds, so an
+    // imported unknown field can never impersonate our internal write tag.
+    if(!NORMALIZED_RECORD_KINDS.includes(value?.kind)||!Object.hasOwn(value,'record'))return {__normalized_inline_v1:value};
+    const document=canonicalJSON({kind:value.kind,record:value.record}),envelope={...value};delete envelope.kind;delete envelope.record;
+    const hash=Array.from(sha256(utf8Bytes(document)),byte=>byte.toString(16).padStart(2,'0')).join('');
+    return {kind:value.kind,__normalized_write_v1:{hash,document:JSON.parse(document),envelope}};
+  }));
+}
+export function normalizedRecordScope(userId=null) {return userId===null?'private':`public:${userId}`;}
+export function normalizedRecordPrefix(scope,generation=0) {return `${scope}:g${generation}:`;}
+export function decodeNormalizedRecord(row) {
+  if(row.envelope_json===null)return JSON.parse(row.document);
+  const document=JSON.parse(row.document),envelope=JSON.parse(row.envelope_json);
+  if(!document||typeof document!=='object'||!NORMALIZED_RECORD_KINDS.includes(document.kind)||!Object.hasOwn(document,'record')
+    ||!envelope||typeof envelope!=='object'||Array.isArray(envelope))throw new Error('Invalid normalized record');
+  return {...envelope,...document};
+}
+// Both repositories supply account-fenced adapters. Each page is bounded by
+// rows and serialized bytes before crossing the host boundary, and contains
+// the original event order. SQL never parses source_json or nested evidence.
+export async function visitCompactRecordPages({get,all,table,where='1',parameters={},scope,generation=0,until,floor=0,visitor,selection='all',filter=null}) {
+  if(!['cloud_events','public_cloud_events'].includes(table)||!Number.isSafeInteger(floor)||floor<0||floor>until)throw new Error('Saved records changed; reload saved data');
+  const prefix=normalizedRecordPrefix(scope,generation),kindSelection=selection==='seeds'?"AND json_extract(j.value,'$.kind') IN('settings','portfolio','gift')"
+    :selection==='settings'?"AND json_extract(j.value,'$.kind')='settings'":'';
+  const expired=RESET_EVIDENCE_KINDS.map(kind=>`'${kind}'`).join(',');
+  const inlineQuery=`
+      SELECT e.sequence,CAST(j.key AS INTEGER) AS ordinal,j.value AS document,NULL AS envelope_json
+      FROM ${table} e,json_each(e.records_json) j
+      WHERE ${where} AND e.sequence>=:record_after AND e.sequence<=:record_until AND e.records_json<>'[]'
+      AND (e.sequence>:record_after OR e.sequence=:record_after AND CAST(j.key AS INTEGER)>:record_ordinal)
+      AND (json_type(j.value,'$.__normalized_record_v1') IS NULL OR json_type(j.value,'$.record') IS NOT NULL
+        OR COALESCE(json_extract(j.value,'$.kind'),'') NOT IN(${NORMALIZED_RECORD_KINDS.map(kind=>`'${kind}'`).join(',')}))
+      AND (e.sequence>=:record_floor OR COALESCE(json_extract(j.value,'$.kind'),'') NOT IN(${expired})) ${kindSelection}
+      AND ${filter?filter.sql.replace(/\brecords_json\b/g,'json_array(json(j.value))'):'1'}
+      ORDER BY e.sequence,CAST(j.key AS INTEGER) LIMIT 800`;
+  const observationQuery=`
+      SELECT o.sequence,o.ordinal,p.document,o.envelope_json FROM service_record_occurrences o
+      JOIN service_record_payloads p ON p.payload_id=o.payload_id AND p.scope=o.scope
+      WHERE o.scope=:record_scope AND o.occurrence_id LIKE :record_prefix
+      AND (o.sequence>=:record_floor OR COALESCE(json_extract(p.document,'$.kind'),'') NOT IN(${expired}))
+      AND o.sequence>=:record_after AND o.sequence<=:record_until
+      AND (o.sequence>:record_after OR o.sequence=:record_after AND o.ordinal>:record_ordinal)
+      AND ${filter?filter.sql.replace(/\brecords_json\b/g,'json_array(json(p.document))'):'1'}
+      AND EXISTS(SELECT 1 FROM ${table} e WHERE e.sequence=o.sequence AND ${where})
+      ORDER BY o.sequence,o.ordinal LIMIT 800`;
+  const streams=[{query:inlineQuery,normalized:false,sequence:-1,ordinal:-1,rows:[],offset:0,done:false},
+    {query:observationQuery,normalized:true,sequence:-1,ordinal:-1,rows:[],offset:0,done:selection!=='all'}];
+  async function fill(stream) {
+    if(stream.done||stream.offset<stream.rows.length)return;
+    const args={...parameters,...filter?.parameters,':record_until':until,':record_after':stream.sequence,':record_ordinal':stream.ordinal,':record_floor':floor};
+    if(stream.normalized)Object.assign(args,{':record_scope':scope,':record_prefix':prefix+'%'});
+    const rows=await all(`WITH candidates AS (${stream.query}),
+      pending AS (SELECT *,length(CAST(document AS BLOB))+COALESCE(length(CAST(envelope_json AS BLOB)),0) AS bytes FROM candidates), bounded AS (
+      SELECT *,SUM(bytes) OVER(ORDER BY sequence,ordinal) AS total_bytes FROM pending
+    ) SELECT sequence,ordinal,document,envelope_json,bytes FROM bounded
+      WHERE total_bytes<=1048576 OR (sequence=(SELECT sequence FROM pending LIMIT 1) AND ordinal=(SELECT ordinal FROM pending LIMIT 1))
+      ORDER BY sequence,ordinal`,args);
+    stream.rows=rows;stream.offset=0;stream.done=!rows.length;
+    if(rows.length){stream.sequence=rows[rows.length-1].sequence;stream.ordinal=rows[rows.length-1].ordinal;}
+  }
+  // Independent cursors avoid rescanning all remaining inline marker events
+  // for each observation page. The merge retains exact event/record ordering.
+  let batch=[],bytes=0;
+  for(;;) {
+    for(const stream of streams)await fill(stream);
+    const ready=streams.filter(stream=>!stream.done);
+    if(!ready.length)break;
+    const stream=ready.length===1?ready[0]:ready.reduce((first,next)=>{
+      const a=first.rows[first.offset],b=next.rows[next.offset];
+      return b.sequence<a.sequence||b.sequence===a.sequence&&b.ordinal<a.ordinal?next:first;
+    });
+    const row=stream.rows[stream.offset++];
+    if(batch.length&&(bytes+row.bytes>1048576||batch.length>=800)){await visitor(batch);batch=[];bytes=0;}
+    batch.push(decodeNormalizedRecord(row));bytes+=row.bytes;
+  }
+  if(batch.length)await visitor(batch);
+  // A reset during the traversal invalidates this captured snapshot. Public
+  // adapters also re-check account generation after an empty page.
+  const current=await get(`SELECT COALESCE(json_extract(state_json,'$.record_storage_floor'),0) AS floor FROM ${table} e WHERE ${where} ORDER BY sequence DESC LIMIT 1`,parameters);
+  if(!current||current.floor!==floor)throw new Error('Saved records changed; reload saved data');
+}
+export async function normalizedEventRecords(all,row,{scope,generation=0,parameters={},where='1'}={}) {
+  if(!row)return null;
+  const records=JSON.parse(row.records_json);
+  if(!records.some(value=>Number.isSafeInteger(value?.__normalized_record_v1)&&NORMALIZED_RECORD_KINDS.includes(value.kind)&&!Object.hasOwn(value,'record')))return records;
+  const byOrdinal=new Map();let after=-1;
+  for(;;) {
+    const rows=await all(`WITH pending AS (SELECT o.ordinal,p.document,o.envelope_json,
+      length(CAST(p.document AS BLOB))+length(CAST(o.envelope_json AS BLOB)) AS bytes FROM service_record_occurrences o
+      JOIN service_record_payloads p ON p.payload_id=o.payload_id AND p.scope=o.scope
+      WHERE o.scope=:record_scope AND o.sequence=:record_sequence AND o.occurrence_id LIKE :record_prefix
+      AND o.ordinal>:record_ordinal AND ${where} ORDER BY o.ordinal LIMIT 100),
+      bounded AS (SELECT *,SUM(bytes) OVER(ORDER BY ordinal) AS total_bytes FROM pending)
+      SELECT ordinal,document,envelope_json FROM bounded WHERE total_bytes<=393216 OR ordinal=(SELECT MIN(ordinal) FROM pending) ORDER BY ordinal`,
+      {...parameters,':record_scope':scope,':record_sequence':row.sequence,':record_prefix':normalizedRecordPrefix(scope,generation)+'%',':record_ordinal':after});
+    if(!rows.length)break;
+    for(const value of rows)byOrdinal.set(value.ordinal,decodeNormalizedRecord(value));
+    after=rows[rows.length-1].ordinal;
+  }
+  return records.map((value,index)=>{
+    if(!Number.isSafeInteger(value?.__normalized_record_v1)||!NORMALIZED_RECORD_KINDS.includes(value.kind)||Object.hasOwn(value,'record'))return value;
+    const result=byOrdinal.get(index);if(!result||value.__normalized_record_v1!==index||result.kind!==value.kind)throw new Error('Normalized record unavailable');return result;
+  });
+}
+const initial = () => ({version: 2, next_job_id: 1, job: null, attempts: [], next_allowed_at: 0});
+export class CloudStorageFullError extends Error {
+  constructor() {super('Private storage is full. Saved data and progress are retained. Storage maintenance is needed before updating.');}
+}
+
+export function createCloudRepository(db, {dashboardCache = false, credentialFence = null, storageAdmission = null} = {}) {
+  if(credentialFence!==null&&(!credentialFence||typeof credentialFence.row_id!=='string'||!/^private-owner-marketapp:[1-9]\d{0,15}$/.test(credentialFence.row_id)
+    ||typeof credentialFence.user_id!=='string'||credentialFence.row_id!==`private-owner-marketapp:${credentialFence.user_id}`
+    ||!Number.isSafeInteger(credentialFence.credential_version)||credentialFence.credential_version<0))throw new Error('Invalid private credential fence');
+  const credentialGuard=credentialFence===null?'':`AND COALESCE((SELECT credential_version FROM private_provider_credentials
+    WHERE row_id=:credential_row AND user_id=:credential_owner AND provider='marketapp'),0)=:credential_version`;
+  const credentialParameters=credentialFence===null?{}:{':credential_row':credentialFence.row_id,':credential_owner':credentialFence.user_id,':credential_version':credentialFence.credential_version};
+  function credentialJob(job) {
+    if(!job||credentialFence===null||!['queued','running','partial'].includes(job.state))return job;
+    const version=Object.hasOwn(job,'private_credential_version')?job.private_credential_version:0;
+    return version===credentialFence.credential_version?job:{...job,state:'failed',reason:'credential_changed',lease:null,lease_until:0};
+  }
+  const checkpoints = createCheckpointStorage(db);
+  // Hints come only from a successfully decoded read or our successful append.
+  // Every reuse does a guarded primary-key read and exact content comparison;
+  // changed/new state falls back to the historical source lookup.
+  let sourceHints = null;
+  let readSaved;
+  async function checkpointSources(expected, state) {
+    if(usesCompactOperationalStorage(state))return {targetSource:null,ownedSource:null,giftSource:null,budgetSource:null};
+    const hints = sourceHints?.revision === expected ? sourceHints : null;
+    const targetSource = await checkpoints.findOwnedTargetSource(state?.owned_prices?.run, expected + 1, hints?.target ?? null);
+    const ownedSource = await checkpoints.findOwnedStateSource(state?.owned_prices, expected + 1, targetSource, hints?.owned ?? null);
+    const giftSource = await checkpoints.findGiftStateSource(state?.gift_refresh, expected + 1, hints?.gift ?? null);
+    const budgetSource = await checkpoints.findBudgetResetSource(state?.marketapp_budget_reset, expected + 1, hints?.budget ?? null);
+    return {targetSource, ownedSource, giftSource, budgetSource};
+  }
+  function rememberSources(revision, targetSource, ownedSource, giftSource, budgetSource) {
+    sourceHints = {revision, target: targetSource?.sequence ?? revision, owned: ownedSource?.sequence ?? revision, gift: giftSource?.sequence ?? revision, budget: budgetSource?.sequence ?? revision};
+  }
+  async function appendWithCacheRecovery(insert, parameters) {
+    try {return await db.run(insert, parameters);}
+    catch (error) {
+      if (!/database or disk is full/i.test(String(error?.message || ''))) throw error;
+      // Only derived dashboard projections are disposable. Retry the already
+      // captured INSERT once, so every CAS, source, wallet and session fence
+      // is reevaluated by SQL without another provider request or new values.
+      let evicted;
+      try {evicted = await db.run('DELETE FROM dashboard_projection_cache');}
+      catch {throw new CloudStorageFullError();}
+      if (!Number.isSafeInteger(evicted?.rowsAffected) || evicted.rowsAffected <= 0) throw new CloudStorageFullError();
+      try {return await db.run(insert, parameters);}
+      catch (retryError) {
+        if (/database or disk is full/i.test(String(retryError?.message || ''))) throw new CloudStorageFullError();
+        throw retryError;
+      }
+    }
+  }
+  // Compact records_json is produced exclusively by JSON.stringify. A textual
+  // false positive only invalidates a login conservatively; it cannot approve
+  // a wallet change. The revision fences old→new→old wallet transitions too.
+  const walletRevision = "COALESCE((SELECT MAX(sequence) FROM cloud_events WHERE records_json LIKE '%\"kind\":\"settings\"%'),0)";
+  async function visitRecordPages(until, visitor, seedsOnly = false, filter = null) {
+    if (!Number.isSafeInteger(until) || until < 0 || typeof visitor !== 'function') throw new Error('Invalid record traversal');
+    const context=await db.get("SELECT json_extract(state_json,'$.operational_storage_version') AS mode,COALESCE(json_extract(state_json,'$.record_storage_floor'),0) AS floor FROM cloud_events ORDER BY sequence DESC LIMIT 1");
+    if(context?.mode===1)return await visitCompactRecordPages({get:(...args)=>db.get(...args),all:(...args)=>db.all(...args),table:'cloud_events',
+      scope:'private',until,floor:context.floor,visitor,selection:seedsOnly?'seeds':'all',filter});
+    let after = 0;
+    for (;;) {
+      // Batch small events to avoid hundreds of host round trips, keeping the
+      // existing byte ceiling. A legacy oversized row still advances alone,
+      // and visitors retain only needed evidence.
+      const rows = await db.all(`WITH pending AS (
+        SELECT sequence,records_json,length(CAST(records_json AS BLOB)) AS bytes
+        FROM cloud_events WHERE sequence>:after AND sequence<=:until AND records_json<>'[]'
+          AND (:seeds=0 OR records_json LIKE '%"portfolio"%' OR records_json LIKE '%"gift"%' OR records_json LIKE '%"settings"%')
+          AND ${filter?.sql??'1'}
+          ORDER BY sequence LIMIT 16
+      ), bounded AS (
+        SELECT sequence,records_json,SUM(bytes) OVER (ORDER BY sequence) AS total_bytes FROM pending
+      ) SELECT sequence,records_json FROM bounded
+        WHERE total_bytes<=1048576 OR sequence=(SELECT MIN(sequence) FROM pending)
+        ORDER BY sequence`, {':after': after, ':until': until, ':seeds': seedsOnly ? 1 : 0,...filter?.parameters});
+      if (!rows.length) {
+        const latest=await db.get("SELECT COALESCE(json_extract(state_json,'$.record_storage_floor'),0) AS floor FROM cloud_events ORDER BY sequence DESC LIMIT 1");
+        if((latest?.floor??0)!==(context?.floor??0))throw new Error('Saved records changed; reload saved data');
+        return;
+      }
+      for (const row of rows) {
+        const parsed = JSON.parse(row.records_json);
+        await visitor(seedsOnly ? parsed.filter(value => ['portfolio', 'gift', 'settings'].includes(value?.kind)) : parsed);
+      }
+      after = rows[rows.length - 1].sequence;
+    }
+  }
   return {
+    ...(storageAdmission?{reserveStorage:storageAdmission.reserveStorage,releaseStorage:storageAdmission.releaseStorage}:{}),
+    ...createMarketappWebsiteGate(db),
+    ...createGiftRefreshStorage(db),
+    ...createOwnedRefreshArchive(db),
+    ...checkpoints,
+    ...(dashboardCache ? createDashboardCache(db,{storageAdmission}) : {}),
     async clock() {
       // V8 wall time may be held constant until a host call. SQLite evaluates
       // 'now' for this statement; preserve its millisecond precision so a
@@ -11,9 +269,30 @@ export function createCloudRepository(db) {
       if (!Number.isSafeInteger(row?.server_time) || row.server_time <= 0 || row.server_time > 8640000000000000) throw new Error('Server clock unavailable');
       return row.server_time;
     },
-    async read() {
-      const row = await db.get('SELECT sequence, state_json FROM cloud_events ORDER BY sequence DESC LIMIT 1');
-      if (row) return {revision: row.sequence, state: JSON.parse(row.state_json)};
+    read:readSaved=async function() {
+      const row = await db.get('SELECT sequence,state_json,job_id,job_json FROM cloud_events ORDER BY sequence DESC LIMIT 1');
+      if (row) {
+        const saved = JSON.parse(row.state_json), marker = saved?.__checkpoint_job_sequence;
+        const source = Number.isSafeInteger(marker) && marker > 0 && marker < row.sequence
+          ? await db.get('SELECT sequence,job_id,job_json FROM cloud_events WHERE sequence=:sequence', {':sequence': marker}) : row;
+        const ownedMarker = saved?.__checkpoint_owned_state_sequence;
+        const ownedSource = Number.isSafeInteger(ownedMarker) && ownedMarker > 0 && ownedMarker < row.sequence
+          ? await checkpoints.ownedStateSource(ownedMarker) : null;
+        const targetMarker = Object.hasOwn(saved, '__checkpoint_owned_state_sequence')
+          ? ownedSource?.target_sequence : saved?.__checkpoint_owned_targets_sequence;
+        const targetSource = Number.isSafeInteger(targetMarker) && targetMarker > 0 && targetMarker < (ownedSource?.sequence ?? row.sequence)
+          ? await checkpoints.ownedTargetSource(targetMarker) : null;
+        const giftMarker = saved?.__checkpoint_gift_state_sequence;
+        const giftSource = Number.isSafeInteger(giftMarker) && giftMarker > 0 && giftMarker < row.sequence
+          ? await checkpoints.giftStateSource(giftMarker) : null;
+        const budgetMarker = saved?.__checkpoint_budget_reset_sequence;
+        const budgetSource = Number.isSafeInteger(budgetMarker) && budgetMarker > 0 && budgetMarker < row.sequence
+          ? await checkpoints.budgetResetSource(budgetMarker) : null;
+        const state = decodeCheckpoint(row, source, targetSource, ownedSource, giftSource, budgetSource);
+        if(credentialFence!==null&&state.job)state.job=credentialJob(state.job);
+        rememberSources(row.sequence, targetSource, ownedSource, giftSource, budgetSource);
+        return {revision: row.sequence, state};
+      }
       const state = initial();
       // Do not give a freshly upgraded deployment another daily allowance.
       // Prototype only retained aggregate attempt counts, so conservatively
@@ -29,64 +308,277 @@ export function createCloudRepository(db) {
         }
         state.attempts.sort((a, b) => a - b);
       }
+      else if(await db.get(`SELECT 1 AS ready WHERE (${COMPACT_OPERATIONAL_READY_SQL}) AND (${NORMALIZED_RECORD_READY_SQL})`)) {
+        state.operational_storage_version=1;state.record_storage_floor=0;
+      }
+      sourceHints = null;
       return {revision: 0, state};
     },
-    async append(expected, event) {
-      const result = await db.run(`INSERT OR IGNORE INTO cloud_events
+    async append(expected, event, walletFence = null) {
+      if(walletFence!==null&&(!Number.isSafeInteger(walletFence)||walletFence<0))return false;
+      const compact=usesCompactOperationalStorage(event.state);
+      if(compact&&!event.job&&Number.isSafeInteger(event.state?.job?.id))event={...event,job:event.state.job};
+      if(credentialFence!==null&&Number.isSafeInteger(event.state?.job?.id)) {
+        const savedVersion=event.state.job.private_credential_version;
+        const active=['queued','running','partial'].includes(event.state.job.state);
+        if(active&&savedVersion!==undefined&&savedVersion!==credentialFence.credential_version)return false;
+        const job=active?{...event.state.job,private_credential_version:credentialFence.credential_version}:event.state.job;
+        event={...event,state:{...event.state,job},...(event.job?{job}:{})};
+      }
+      let prior = null;
+      if (!compact && !event.job && Number.isSafeInteger(event.state?.job?.id) && event.state.job.id > 0) {
+        prior = await db.get(`SELECT sequence,job_id,job_json FROM cloud_events
+          WHERE sequence<=:expected AND job_id=:id AND job_json=:job ORDER BY sequence DESC LIMIT 1`,
+          {':expected': expected, ':id': event.state.job.id, ':job': JSON.stringify(event.state.job)});
+      }
+      const {targetSource, ownedSource, giftSource, budgetSource} = await checkpointSources(expected, event.state);
+      const stateJson=encodeCheckpoint(event.state,event.job,expected+1,prior,targetSource,ownedSource,giftSource,budgetSource),
+        jobJson=event.job?JSON.stringify(event.job):null,recordsJson=preparedRecordJSON(event.records,compact),raw=null;
+      // Validated observations and checkpoint state are sufficient to rebuild
+      // the dashboard. Provider bodies often repeat those rows plus large TON
+      // BOCs, so never retain a second copy. Keep the original evidence flag
+      // below: discarding it must not turn a provider result into a control.
+      let bytes=utf8Size(stateJson)+utf8Size(jobJson??'')+utf8Size(recordsJson)+utf8Size(raw??'')
+        +utf8Size(String(expected+1))+utf8Size(event.key)+utf8Size(String(event.job?.id??''))+utf8Size(event.observed_at)
+        +1024+normalizedRecordOverhead(event.records,event.key,compact)+(compact?utf8Size(stateJson)+4096:0);
+      let control=!event.raw_body&&!(event.records||[]).length&&(compact||bytes<=262144)&&(
+        event.state?.job?.state==='partial'&&event.state.job.reason==='stopped_by_you'
+        ||event.state?.job?.state==='failed'&&event.state.job.reason==='credential_removed'
+        ||event.state?.owned_prices?.run?.state==='partial'&&event.state.owned_prices.run.reason==='stopped_by_you'
+        ||event.state?.gift_refresh?.run?.state==='partial'&&event.state.gift_refresh.run.reason==='stopped_by_you');
+      if(control&&storageAdmission) {
+        const before=await readSaved(),previous=before.state;
+        control=before.revision===expected&&Boolean(
+          event.state.job?.state==='partial'&&event.state.job.reason==='stopped_by_you'&&previous.job?.id===event.state.job.id&&['running','queued'].includes(previous.job.state)
+          ||event.state.job?.state==='failed'&&event.state.job.reason==='credential_removed'&&previous.job?.id===event.state.job.id&&['running','queued','partial'].includes(previous.job.state)
+          ||event.state.owned_prices?.run?.reason==='stopped_by_you'&&previous.owned_prices?.run?.id===event.state.owned_prices.run.id&&previous.owned_prices.run.state==='running'
+          ||event.state.gift_refresh?.run?.reason==='stopped_by_you'&&previous.gift_refresh?.run?.id===event.state.gift_refresh.run.id&&previous.gift_refresh.run.state==='running');
+      }
+      let retirement={sql:'1',parameters:{}};
+      if(compact&&control&&storageAdmission) {
+        const credited=await compactControlRetirement((...args)=>db.get(...args),{table:'cloud_events',expected,event,stateJson,bytes});
+        if(credited){retirement=credited;bytes=credited.bytes;}else control=false;
+      }
+      const admission=storageAdmission?.fence(bytes,event.storage_token??null,{control})??{sql:'1',parameters:{}};
+      const insert = `INSERT OR IGNORE INTO cloud_events
         (sequence,event_key,state_json,job_id,job_json,records_json,raw_body,observed_at)
         SELECT :sequence,:key,:state,:job_id,:job,:records,:raw,:observed
         WHERE COALESCE((SELECT MAX(sequence) FROM cloud_events),0)=:expected
-        AND NOT EXISTS (SELECT 1 FROM cloud_events WHERE event_key=:key)`, {
+        AND NOT EXISTS (SELECT 1 FROM cloud_events WHERE event_key=:key)
+        AND (:wallet_fence IS NULL OR ${walletRevision}=:wallet_fence)
+        AND ${compactStorageGuard('cloud_events')}
+        AND ${retirement.sql}
+        AND ${OWNED_SOURCE_FENCE} AND ${OWNED_TARGET_SOURCE_FENCE} AND ${GIFT_SOURCE_FENCE} AND ${BUDGET_RESET_SOURCE_FENCE} ${credentialGuard}
+        AND ${admission.sql}`;
+      const parameters = {
         ':sequence': expected + 1, ':expected': expected, ':key': event.key,
-        ':state': JSON.stringify(event.state), ':job_id': event.job?.id ?? null,
-        ':job': event.job ? JSON.stringify(event.job) : null,
-        ':records': JSON.stringify(event.records || []), ':raw': event.raw_body ?? null,
+        ':state':stateJson, ':job_id': event.job?.id ?? null,
+        ':job':jobJson,
+        ':records':recordsJson, ':raw':raw,
         ':observed': event.observed_at,
-      });
+        ...compactStorageParameters(event.state),
+        ':wallet_fence': walletFence,
+        ':owned_source': ownedSource?.sequence ?? null, ':owned_json': ownedSource?.owned_prices_json ?? null,
+        ':owned_target': ownedSource?.target_sequence ?? null,
+        ':target_source': targetSource?.sequence ?? null, ':target_id': targetSource?.run_id ?? null,
+        ':target_wallet': targetSource?.wallet ?? null, ':targets_json': targetSource?.targets_json ?? null,
+        ':gift_source': giftSource?.sequence ?? null, ':gift_json': giftSource?.gift_refresh_json ?? null,
+        ':budget_source': budgetSource?.sequence ?? null, ':budget_json': budgetSource?.budget_reset_json ?? null,
+        ...credentialParameters,
+        ...admission.parameters,
+        ...retirement.parameters,
+      };
+      const result = await appendWithCacheRecovery(insert, parameters);
+      if (result.rowsAffected === 1) rememberSources(expected + 1, targetSource, ownedSource, giftSource, budgetSource);
+      else if(storageAdmission)await storageAdmission.assertAdmitted(bytes,event.storage_token??null,{control});
       return result.rowsAffected === 1;
     },
+    async appendWebsite(expected,event,owner,stored) {
+      if(!stored?.value||!stored?.fence||String(stored.value.owner)!==String(owner))return false;
+      const observedAt=Date.parse(event.observed_at);
+      if(!Number.isSafeInteger(observedAt)||observedAt<=0||typeof event.observed_at!=='string'||new Date(observedAt).toISOString()!==event.observed_at)return false;
+      const compact=usesCompactOperationalStorage(event.state);
+      if(compact&&!event.job&&Number.isSafeInteger(event.state?.job?.id))event={...event,job:event.state.job};
+      let prior=null;
+      if(!compact&&!event.job&&Number.isSafeInteger(event.state?.job?.id)&&event.state.job.id>0)prior=await db.get(`SELECT sequence,job_id,job_json FROM cloud_events
+        WHERE sequence<=:expected AND job_id=:id AND job_json=:job ORDER BY sequence DESC LIMIT 1`,
+        {':expected':expected,':id':event.state.job.id,':job':JSON.stringify(event.state.job)});
+      const {targetSource,ownedSource,giftSource,budgetSource}=await checkpointSources(expected,event.state);
+      const stateJson=encodeCheckpoint(event.state,event.job,expected+1,prior,targetSource,ownedSource,giftSource,budgetSource),
+        jobJson=event.job?JSON.stringify(event.job):null,recordsJson=preparedRecordJSON(event.records,compact),raw=null;
+      const bytes=utf8Size(stateJson)+utf8Size(jobJson??'')+utf8Size(recordsJson)+utf8Size(raw??'')
+        +utf8Size(String(expected+1))+utf8Size(event.key)+utf8Size(String(event.job?.id??''))+utf8Size(event.observed_at)
+        +1024+normalizedRecordOverhead(event.records,event.key,compact)+(compact?utf8Size(stateJson)+4096:0);
+      const admission=storageAdmission?.fence(bytes,event.storage_token??null)??{sql:'1',parameters:{}};
+      const insert=`INSERT OR IGNORE INTO cloud_events
+        (sequence,event_key,state_json,job_id,job_json,records_json,raw_body,observed_at)
+        SELECT :sequence,:key,:state,:job_id,:job,:records,:raw,:observed
+        WHERE COALESCE((SELECT MAX(sequence) FROM cloud_events),0)=:expected
+        AND NOT EXISTS(SELECT 1 FROM cloud_events WHERE event_key=:key)
+        AND ${compactStorageGuard('cloud_events')}
+        AND EXISTS(SELECT 1 FROM marketapp_analytics_sessions WHERE owner_id=:owner AND generation=:generation
+          AND wallet=:wallet AND ${walletRevision}=:wallet_revision AND cookie_version=:cookie_version AND ciphertext IS NOT NULL
+          AND created_at<=:observation AND expires_at>:observation)
+        AND ${OWNED_SOURCE_FENCE} AND ${OWNED_TARGET_SOURCE_FENCE} AND ${GIFT_SOURCE_FENCE} AND ${BUDGET_RESET_SOURCE_FENCE}
+        AND ${admission.sql}`;
+      const parameters={
+        ':sequence':expected+1,':expected':expected,':key':event.key,
+        ...compactStorageParameters(event.state),
+        ':state':stateJson,':job_id':event.job?.id??null,
+        ':job':jobJson,':records':recordsJson,':raw':raw,':observed':event.observed_at,
+        ':owner':String(owner),':generation':stored.fence.generation,':wallet':stored.value.wallet,
+        ':wallet_revision':stored.fence.wallet_revision,':cookie_version':stored.value.cookie_version,
+        ':observation':observedAt,
+        ':owned_source':ownedSource?.sequence??null,':owned_json':ownedSource?.owned_prices_json??null,':owned_target':ownedSource?.target_sequence??null,
+        ':target_source':targetSource?.sequence??null,':target_id':targetSource?.run_id??null,
+        ':target_wallet':targetSource?.wallet??null,':targets_json':targetSource?.targets_json??null,
+        ':gift_source':giftSource?.sequence??null,':gift_json':giftSource?.gift_refresh_json??null,
+        ':budget_source':budgetSource?.sequence??null,':budget_json':budgetSource?.budget_reset_json??null,
+        ...admission.parameters,
+      };
+      const result=await appendWithCacheRecovery(insert,parameters);
+      if(result.rowsAffected===1)rememberSources(expected+1,targetSource,ownedSource,giftSource,budgetSource);
+      else if(storageAdmission)await storageAdmission.assertAdmitted(bytes,event.storage_token??null);
+      return result.rowsAffected===1;
+    },
     async event(key) {
-      const row = await db.get('SELECT records_json FROM cloud_events WHERE event_key=:key LIMIT 1', {':key': key});
-      return row ? JSON.parse(row.records_json) : null;
+      const row = await db.get('SELECT sequence,records_json FROM cloud_events WHERE event_key=:key LIMIT 1', {':key': key});
+      return await normalizedEventRecords((...args)=>db.all(...args),row,{scope:'private'});
     },
     async job(id) {
-      const row = await db.get('SELECT job_json FROM cloud_events WHERE job_id=:id ORDER BY sequence DESC LIMIT 1', {':id': id});
-      return row ? JSON.parse(row.job_json) : null;
+      const row = await db.get('SELECT job_json FROM cloud_events WHERE job_id=:id AND job_json IS NOT NULL ORDER BY sequence DESC LIMIT 1', {':id': id});
+      return row ? credentialJob(JSON.parse(row.job_json)) : null;
     },
     async jobs() {
       const rows = await db.all(`SELECT e.job_json FROM cloud_events e JOIN
-        (SELECT job_id,MAX(sequence) AS seq FROM cloud_events WHERE job_id IS NOT NULL GROUP BY job_id) j
+        (SELECT job_id,MAX(sequence) AS seq FROM cloud_events WHERE job_id IS NOT NULL AND job_json IS NOT NULL GROUP BY job_id) j
         ON e.sequence=j.seq ORDER BY e.job_id DESC LIMIT 100`);
-      return rows.map(row => JSON.parse(row.job_json));
+      return rows.map(row => credentialJob(JSON.parse(row.job_json)));
     },
-    async records() {
-      const result = []; let after = 0;
-      for (;;) {
-        // Keep normal pages batched, but cap their combined bytes. Larger
-        // provider pages must not recreate the live host's ~5 MB result timeout.
-        // Always include the first row so an old oversized import can advance.
-        const rows = await db.all(`WITH pending AS (
-          SELECT sequence,records_json,length(CAST(records_json AS BLOB)) AS bytes
-          FROM cloud_events WHERE sequence>:after AND records_json<>'[]' ORDER BY sequence LIMIT 5
-        ), bounded AS (
-          SELECT sequence,records_json,SUM(bytes) OVER (ORDER BY sequence) AS total_bytes FROM pending
-        ) SELECT sequence,records_json FROM bounded
-          WHERE total_bytes<=1048576 OR sequence=(SELECT MIN(sequence) FROM pending)
-          ORDER BY sequence`, {':after': after});
-        for (const row of rows) result.push(...JSON.parse(row.records_json));
-        if (!rows.length) return result;
-        after = rows[rows.length - 1].sequence;
-      }
+    async records(until = Number.MAX_SAFE_INTEGER) {
+      const result = [];
+      await visitRecordPages(until, page => {for (const record of page) result.push(record);});
+      return result;
     },
-    async importPersonalAnalytics(snapshot, raw, importedAt) {
+    visitRecords: (until, visitor) => visitRecordPages(until, visitor),
+    visitOwnedScopeRecords: (until, identities, visitor) => visitRecordPages(until,visitor,false,ownedScopeRecordFilter(identities)),
+    async dashboardSeedRecords(until) {
+      const result = [];
+      await visitRecordPages(until, page => {for (const record of page) result.push(record);}, true);
+      return result;
+    },
+    async importPersonalAnalytics(snapshot, raw, importedAt, storageToken = null) {
+      const normalized=JSON.stringify(snapshot),bytes=utf8Size(raw)+utf8Size(normalized)+utf8Size(snapshot.fingerprint)
+        +utf8Size(snapshot.wallet)+utf8Size(snapshot.captured_at)+utf8Size(importedAt),
+        admission=storageAdmission?.fence(bytes,storageToken)??{sql:'1',parameters:{}};
       const result = await db.run(`INSERT OR IGNORE INTO personal_rental_analytics
         (fingerprint,wallet,captured_at,imported_at,raw_snapshot,normalized_json)
-        VALUES(:fingerprint,:wallet,:captured,:imported,:raw,:normalized)`, {
+        SELECT :fingerprint,:wallet,:captured,:imported,:raw,:normalized WHERE ${admission.sql}`, {
         ':fingerprint': snapshot.fingerprint, ':wallet': snapshot.wallet,
         ':captured': snapshot.captured_at, ':imported': importedAt,
-        ':raw': raw, ':normalized': JSON.stringify(snapshot),
+        ':raw': raw, ':normalized':normalized,...admission.parameters,
+      });
+      if(result.rowsAffected!==1&&storageAdmission) {
+        const duplicate=await db.get('SELECT 1 AS valid FROM personal_rental_analytics WHERE fingerprint=:fingerprint', {':fingerprint':snapshot.fingerprint});
+        if(!duplicate)await storageAdmission.assertAdmitted(bytes,storageToken);
+      }
+      return result.rowsAffected === 1;
+    },
+    async marketappSession(owner) {
+      return await db.get(`SELECT owner_id,generation,nonce_counter,cookie_version,wallet,wallet_revision,ciphertext,created_at,expires_at
+        FROM marketapp_analytics_sessions WHERE owner_id=:owner`, {':owner': owner});
+    },
+    async giftScopeRevision() {
+      const row=await db.get(`SELECT COALESCE(MAX(sequence),0) AS revision FROM cloud_events WHERE
+        records_json LIKE '%"kind":"settings"%' OR records_json LIKE '%"kind":"portfolio"%' OR records_json LIKE '%"kind":"metadata"%'
+        OR records_json LIKE '%"kind":"ownership"%' OR records_json LIKE '%"kind":"listing"%' OR records_json LIKE '%"kind":"history"%'
+        OR records_json LIKE '%"kind":"development_reset"%'`);
+      if(!Number.isSafeInteger(row?.revision)||row.revision<0)throw new Error('Gift scope revision unavailable');return row.revision;
+    },
+    async marketappSessionFence(owner) {
+      await db.run(`INSERT OR IGNORE INTO marketapp_analytics_sessions(owner_id,generation,nonce_counter,cookie_version)
+        VALUES(:owner,0,0,0)`, {':owner': owner});
+      return await db.get(`SELECT generation,cookie_version,${walletRevision} AS wallet_revision
+        FROM marketapp_analytics_sessions WHERE owner_id=:owner`, {':owner': owner});
+    },
+    async marketappSessionIsCurrent(owner, fence, cookieVersion = null) {
+      const row = await db.get(`SELECT 1 AS valid FROM marketapp_analytics_sessions WHERE owner_id=:owner
+        AND generation=:generation AND ${walletRevision}=:wallet_revision
+        AND (:cookie_version IS NULL OR cookie_version=:cookie_version)`, {':owner': owner, ':generation': fence.generation,
+        ':wallet_revision': fence.wallet_revision, ':cookie_version': cookieVersion});
+      return row?.valid === 1;
+    },
+    async reserveMarketappSessionNonce(owner, generation) {
+      for (let attempt = 0; attempt < 16; attempt++) {
+        const row = await db.get('SELECT nonce_counter FROM marketapp_analytics_sessions WHERE owner_id=:owner AND generation=:generation',
+          {':owner': owner, ':generation': generation});
+        if (!Number.isSafeInteger(row?.nonce_counter) || row.nonce_counter < 0 || row.nonce_counter >= Number.MAX_SAFE_INTEGER) return null;
+        const next = row.nonce_counter + 1;
+        const result = await db.run(`UPDATE marketapp_analytics_sessions SET nonce_counter=:next
+          WHERE owner_id=:owner AND generation=:generation AND nonce_counter=:previous`,
+          {':owner': owner, ':generation': generation, ':previous': row.nonce_counter, ':next': next});
+        if (result.rowsAffected === 1) return next;
+      }
+      return null;
+    },
+    async storeMarketappSession(owner, fence, session, expectedVersion) {
+      const result = await db.run(`UPDATE marketapp_analytics_sessions SET wallet=:wallet,wallet_revision=:wallet_revision,
+        ciphertext=:ciphertext,created_at=:created,expires_at=:expires,cookie_version=:version
+        WHERE owner_id=:owner AND generation=:generation AND cookie_version=:previous
+        AND nonce_counter>=:version AND :version>:previous AND ${walletRevision}=:wallet_revision`, {
+        ':owner': owner, ':generation': fence.generation, ':wallet_revision': fence.wallet_revision, ':previous': expectedVersion,
+        ':wallet': session.wallet, ':ciphertext': session.ciphertext, ':created': session.created_at,
+        ':expires': session.expires_at, ':version': session.cookie_version,
       });
       return result.rowsAffected === 1;
+    },
+    async clearMarketappSession(owner, fence = null, cookieVersion = null) {
+      await db.run(`INSERT OR IGNORE INTO marketapp_analytics_sessions(owner_id,generation,nonce_counter,cookie_version)
+        VALUES(:owner,0,0,0)`, {':owner': owner});
+      const result = await db.run(`UPDATE marketapp_analytics_sessions SET generation=generation+1,wallet=NULL,wallet_revision=NULL,
+        ciphertext=NULL,created_at=NULL,expires_at=NULL
+        WHERE owner_id=:owner AND generation<:maximum AND (:generation IS NULL OR generation=:generation)
+          AND (:version IS NULL OR cookie_version=:version)`, {':owner': owner, ':generation': fence?.generation ?? null,
+        ':version': cookieVersion, ':maximum': Number.MAX_SAFE_INTEGER});
+      return result.rowsAffected === 1;
+    },
+    async importPersonalAnalyticsFenced(snapshot, raw, importedAt, owner, fence, cookieVersion = null, storageToken = null) {
+      const normalized=JSON.stringify(snapshot),bytes=utf8Size(raw)+utf8Size(normalized)+utf8Size(snapshot.fingerprint)
+        +utf8Size(snapshot.wallet)+utf8Size(snapshot.captured_at)+utf8Size(importedAt),
+        admission=storageAdmission?.fence(bytes,storageToken)??{sql:'1',parameters:{}};
+      const insert = `INSERT OR IGNORE INTO personal_rental_analytics
+        (fingerprint,wallet,captured_at,imported_at,raw_snapshot,normalized_json)
+        SELECT :fingerprint,:wallet,:captured,:imported,:raw,:normalized
+        WHERE EXISTS(SELECT 1 FROM marketapp_analytics_sessions WHERE owner_id=:owner AND generation=:generation
+          AND ${walletRevision}=:wallet_revision AND (:version IS NULL OR cookie_version=:version)) AND ${admission.sql}`;
+      const parameters = {
+        ':fingerprint': snapshot.fingerprint, ':wallet': snapshot.wallet, ':captured': snapshot.captured_at,
+        ':imported': importedAt, ':raw': raw, ':normalized':normalized, ':owner': owner,
+        ':generation': fence.generation, ':wallet_revision': fence.wallet_revision, ':version': cookieVersion,
+        ...admission.parameters,
+      };
+      let result;
+      try {result = await db.run(insert, parameters);}
+      catch (error) {
+        if (!/database or disk is full/i.test(String(error?.message || ''))) throw error;
+        // Projections are replaceable derivatives. Free only that cache, then
+        // retry the identical INSERT once with all logout/wallet/session fences
+        // still inside SQL. Never discard source evidence or renew a login.
+        let evicted;
+        try {evicted = await db.run('DELETE FROM dashboard_projection_cache');} catch {throw error;}
+        if (!Number.isSafeInteger(evicted?.rowsAffected) || evicted.rowsAffected <= 0) throw error;
+        result = await db.run(insert, parameters);
+      }
+      if (result.rowsAffected === 1) return true;
+      // An identical snapshot already committed is still a successful refresh;
+      // a lost logout/wallet fence can never become success through deduplication.
+      const row = await db.get(`SELECT 1 AS valid FROM personal_rental_analytics s
+        WHERE s.fingerprint=:fingerprint AND s.wallet=:wallet AND EXISTS(SELECT 1 FROM marketapp_analytics_sessions
+          WHERE owner_id=:owner AND generation=:generation AND ${walletRevision}=:wallet_revision
+          AND (:version IS NULL OR cookie_version=:version))`, {':fingerprint': snapshot.fingerprint, ':wallet': snapshot.wallet,
+        ':owner': owner, ':generation': fence.generation, ':wallet_revision': fence.wallet_revision, ':version': cookieVersion});
+      if(row?.valid!==1&&storageAdmission)await storageAdmission.assertAdmitted(bytes,storageToken);
+      return row?.valid === 1;
     },
     async latestPersonalAnalytics(wallet) {
       const row = await db.get(`SELECT normalized_json FROM personal_rental_analytics
@@ -211,14 +703,24 @@ export function createCloudRepository(db) {
         {':id': id, ':owner': owner, ':state': safe.state, ':observed': safe.observed_at, ':outcome': JSON.stringify(safe)});
       return result.rowsAffected === 1;
     },
-    async latestMarketappRefreshAttempt(owner, wallet) {
-      return await db.get(`SELECT a.attempt_id,a.state,a.expires_at,a.outcome_json,s.imported_at AS saved_at
+    async latestMarketappRefreshAttempt(owner, wallet, periodDays = null) {
+      return await db.get(`SELECT a.attempt_id,a.state,a.created_at,a.expires_at,a.outcome_json,s.imported_at AS saved_at,
+          s.captured_at AS snapshot_captured_at
         FROM marketapp_login_attempts a LEFT JOIN personal_rental_analytics s
           ON s.wallet=a.wallet AND s.fingerprint=CASE WHEN json_valid(a.outcome_json)
             THEN json_extract(a.outcome_json,'$.snapshot_fingerprint') ELSE NULL END
-        WHERE a.owner_id=:owner AND a.wallet=:wallet AND json_valid(a.outcome_json)
-          AND json_extract(a.outcome_json,'$.flow')='analytics_refresh'
-        ORDER BY a.created_at DESC LIMIT 1`, {':owner': owner, ':wallet': wallet});
+        WHERE a.owner_id=:owner AND a.wallet=:wallet AND CASE WHEN json_valid(a.outcome_json)
+          THEN json_extract(a.outcome_json,'$.flow')='analytics_refresh'
+            AND (:period IS NULL OR json_extract(a.outcome_json,'$.period_days')=:period)
+          ELSE :period IS NOT NULL END
+        ORDER BY a.created_at DESC LIMIT 1`, {':owner': owner, ':wallet': wallet, ':period': periodDays});
+    },
+    async pendingMarketappRefreshAttempt(owner, wallet, at) {
+      return await db.get(`SELECT attempt_id,state,created_at,expires_at FROM marketapp_login_attempts
+        WHERE owner_id=:owner AND wallet=:wallet AND created_at<=:at AND expires_at>:at
+          AND state IN ('pending','issued','consumed') AND CASE WHEN json_valid(outcome_json)
+            THEN json_extract(outcome_json,'$.state') IN ('awaiting_approval','updating') ELSE 1 END
+        ORDER BY created_at DESC LIMIT 1`, {':owner': owner, ':wallet': wallet, ':at': at});
     },
     async cancelMarketappLoginAttempt(id, owner) {
       await db.run(`UPDATE marketapp_login_attempts SET state='cancelled'

@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from .monetary import decimal_text
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -20,7 +22,7 @@ def canonical_json(value: Any) -> str:
         if not value.is_finite():
             raise ValueError("Non-finite JSON number")
         # Avoid Decimal.normalize(): the ambient decimal context can round it.
-        result = format(value, "f")
+        result = decimal_text(value)
         if "." in result:
             result = result.rstrip("0").rstrip(".")
         return "0" if value.is_zero() else result

@@ -29,6 +29,76 @@ for (const periodDays of [30, 365]) test(`signed-in ${periodDays}-day evidence e
   assert.equal(JSON.stringify(result).includes('synthetic-discarded-nonce'), false);
 });
 
+for (const periodDays of [30, 365]) test(`observed combined ${periodDays}-day activity preserves raw evidence and daily meanings`, () => {
+  const source = syntheticAnalyticsPage({periodDays, combinedActivity: true, lastDate: '2026-10-10', capturedAt: '2026-10-10T12:00:00Z'});
+  const result = extract(source), normalized = normalizePersonalAnalytics(JSON.stringify(result), syntheticWallet);
+  assert.deepEqual(result, source.snapshot);
+  assert.equal(normalized.daily.length, periodDays); assert.equal(normalized.period_end, '2026-10-10');
+  assert.equal(normalized.summary.rent_volume, '3'); assert.equal(normalized.summary.rentals, 4);
+  assert.deepEqual(normalized.daily[0], {date: source.snapshot.charts[0].spec_raw.match(/\d{4}-\d{2}-\d{2}/)[0],
+    rent_volume: '3', new_rentals: 3, extensions: 1, rentals: 4});
+  assert.equal(result.charts.some(row => row.key === 'profile.rent.income' || row.key === 'profile.rent.rentals'), false);
+});
+
+test('combined financial lexemes are never converted through JavaScript floating point', () => {
+  const source = syntheticAnalyticsPage({combinedActivity: true}); source.html = source.html.replace('>3.00<', '>9007199254740993.0001<');
+  editChart(source, 'profile.rent.activity', raw => raw.replace('"unit":"GRAM","data":[3,', '"unit":"GRAM","data":[9007199254740993.0001,'));
+  const result = extract(source), normalized = normalizePersonalAnalytics(JSON.stringify(result), syntheticWallet);
+  assert.ok(result.charts[0].spec_raw.includes('9007199254740993.0001'));
+  assert.equal(normalized.daily[0].rent_volume, '9007199254740993.0001');
+  assert.equal(normalized.summary.rent_volume, '9007199254740993.0001');
+});
+
+test('combined activity accepts only the observed three financial series, axes and units', () => {
+  const changes = [spec => {spec.combo = false;}, spec => {spec.categories = [];}, spec => {spec.gran = 'month';},
+    spec => {spec.kind = 'line';}, spec => {spec.stacking = null;}, spec => {spec.unit = 'GRAM';},
+    spec => {spec.series[0].axis = 1;}, spec => {spec.series[2].axis = 0;}, spec => {spec.series[2].axis = '1';},
+    spec => {spec.series[2].unit = 'TON';}, spec => {delete spec.series[2].unit;}, spec => {spec.series[2].type = 'column';},
+    spec => {spec.series[0].name = 'Rentals';}, spec => {spec.series[1].name = 'New rentals';}, spec => {spec.series.pop();},
+    spec => {spec.series.push({...spec.series[0]});}, spec => {spec.series[0].data.pop();}, spec => {spec.series[0].data[0] = 0.5;},
+    spec => {spec.series[2].data[0] = null;}, spec => {spec.series[2].data[0] = -3;}, spec => {spec.series[2].opacity = 1.1;},
+    spec => {spec.series[0].color = '1';}, spec => {spec.series[2].alternate_unit = 'TON';}, spec => {spec.surprise = true;}];
+  for (const change of changes) {
+    const source = syntheticAnalyticsPage({combinedActivity: true});
+    editChart(source, 'profile.rent.activity', raw => {const spec = JSON.parse(raw); change(spec); return JSON.stringify(spec);});
+    rejects(source, 'analytics_shape');
+  }
+  const duplicateProperty = syntheticAnalyticsPage({combinedActivity: true});
+  editChart(duplicateProperty, 'profile.rent.activity', raw => raw.replace('"combo":true', '"combo":true,"combo":true'));
+  rejects(duplicateProperty, 'analytics_shape');
+});
+
+test('combined activity does not substitute for ambiguous legacy charts, dates or identities', () => {
+  const legacy = syntheticAnalyticsPage();
+  for (const key of ['profile.rent.income', 'profile.rent.rentals']) {
+    const source = syntheticAnalyticsPage({combinedActivity: true}), old = legacy.snapshot.charts.find(row => row.key === key);
+    const extra = `<div class="js-ma-chart" data-key="${key}" data-spec="${htmlAttribute(old.spec_raw)}"></div>`;
+    rejects({...source, html: source.html.replace('</main>', extra + '</main>')}, 'analytics_shape');
+  }
+  const duplicate = syntheticAnalyticsPage({combinedActivity: true});
+  const activity = duplicate.html.match(/<div class="js-ma-chart" data-key="profile\.rent\.activity"[^>]+><\/div>/)[0];
+  rejects({...duplicate, html: duplicate.html.replace(activity, activity + activity)}, 'analytics_shape');
+  const mismatched = syntheticAnalyticsPage({combinedActivity: true});
+  editChart(mismatched, 'profile.rent.day_price', raw => raw.replace('2026-09-10', '2026-09-09'));
+  rejects(mismatched, 'analytics_shape');
+  const stale = syntheticAnalyticsPage({combinedActivity: true, lastDate: '2026-10-08'}); rejects(stale, 'period_span');
+  rejects(syntheticAnalyticsPage({combinedActivity: true, identity: `0:${'22'.repeat(32)}`}), 'wallet_identity');
+});
+
+test('combined displayed integer volume reconciles exact daily amounts without guessing a tolerance', () => {
+  for (const [daily, shown, accepted] of [['27.9804', '28', true], ['27.4999', '27', true], ['27.5', '28', true],
+    ['27.4999', '28', false], ['27.9804', '29', false], ['27.9804', '27.98', true], ['27.9804', '27.97', false]]) {
+    const source = syntheticAnalyticsPage({combinedActivity: true}); source.html = source.html.replace('>3.00<', `>${shown}<`);
+    editChart(source, 'profile.rent.activity', raw => raw.replace('"unit":"GRAM","data":[3,', `"unit":"GRAM","data":[${daily},`));
+    if (!accepted) {rejects(source, 'analytics_shape'); continue;}
+    const normalized = normalizePersonalAnalytics(JSON.stringify(extract(source)), syntheticWallet);
+    assert.equal(normalized.summary.rent_volume, shown); assert.equal(normalized.daily[0].rent_volume, daily);
+  }
+  const legacy = syntheticAnalyticsPage(); legacy.html = legacy.html.replace('>3.00<', '>3<');
+  editChart(legacy, 'profile.rent.income', raw => raw.replace('"data":[3,', '"data":[3.2345,'));
+  rejects(legacy, 'analytics_shape');
+});
+
 test('mainnet raw, bounceable and nonbounceable aliases identify the same signed-in wallet', () => {
   for (const identity of [syntheticWallet.toUpperCase(), syntheticFriendly(), syntheticFriendly(syntheticWallet, 0x51)]) {
     const source = syntheticAnalyticsPage({identity}); source.options.wallet = syntheticFriendly(syntheticWallet, 0x51);

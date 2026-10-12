@@ -170,9 +170,24 @@ class JobStore:
         """Read the shared rolling budget; no provider credentials are stored."""
         now = time.time() if now is None else now
         with self.connect() as connection:
+            connection.execute("BEGIN")
             row = connection.execute("SELECT COUNT(*) AS used, MIN(attempted_at) AS oldest FROM dashboard_marketapp_attempts WHERE attempted_at>?", (now - 86400,)).fetchone()
+            available_at = self._marketapp_available_at(connection, limit, row["used"], now)
         return {"used_24h": row["used"], "remaining_24h": max(0, limit - row["used"]),
-                "resets_at": datetime.fromtimestamp(row["oldest"] + 86400, timezone.utc).isoformat() if row["oldest"] is not None else None}
+                "resets_at": datetime.fromtimestamp(row["oldest"] + 86400, timezone.utc).isoformat() if row["oldest"] is not None else None,
+                "available_at": available_at}
+
+    @staticmethod
+    def _marketapp_available_at(connection, limit, used, now):
+        if used < limit:
+            return None
+        # A lowered cap can leave usage above the limit. Enough requests must
+        # expire to bring usage below the cap before one more can be reserved.
+        attempt = connection.execute(
+            "SELECT attempted_at FROM dashboard_marketapp_attempts WHERE attempted_at>? ORDER BY attempted_at LIMIT 1 OFFSET ?",
+            (now - 86400, used - limit),
+        ).fetchone()
+        return datetime.fromtimestamp(attempt["attempted_at"] + 86400, timezone.utc).isoformat() if attempt else None
 
     def marketapp_wait_seconds(self, requests_per_second, now=None):
         now = time.time() if now is None else now
@@ -184,7 +199,8 @@ class JobStore:
         usage = self.marketapp_usage(settings.dashboard_daily_max_attempts)
         budget = {"invocation_used": 0, "invocation_limit": settings.dashboard_max_attempts,
                   "rolling_24h_used": usage["used_24h"], "rolling_24h_limit": settings.dashboard_daily_max_attempts,
-                  "resets_at": usage["resets_at"], "run_seconds": settings.dashboard_run_seconds}
+                  "resets_at": usage["resets_at"], "available_at": usage["available_at"],
+                  "run_seconds": settings.dashboard_run_seconds}
         return self._update(job_id, "marketapp_budget_json=?", (json.dumps(budget),), worker)
 
     def reserve_marketapp_attempt(self, job_id, invocation, attempt_limit, daily_limit, *, duration_limit=300, worker=None, now=None):
@@ -219,10 +235,11 @@ class JobStore:
             budget = {"invocation_used": used, "invocation_limit": attempt_limit,
                       "rolling_24h_used": daily_used, "rolling_24h_limit": daily_limit,
                       "resets_at": datetime.fromtimestamp(oldest + 86400, timezone.utc).isoformat() if oldest is not None else None,
+                      "available_at": self._marketapp_available_at(connection, daily_limit, daily_used, now),
                       "run_seconds": duration_limit}
             connection.execute("UPDATE dashboard_jobs SET marketapp_budget_json=? WHERE id=?", (json.dumps(budget), job_id))
         if reason:
-            message = (f"Marketapp rolling 24-hour safety limit ({daily_limit} attempts) reached; resume after {budget['resets_at']}"
+            message = (f"Marketapp rolling 24-hour safety limit ({daily_limit} attempts) reached; resume after {budget['available_at']}"
                        if reason == "dashboard_daily_budget" else
                        f"Marketapp refresh safety limit ({attempt_limit} attempts) reached; resume saved work manually")
             raise BudgetExceeded(message, retryable=True, reason=reason)

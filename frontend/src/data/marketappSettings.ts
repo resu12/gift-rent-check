@@ -1,6 +1,6 @@
 import type { Capabilities, MarketappSettingsStatus } from './types.ts';
 
-const SOURCES = ['environment', 'secure_store', 'session', 'none'] as const;
+const SOURCES = ['environment', 'secure_store', 'session', 'none', 'serverless_private', 'encrypted_backend'] as const;
 const REASONS = ['external_configuration', 'active_job', 'secure_store_unavailable'] as const;
 
 /** Copy only public status fields; never retain an echoed credential or raw error. */

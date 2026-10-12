@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {effectiveMarketAttempts, applyMarketBudgetReset} from '../tgcloud/lib/market-budget.js';
+import {effectiveMarketAttempts, marketBudgetAvailableAt, applyMarketBudgetReset} from '../tgcloud/lib/market-budget.js';
 import {todayResetWindow, RESET_SOURCE} from '../tools/reset-market-budget.mjs';
 
 const NOW = Date.parse('2026-10-09T11:00:00Z');
@@ -55,6 +55,52 @@ test('expired or malformed reset metadata fails closed', () => {
     assert.deepEqual(effectiveMarketAttempts({...state, marketapp_budget_reset: {...state.marketapp_budget_reset, ...patch}}, NOW), [NOW - 1000]);
   }
   assert.deepEqual(effectiveMarketAttempts({attempts: state.attempts}, NOW), [NOW - 1000]);
+});
+
+const assertAvailability = (state, limit, expected) => {
+  const before = structuredClone(state);
+  assert.equal(marketBudgetAvailableAt(state, NOW, limit), expected);
+  assert.ok(effectiveMarketAttempts(state, expected - 1).length >= limit, 'one millisecond earlier still has no room');
+  assert.ok(effectiveMarketAttempts(state, expected).length < limit, 'one request can start at the projected boundary');
+  assert.deepEqual(state, before, 'the availability projection preserves saved evidence');
+};
+
+test('availability at exactly 500 requests is the first expiration', () => {
+  assertAvailability({attempts: Array.from({length: 500}, (_, index) => NOW - 1000 + index)}, 500, NOW - 1000 + 86400000);
+});
+
+test('705 requests need 206 expirations before the 500-request cap allows one more request', () => {
+  assertAvailability({attempts: Array.from({length: 705}, (_, index) => NOW - 1000 + index)}, 500, NOW - 795 + 86400000);
+});
+
+test('availability counts repeated timestamps together and sorts a shuffled ledger without changing it', () => {
+  const chronological = [...Array(205).fill(NOW - 1000), ...Array(2).fill(NOW - 800), ...Array(498).fill(NOW - 500)];
+  const attempts = [...chronological.filter((_, index) => index % 2), ...chronological.filter((_, index) => index % 2 === 0)].reverse();
+  assertAvailability({attempts}, 500, NOW - 800 + 86400000);
+});
+
+test('capacity already available has no future availability deadline', () => {
+  for (const attempts of [[], [NOW - 86400000], Array(499).fill(NOW - 1000)]) {
+    assert.equal(marketBudgetAvailableAt({attempts}, NOW, 500), null);
+  }
+});
+
+test('reset expiry before or exactly at a projected boundary restores excluded requests before promising availability', () => {
+  const old = NOW - 23 * 3600000, recent = NOW - 2 * 3600000;
+  for (const expires_at of [NOW + 1800000, NOW + 3600000]) {
+    const state = {attempts: [recent, old, recent], marketapp_budget_reset: {
+      id: input.id, at: NOW - 3600000, expires_at, excluded_attempts: [recent],
+    }};
+    assert.deepEqual(effectiveMarketAttempts(state, NOW), [old, recent]);
+    assertAvailability(state, 2, recent + 86400000);
+  }
+});
+
+test('requests that age out before reset expiry can make room during the temporary allowance', () => {
+  const old = NOW - 23 * 3600000, recent = NOW - 2 * 3600000;
+  assertAvailability({attempts: [recent, old, recent], marketapp_budget_reset: {
+    id: input.id, at: NOW - 3600000, expires_at: NOW + 2 * 3600000, excluded_attempts: [recent],
+  }}, 2, old + 86400000);
 });
 
 test('reset refuses running work, live leases, bad input and stale windows', async () => {

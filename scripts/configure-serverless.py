@@ -19,6 +19,10 @@ def configure(project: Path, owner_id: str | None) -> Path:
     if not token or token != token.strip() or any(ord(c) < 32 or ord(c) == 127 for c in token):
         raise ValueError("Set a valid MARKETAPP_API_TOKEN in the environment or the project's local .env.")
     target = project / "serverless" / "tgcloud" / "lib" / "private-config.js"
+    release_target = target.with_name("public-release-config.js")
+    release_template = None
+    if not release_target.exists():
+        release_template = (project / "serverless" / "public-release-config.example.js").read_bytes()
     target.parent.mkdir(parents=True, exist_ok=True)
     content = (
         "// Generated server-only configuration. Git-ignored; never import into frontend code.\n"
@@ -33,6 +37,13 @@ def configure(project: Path, owner_id: str | None) -> Path:
         temporary.replace(target)
     finally:
         temporary.unlink(missing_ok=True)
+    if release_template is not None:
+        try:
+            with release_target.open("xb") as handle:
+                handle.write(release_template)
+        except FileExistsError:
+            # Another setup invocation must not replace a configured deployment.
+            pass
     return target
 
 

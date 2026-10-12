@@ -13,7 +13,7 @@ test('every deployed module imports only existing project JS modules or the supp
       if (!entry.name.endsWith('.js')) continue;
       const relative = path.slice(root.length).replaceAll('\\', '/');
       assert.ok(relative === 'schema.js' || /^(lib|endpoints|handlers)\//.test(relative), 'Only modules in supported directories are deployed');
-      if (['private-config.js', 'private-refresh-key.js'].includes(entry.name)) continue;
+      if (['private-config.js', 'private-refresh-key.js', 'public-release-config.js'].includes(entry.name)) continue;
       const source = readFileSync(path, 'utf8');
       for (const match of source.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)) {
         const target = match[1];
@@ -21,8 +21,8 @@ test('every deployed module imports only existing project JS modules or the supp
         assert.ok(target.startsWith('.') && target.endsWith('.js'), `Unsupported runtime import in ${relative}`);
         const resolved = resolve(dirname(path), target);
         assert.ok(resolved.startsWith(resolve(root) + sep), `Import escapes tgcloud in ${relative}`);
-        // A clean checkout generates private-config from the ignored example.
-        assert.ok(existsSync(resolved) || ['private-config.js','private-refresh-key.js'].some(file => resolved === join(root, 'lib', file)), `Missing dependency ${target} in ${relative}`);
+        // A clean checkout generates ignored deployment configuration from examples.
+        assert.ok(existsSync(resolved) || ['private-config.js','private-refresh-key.js','public-release-config.js'].some(file => resolved === join(root, 'lib', file)), `Missing dependency ${target} in ${relative}`);
       }
     }
   }

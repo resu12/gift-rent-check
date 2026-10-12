@@ -57,6 +57,25 @@ test('collection-name fallback remains available for unresolved candidates', () 
   assert.deepEqual(filterInventoryGifts([unresolvedCollection], 'nft-candidate', 'review', 'Electric Skulls', 'candidates'), [unresolvedCollection]);
 });
 
+test('available inventory composes current idle and saved listing evidence with search, collection and membership', () => {
+  const idle = { ...base, id: 'current-idle', state: 'idle_rental_contract', ui_state: null,
+    status_is_historical: false, model: 'Big Brother', backdrop: 'Black' };
+  const listing = { ...idle, id: 'saved-listing', state: 'unknown', ui_state: 'for_rent', status_is_historical: undefined };
+  const listedIdle = { ...idle, id: 'listed-idle', ui_state: 'for_rent' };
+  const otherCollection = { ...idle, id: 'other-collection', collection_address: 'books' };
+  const stale = { ...idle, id: 'historical-idle', status_is_historical: true };
+  const legacy = { ...idle, id: 'legacy-idle', status_is_historical: undefined };
+  const matchingCandidate = { ...idle, id: 'matching-candidate', is_portfolio: false, category: 'unresolved' as const };
+  const gifts = [idle, listing, listedIdle, otherCollection, stale, legacy, matchingCandidate, base], before = structuredClone(gifts);
+  assert.deepEqual(filterInventoryGifts(gifts, ' BIG BROTHER ', 'available', 'skulls', 'portfolio'), [idle, listing, listedIdle]);
+  assert.deepEqual(filterInventoryGifts(gifts, 'black', 'available', 'skulls', 'all'), [idle, listing, listedIdle]);
+  assert.deepEqual(filterInventoryGifts(gifts, '', 'available', '', 'candidates'), []);
+  assert.deepEqual(filterInventoryGifts(gifts, '', 'for_rent', 'skulls', 'portfolio'), [listing, listedIdle]);
+  assert.deepEqual(filterInventoryGifts(gifts, '', 'available', 'books', 'portfolio'), [otherCollection]);
+  assert.deepEqual(filterInventoryGifts(gifts, 'missing', 'available', '', 'portfolio'), []);
+  assert.deepEqual(gifts, before, 'Availability does not rewrite evidence or membership');
+});
+
 test('freshness includes a newer price-only observation and compares actual instants', () => {
   const gifts = [
     { ...base, observed_at: '2026-10-09T10:00:00Z', market_observed_at: '2026-10-09T10:30:00Z' },
@@ -72,4 +91,10 @@ test('freshness ignores missing and malformed dates instead of masking valid evi
   assert.equal(latestEvidenceAt([invalid, { ...base, observed_at: '2026-10-09T10:00:00Z' }]), '2026-10-09T10:00:00Z');
   assert.equal(latestEvidenceAt([invalid, base]), null);
   assert.equal(latestEvidenceAt([]), null);
+});
+
+test('rental status freshness does not require overwriting older metadata or price timestamps', () => {
+  const gift = { ...base, observed_at: '2026-10-08T10:00:00Z', price_observed_at: '2026-10-09T10:00:00Z', status_observed_at: '2026-10-10T10:00:00Z' };
+  assert.equal(latestEvidenceAt([gift]), gift.status_observed_at);
+  assert.equal(gift.observed_at, '2026-10-08T10:00:00Z');
 });

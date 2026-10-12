@@ -49,7 +49,7 @@ async function sanitizedFailure(operation: Promise<unknown>): Promise<string> {
   return message;
 }
 
-test('Marketapp status reads use the fixed local endpoint and preserve the caller abort signal', async context => {
+test('Marketapp status reads use the fixed local endpoint and a bounded request signal', async context => {
   const calls = mockRequests(context, () => new Response(JSON.stringify(status)));
   const controller = new AbortController();
   assert.deepEqual(await settings().get(controller.signal), status);
@@ -58,9 +58,22 @@ test('Marketapp status reads use the fixed local endpoint and preserve the calle
   assert.equal(calls[0].init.method, 'GET');
   assert.equal(calls[0].init.credentials, 'same-origin');
   assert.equal(calls[0].init.cache, 'no-store');
-  assert.equal(calls[0].init.signal, controller.signal);
+  assert.ok(calls[0].init.signal instanceof AbortSignal);
+  assert.equal(calls[0].init.signal.aborted, false);
   assert.equal(calls[0].init.body, undefined);
   assert.equal(new Headers(calls[0].init.headers).has('Authorization'), false);
+});
+
+test('API key settings have bounded response bodies without echoing secrets or repeating mutations', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const calls = mockRequests(context, () => ({ ok: true, json: () => new Promise(() => {}) } as Response));
+  const pending = settings().save(secret, false, 'csrf');
+  const rejected = sanitizedFailure(pending);
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  context.mock.timers.tick(45000);
+  assert.match(await rejected, /within 45 seconds/);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].init.signal?.aborted, true);
 });
 
 test('every supported Marketapp source returns only status fields', async context => {

@@ -50,15 +50,23 @@ const selection: PricingSelection = { source: 'listings', timeframe: '24h' };
 const fixture = (revision: string) => ({ generated_at: revision } as Dashboard);
 const job = (state: Job['state'], progress: Job['progress'] = {}) => ({ id: 1, state, progress } as Job);
 
-function setup(options: { initialJobs?: Job[]; selection?: PricingSelection } = {}) {
+function setup(options: { initialJobs?: Job[]; selection?: PricingSelection; revisions?: boolean } = {}) {
   const clock = fakeClock();
   const reads: { selection: PricingSelection; signal: AbortSignal; result: ReturnType<typeof deferred<Dashboard>> }[] = [];
   const jobReads: AbortSignal[] = [];
   let currentJobs = options.initialJobs || [];
   let jobFailure: Error | null = null;
+  let currentToken = 'v1';
+  let tokenFailure: Error | null = null;
+  const tokenReads: AbortSignal[] = [];
   const state = { dashboard: null as Dashboard | null, jobs: [] as Job[], loading: false, error: null as string | null };
   const published: Dashboard[] = [];
   const adapter: DashboardAdapter = {
+    ...(options.revisions ? { async getUpdateToken(signal?: AbortSignal) {
+      tokenReads.push(signal!);
+      if (tokenFailure) throw tokenFailure;
+      return currentToken;
+    } } : {}),
     getDashboard(selected, signal) {
       const result = deferred<Dashboard>();
       reads.push({ selection: selected, signal: signal!, result });
@@ -81,9 +89,11 @@ function setup(options: { initialJobs?: Job[]; selection?: PricingSelection } = 
     error(message) { state.error = message; },
   }, clock.environment);
   return {
-    clock, reads, jobReads, state, published, poller,
+    clock, reads, jobReads, tokenReads, state, published, poller,
     setJobs(jobs: Job[]) { currentJobs = jobs; },
     failJobs(error: Error | null) { jobFailure = error; },
+    setToken(token: string) { currentToken = token; },
+    failToken(error: Error | null) { tokenFailure = error; },
   };
 }
 
@@ -101,7 +111,9 @@ test('slow dashboard responses remain useful during fast active-job polling', as
   run.reads[1].result.resolve(fixture('second'));
   await initial;
   assert.equal(run.state.loading, false);
-  await run.clock.advance(2500);
+  await run.clock.advance(14999);
+  assert.equal(run.reads.length, 2, 'active scans do not rebuild the full dashboard every progress poll');
+  await run.clock.advance(1);
   assert.equal(run.reads.length, 3);
   await run.clock.advance(7500);
   assert.equal(run.reads.length, 3, 'next full poll waits until this request finishes');
@@ -116,7 +128,7 @@ test('a job finishing during a dashboard read causes one trailing read of its fi
   await flush();
   run.reads[1].result.resolve(fixture('running'));
   await flush();
-  await run.clock.advance(2500);
+  await run.clock.advance(15000);
   assert.equal(run.reads.length, 3);
   run.setJobs([job('complete')]);
   await run.clock.advance(2500);
@@ -165,7 +177,7 @@ test('a running job waiting for resume reads its final commit and returns to idl
   await flush();
   run.reads[1].result.resolve(fixture('running'));
   await flush();
-  await run.clock.advance(2500);
+  await run.clock.advance(15000);
   assert.equal(run.reads.length, 3);
   run.setJobs([job('running', { requires_resume: true })]);
   await run.clock.advance(2500);
@@ -180,10 +192,10 @@ test('a running job waiting for resume reads its final commit and returns to idl
   assert.equal(run.state.loading, false);
   await run.clock.advance(14999);
   assert.equal(run.reads.length, 4);
-  assert.equal(run.jobReads.length, 3);
+  assert.equal(run.jobReads.length, 8);
   await run.clock.advance(1);
   assert.equal(run.reads.length, 5);
-  assert.equal(run.jobReads.length, 4);
+  assert.equal(run.jobReads.length, 9);
   run.poller.dispose();
 });
 
@@ -205,8 +217,11 @@ test('a waiting job resuming work restores responsive dashboard and progress pol
   assert.equal(run.reads.length, 2);
   assert.equal(run.jobReads.length, 2);
   await run.clock.advance(1);
-  assert.equal(run.reads.length, 3);
+  assert.equal(run.reads.length, 2, 'job progress resumes at 2.5 seconds without rebuilding comparison data');
   assert.equal(run.jobReads.length, 3);
+  await run.clock.advance(12500);
+  assert.equal(run.reads.length, 3);
+  assert.equal(run.jobReads.length, 8);
   run.poller.dispose();
 });
 
@@ -276,7 +291,7 @@ test('dashboard data loads independently when the jobs endpoint fails', async ()
   assert.equal(run.state.loading, false);
   assert.equal(run.state.error, 'Jobs unavailable');
   run.failJobs(null);
-  await run.clock.advance(15000);
+  await run.clock.advance(30000);
   assert.equal(run.state.error, null);
   assert.equal(run.state.dashboard?.generated_at, 'saved-prices');
   run.poller.dispose();
@@ -312,11 +327,237 @@ test('initial read errors stop loading and scheduled polls can recover', async (
   assert.equal(run.state.dashboard, null);
   assert.equal(run.state.loading, false);
   assert.equal(run.state.error, 'Database busy');
-  await run.clock.advance(15000);
+  await run.clock.advance(30000);
   run.reads[1].result.resolve(fixture('available'));
   await flush();
   assert.equal(run.published.at(-1)?.generated_at, 'available');
   assert.equal(run.state.error, null);
   assert.equal(run.state.loading, false);
   run.poller.dispose();
+});
+
+const snapshot = (token: string) => ({ ...fixture(token), update_token: token });
+
+test('unchanged idle polls read only revision and progress without rebuilding the dashboard', async () => {
+  const run = setup({ revisions: true });
+  const initial = run.poller.reload();
+  await flush();
+  run.reads[0].result.resolve(snapshot('v1'));
+  await initial;
+  await run.clock.advance(60000);
+  assert.equal(run.reads.length, 1);
+  assert.equal(run.tokenReads.length, 4);
+  assert.equal(run.jobReads.length, 5);
+  assert.equal(run.published.length, 1);
+  assert.equal(run.state.loading, false);
+  run.setToken('v2');
+  await run.clock.advance(15000);
+  assert.equal(run.reads.length, 2);
+  run.reads[1].result.resolve(snapshot('v2'));
+  await flush();
+  await run.clock.advance(15000);
+  assert.equal(run.reads.length, 2);
+  assert.equal(run.state.dashboard?.update_token, 'v2');
+  run.poller.dispose();
+});
+
+test('active jobs still poll progress quickly while unchanged comparisons are reused', async () => {
+  const run = setup({ revisions: true, initialJobs: [job('running')] });
+  const initial = run.poller.reload();
+  await flush();
+  run.reads[0].result.resolve(snapshot('v1'));
+  await initial;
+  await run.clock.advance(10000);
+  assert.equal(run.jobReads.length, 5);
+  assert.equal(run.reads.length, 1);
+  assert.equal(run.tokenReads.length, 1, 'the activation probe is followed by the slower dashboard cadence');
+  run.setJobs([job('complete')]);
+  run.setToken('v2');
+  await run.clock.advance(2500);
+  assert.equal(run.state.jobs[0].state, 'complete');
+  assert.equal(run.reads.length, 2);
+  run.reads[1].result.resolve(snapshot('v2'));
+  await flush();
+  assert.equal(run.state.dashboard?.update_token, 'v2');
+  run.poller.dispose();
+});
+
+test('a collection settling forces one final dashboard read even when its revision token is unchanged', async () => {
+  const run = setup({ revisions: true, initialJobs: [job('running')] });
+  const initial = run.poller.reload();
+  await flush();
+  run.reads[0].result.resolve(snapshot('v1'));
+  await initial;
+  run.setJobs([job('complete')]);
+  await run.clock.advance(2500);
+  assert.equal(run.reads.length, 2, 'completion reloads the final successful source evidence');
+  run.reads[1].result.resolve({ ...snapshot('v1'), generated_at: 'final-evidence' });
+  await flush();
+  assert.equal(run.state.dashboard?.generated_at, 'final-evidence');
+  await run.clock.advance(15000);
+  assert.equal(run.reads.length, 2, 'subsequent idle polls still reuse unchanged comparisons');
+  run.poller.dispose();
+});
+
+test('a revision committed during a slow full response is loaded on the next check', async () => {
+  const run = setup({ revisions: true });
+  const initial = run.poller.reload();
+  await flush();
+  run.setToken('v2');
+  run.reads[0].result.resolve(snapshot('v1'));
+  await initial;
+  await run.clock.advance(15000);
+  assert.equal(run.reads.length, 2, 'the response token cannot consume a newer server commit');
+  run.reads[1].result.resolve(snapshot('v2'));
+  await flush();
+  await run.clock.advance(15000);
+  assert.equal(run.reads.length, 2);
+  run.poller.dispose();
+});
+
+test('manual and mutation reloads bypass unchanged revisions and coalesce into one trailing read', async () => {
+  const run = setup({ revisions: true });
+  const initial = run.poller.reload();
+  await flush();
+  run.reads[0].result.resolve(snapshot('v1'));
+  await initial;
+  const mutation = run.poller.reload();
+  await flush();
+  const manual = run.poller.reload();
+  await flush();
+  assert.equal(run.reads.length, 2);
+  run.reads[1].result.resolve(snapshot('v1'));
+  await flush();
+  assert.equal(run.reads.length, 3);
+  run.reads[2].result.resolve(snapshot('v1'));
+  await Promise.all([mutation, manual]);
+  assert.equal(run.tokenReads.length, 0);
+  assert.equal(run.state.loading, false);
+  run.poller.dispose();
+});
+
+test('revision failures preserve saved prices and later lightweight checks recover', async () => {
+  const run = setup({ revisions: true });
+  const initial = run.poller.reload();
+  await flush();
+  run.reads[0].result.resolve(snapshot('v1'));
+  await initial;
+  run.failToken(new Error('Revision unavailable'));
+  await run.clock.advance(15000);
+  assert.equal(run.state.error, 'Revision unavailable');
+  assert.equal(run.state.dashboard?.update_token, 'v1');
+  assert.equal(run.state.loading, false);
+  run.failToken(null);
+  await run.clock.advance(30000);
+  assert.equal(run.state.error, null);
+  assert.equal(run.reads.length, 1);
+  run.poller.dispose();
+});
+
+test('a legacy full response without a revision keeps refreshing safely', async () => {
+  const run = setup({ revisions: true });
+  const initial = run.poller.reload();
+  await flush();
+  run.reads[0].result.resolve(fixture('legacy'));
+  await initial;
+  await run.clock.advance(15000);
+  assert.equal(run.reads.length, 2);
+  assert.equal(run.tokenReads.length, 0);
+  run.poller.dispose();
+});
+
+test('continuously changing comparison data rebuilds at most once per fifteen seconds while progress stays responsive', async () => {
+  const run = setup({ revisions: true, initialJobs: [job('running')] });
+  const initial = run.poller.reload();
+  await flush(); run.reads[0].result.resolve(snapshot('v1')); await initial;
+  let resolvedReads = 1;
+  for (let tick = 1; tick <= 24; tick++) {
+    const token = `page-${tick}`;
+    run.setToken(token);
+    await run.clock.advance(2500);
+    assert.equal(run.reads.length, 1 + Math.floor(tick / 6));
+    if (run.reads.length > resolvedReads) {
+      run.reads[resolvedReads++].result.resolve(snapshot(token));
+      await flush();
+    }
+  }
+  assert.equal(run.jobReads.length, 25, 'progress still checks every 2.5 seconds');
+  assert.equal(run.reads.length, 5, 'one initial response plus four periodic dashboard rebuilds');
+  assert.equal(run.state.error, null);
+  run.poller.dispose();
+});
+
+test('failed progress reads back off independently to thirty seconds and recover to the fast cadence', async () => {
+  const run = setup({ revisions: true, initialJobs: [job('running')] });
+  const initial = run.poller.reload();
+  await flush(); run.reads[0].result.resolve(snapshot('v1')); await initial;
+  run.failJobs(new Error('Progress temporarily unavailable'));
+  await run.clock.advance(2500);
+  assert.equal(run.jobReads.length, 2);
+  for (const delay of [5000, 10000, 20000, 30000, 30000]) {
+    const before: number = run.jobReads.length;
+    await run.clock.advance(delay - 1);
+    assert.equal(run.jobReads.length, before, 'failed progress reads do not hammer the service');
+    await run.clock.advance(1);
+    assert.equal(run.jobReads.length, before + 1);
+    assert.equal(run.state.error, 'Progress temporarily unavailable', 'successful dashboard probes do not hide the progress failure');
+  }
+  assert.ok(run.tokenReads.length >= 6, 'the dashboard schedule is independent of failed progress reads');
+  assert.equal(run.reads.length, 1, 'unchanged saved data is retained');
+  run.failJobs(null);
+  const beforeRecovery = run.jobReads.length;
+  await run.clock.advance(30000);
+  assert.equal(run.jobReads.length, beforeRecovery + 1);
+  assert.equal(run.state.error, null);
+  await run.clock.advance(2499);
+  assert.equal(run.jobReads.length, beforeRecovery + 1);
+  await run.clock.advance(1);
+  assert.equal(run.jobReads.length, beforeRecovery + 2);
+  run.poller.dispose();
+});
+
+test('full dashboard failures back off without delaying job progress or replacing saved values', async () => {
+  const run = setup({ revisions: true, initialJobs: [job('running')] });
+  const initial = run.poller.reload();
+  await flush(); run.reads[0].result.resolve(snapshot('v1')); await initial;
+  run.setToken('v2');
+  await run.clock.advance(15000);
+  run.reads[1].result.reject(new Error('Dashboard temporarily unavailable'));
+  await flush();
+  assert.equal(run.state.dashboard?.update_token, 'v1');
+  assert.equal(run.state.error, 'Dashboard temporarily unavailable');
+  await run.clock.advance(29999);
+  assert.equal(run.reads.length, 2);
+  assert.equal(run.state.error, 'Dashboard temporarily unavailable', 'successful progress cannot hide a failed dashboard refresh');
+  assert.ok(run.jobReads.length >= 18);
+  await run.clock.advance(1);
+  assert.equal(run.reads.length, 3);
+  run.reads[2].result.resolve(snapshot('v2'));
+  await flush();
+  assert.equal(run.state.error, null);
+  run.setToken('v3');
+  await run.clock.advance(15000);
+  assert.equal(run.reads.length, 4, 'successful reads restore the normal dashboard cadence');
+  run.poller.dispose();
+});
+
+test('manual Retry and a final collection commit bypass a failed dashboard backoff', async () => {
+  for (const trigger of ['manual', 'complete'] as const) {
+    const run = setup({ revisions: true, initialJobs: [job('running')] });
+    const initial = run.poller.reload();
+    await flush(); run.reads[0].result.resolve(snapshot('v1')); await initial;
+    run.setToken('v2');
+    await run.clock.advance(15000);
+    run.reads[1].result.reject(new Error('Dashboard temporarily unavailable'));
+    await flush();
+    let retry: Promise<void> | undefined;
+    if (trigger === 'manual') { retry = run.poller.reload(); await flush(); }
+    else { run.setJobs([job('complete')]); await run.clock.advance(2500); }
+    assert.equal(run.reads.length, 3, `${trigger} requests fresh saved data before the backoff ends`);
+    run.reads[2].result.resolve(snapshot('v2'));
+    await retry; await flush();
+    assert.equal(run.state.error, null);
+    assert.equal(run.state.dashboard?.update_token, 'v2');
+    run.poller.dispose();
+  }
 });

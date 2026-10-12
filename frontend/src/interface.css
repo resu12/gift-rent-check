@@ -15,7 +15,7 @@ body:has(.detail-dialog[open]){overflow:hidden}
 .app-shell .notice p,.app-shell .notice summary{font-size:13px;line-height:1.6}
 .app-shell .notice details{margin-top:6px}
 .app-shell .data-actions{font-size:13px;color:#a9bdcf;margin:0 0 16px}
-.app-shell .data-actions>summary{min-height:36px;align-content:center}
+.app-shell .data-actions>summary{min-height:44px;align-content:center}
 .app-shell .data-actions>.grid-collection-content{padding:8px 0}
 .app-shell .data-actions .heading-actions{margin:0 0 12px;justify-content:flex-start;flex-wrap:wrap;gap:8px}
 .app-shell .data-actions .sync-control{max-width:100%}
@@ -40,6 +40,11 @@ body:has(.detail-dialog[open]){overflow:hidden}
 .app-shell .mix-legend button{font-size:14px;min-height:40px}
 .app-shell .fine-print{font-size:12px;line-height:1.6;margin:14px 18px 0}
 .app-shell .inventory-scope{display:flex;gap:5px;padding:14px 16px}
+.gift-section-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.app-shell .gift-price-refresh{width:44px;min-height:44px;border:1px solid #34475b;border-radius:9px;background:#121d2b;color:#bad1df}
+.app-shell .gift-price-refresh:focus-visible{outline:2px solid #79e1bf;outline-offset:3px}
+.app-shell .inventory-heading{gap:12px;flex-wrap:wrap;padding-bottom:0}
+.app-shell .inventory-heading h2{margin:0}
 .app-shell .inventory-scope>button{min-height:42px;background:transparent;border:1px solid transparent;border-radius:8px;padding:8px 10px;color:#a2b8cc;font-size:13px}
 .app-shell .inventory-scope>button.active{color:#c6f0e1;background:#203f36;border-color:#3b6554}
 .app-shell .inventory-scope b{font-weight:500;margin-left:4px;color:#c3d8df}
@@ -125,3 +130,92 @@ body:has(.detail-dialog[open]){overflow:hidden}
   .app-shell .page-footer{flex-direction:row;flex-wrap:wrap;gap:8px}
 }
 @media(prefers-reduced-motion:reduce){.app-shell *{scroll-behavior:auto!important}.app-shell .button,.app-shell .featured-gift,.app-shell .stat-card{transition:none}}
+
+/* Primary values first; secondary controls and evidence stay available on demand. */
+.app-shell .stat-card{min-height:104px;padding:15px 17px}
+.app-shell .stat-card>strong{font-size:32px;margin:10px 0 3px}
+.app-shell .stat-card:not(.amber) .stat-foot{display:none}
+.app-shell .stat-card.amber .stat-foot{margin-top:5px}
+.app-shell .portfolio-disclosure{margin:18px 0;color:#afc5d7;font-size:14px}
+.app-shell .portfolio-disclosure>summary{min-height:44px;align-content:center}
+.app-shell .portfolio-disclosure .overview-columns{margin-top:10px}
+.app-shell .completed-history>summary{display:flex;align-items:center;gap:9px;padding:16px;min-height:48px;color:#afc6d5;font-size:14px}
+.app-shell .completed-history>summary>span,.app-shell .filter-count{font-size:12px;font-weight:500;color:#bfe8d8;background:#234238;border-radius:5px;min-width:19px;padding:1px 5px;text-align:center}
+.app-shell .completed-history[open]>summary{border-bottom:1px solid #2d414b}
+.app-shell .completed-sync>summary>time{grid-row:1}
+.app-shell .history-sync>summary>span{grid-row:2;font-size:12px;color:#acbfd1}
+.app-shell .history-paused>summary>svg,.app-shell .history-paused>summary>.history-state{color:#d1b782}
+.app-shell .history-failed>summary>svg,.app-shell .history-failed>summary>.history-state{color:#e1a29f}
+.app-shell .inventory-heading{padding-bottom:14px;align-items:center}
+.app-shell .inventory-heading h2{font-size:20px}
+.app-shell .inventory-heading .heading-count{font-size:13px;font-weight:400;color:#adc6d9;vertical-align:middle;margin-left:5px}
+.app-shell .inventory-unit-caption{display:block;margin-top:6px;color:#95acc5;font-size:12px;line-height:1.4}
+.app-shell .inventory-filters{display:flex;padding-bottom:10px}
+.app-shell .inventory-filters .search-field{width:100%;max-width:none}
+.app-shell .inventory-filter-row{display:flex;align-items:flex-start;justify-content:space-between;gap:9px;flex-wrap:wrap;padding:0 16px 14px}
+.app-shell .inventory-sort{display:flex;align-items:center;gap:9px;margin-left:auto;max-width:100%;min-width:0;color:#a5bbcf;font-size:12px}
+.app-shell .inventory-sort>span{white-space:nowrap}
+.app-shell .inventory-sort select{min-height:44px;min-width:0;width:225px;max-width:100%;padding:0 10px;background:#172333;border:1px solid #314258;border-radius:7px;color:#cfdeed;font:inherit;font-size:13px}
+.app-shell .inventory-sort select:focus-visible{outline:2px solid var(--teal);outline-offset:3px}
+.app-shell .inventory-sort-note{margin:0;padding:0 16px 14px;color:#91a8bd;font-size:12px;line-height:1.5}
+.app-shell .inventory-quick-filters{display:flex;gap:6px}
+.app-shell .inventory-quick-filters button{min-height:44px;padding:9px 12px;background:#172333;border:1px solid #314258;border-radius:7px;color:#a8bfd5;font-size:13px}
+.app-shell .inventory-quick-filters button.active{background:#234238;border-color:#416a59;color:#c2edd8}
+.app-shell .inventory-advanced>summary{display:flex;align-items:center;gap:7px;min-height:44px;padding:9px 11px;background:#182434;border:1px solid #34465b;border-radius:7px;color:#bfd0e2;font-size:13px;list-style:none}
+.app-shell .inventory-advanced>summary::-webkit-details-marker{display:none}
+.app-shell .inventory-advanced>summary:after{content:'⌄';font-size:14px}
+.app-shell .inventory-advanced[open]{flex-basis:100%}
+.app-shell .inventory-advanced[open]>summary{width:max-content;margin-left:auto}
+.app-shell .inventory-advanced[open]>summary:after{transform:rotate(180deg)}
+.app-shell .inventory-advanced>div{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;padding:14px;margin-top:9px;border:1px solid #34465b;border-radius:9px;background:#182434}
+.app-shell .inventory-advanced:not([open])>div{display:none}
+.app-shell .inventory-advanced label{min-width:0}
+.app-shell .inventory-advanced label>span{display:block;color:#a5bbcf;font-size:12px;margin-bottom:7px}
+.app-shell .inventory-advanced select{width:100%;min-width:0;max-width:100%;min-height:44px;background:#122030;border:1px solid #3b4e65;border-radius:7px;color:#cfdeed;font-size:13px;padding:0 9px}
+.app-shell .filter-reset{grid-column:1/-1;justify-self:end}
+.app-shell .inventory-quick-filters button:focus-visible{outline:2px solid var(--teal);outline-offset:3px}
+.app-shell .comparison-averages{margin-top:16px}
+.app-shell .comparison-averages>summary{min-height:44px;align-content:center;color:#c8dbea;font-size:14px;line-height:1.5}
+.app-shell .comparison-averages>summary>span{float:right;font-size:12px;color:#9eb6c9}
+.app-shell .comparison-averages .cohort-detail-list{margin-top:10px}
+.app-shell .pricing-grid-quick-filters button,.app-shell .pricing-grid-advanced>summary,.app-shell .pricing-view-toggle button{min-height:42px;font-size:12px}
+.app-shell .pricing-controls.compact .pricing-source-tabs button{min-height:42px;font-size:12px}
+.app-shell .pricing-controls.compact .pricing-timeframe select{min-height:44px;font-size:12px}
+@media(max-width:760px){
+  .app-shell .inventory-filters{padding:0 12px 10px}
+  .app-shell .inventory-filter-row{padding:0 12px 12px;gap:7px}
+  .app-shell .inventory-sort{order:3;width:100%;margin:3px 0 0}
+  .app-shell .inventory-sort select{flex:1;width:auto}
+  .app-shell .inventory-sort-note{padding:0 12px 14px}
+  .app-shell .inventory-quick-filters{gap:5px}
+  .app-shell .inventory-quick-filters button{padding:8px 10px;font-size:12px}
+  .app-shell .inventory-advanced>summary{padding:8px 10px;font-size:12px}
+  .app-shell .inventory-advanced>div{grid-template-columns:1fr}
+  .app-shell .gift-section-actions{gap:6px}
+  .app-shell .stat-card{min-height:96px;padding:13px}
+  .app-shell .stat-card>strong{font-size:30px}
+  .app-shell .stat-card .stat-heading{font-size:13px}
+  .app-shell .stat-card.amber .stat-foot{font-size:12px}
+  .app-shell .inventory-heading{gap:10px}
+  .app-shell .inventory-heading .gift-section-actions{margin-left:auto}
+}
+@media(max-width:480px){
+  .app-shell .history-sync>summary>time{grid-row:3}
+  .app-shell .gift-section-actions .pricing-view-toggle svg{display:none}
+  .app-shell .inventory-heading h2{font-size:18px}
+  .app-shell .inventory-heading{gap:8px}
+  .app-shell .inventory-heading>div:first-child{min-width:0;flex:1 1 95px}
+  .app-shell .inventory-unit-caption{max-width:130px}
+}
+html{color-scheme:dark}
+body{min-width:0}
+.app-shell .status-active-updates{margin:0 0 22px;overflow:hidden}
+.app-shell .status-update-history{margin:0 0 22px;overflow:hidden}
+.app-shell .status-update-history>summary{display:flex;align-items:center;gap:10px;min-height:58px;padding:12px 20px;cursor:pointer;font-size:15px;font-weight:550;color:#c4d4e3;list-style:none}
+.app-shell .status-update-history>summary::before{content:'▸';font-size:12px;color:#96aabd}
+.app-shell .status-update-history[open]>summary::before{transform:rotate(90deg)}
+.app-shell .status-update-history>summary::-webkit-details-marker{display:none}
+.app-shell .status-update-history>summary>svg{margin-left:auto;color:#91a7bb}
+.app-shell .status-update-history[open]>summary{border-bottom:1px solid #293747}
+.app-shell .status-update-history .owned-price-status{border:0;border-radius:0;margin:0}
+.app-shell .status-update-history .observations-disclosure>summary{min-height:48px;align-items:center}

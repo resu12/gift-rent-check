@@ -74,7 +74,7 @@ try {
       const result = await call('stopJob', {job_id: jobId});
       console.log(JSON.stringify({stage: 'final_stop', ...summary(result.job)}));
     } catch {
-      console.error('Could not confirm the final Stop; inspect Activity before continuing.');
+      console.error('Could not confirm the final Stop; inspect Status before continuing.');
       process.exitCode = 1;
     }
   }

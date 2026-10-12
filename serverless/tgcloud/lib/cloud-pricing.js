@@ -1,6 +1,9 @@
 // Pure dashboard projection shared by cloud requests and parity tests. Every
 // monetary calculation uses BigInt fractions; source strings stay unchanged.
-import {addressKey as uncachedAddressKey, traitKey as uncachedTraitKey, instant as uncachedInstant, instantOrder as uncachedInstantOrder, iso, resolveCloudWindow, rational, decimal, plus, multiply, compare, decimalText, canonicalJSON} from './cloud-pricing-core.js';
+import {canonicalAddress as strictAddress, addressKey as uncachedAddressKey, traitKey as uncachedTraitKey, instant as uncachedInstant, instantOrder as uncachedInstantOrder, iso, resolveCloudWindow, rational, decimal, plus, sumRationals, multiply, compare, decimalText, canonicalJSON} from './cloud-pricing-core.js';
+import {CONTRACT_VARIANTS, MARKETAPP_OPERATOR} from './ton-price-decoder.js';
+import {buildGiftPriceTracking} from './price-tracking.js';
+import {isSupplementaryExpiryFailure} from './rental-expiry-check.js';
 export {canonicalAddress, addressKey, resolveCloudWindow, validateSavedCloudWindow} from './cloud-pricing-core.js';
 
 const DAY = 86400000;
@@ -49,7 +52,18 @@ function normalizedRecord(envelope) {
   const row = envelope.record ?? envelope.value ?? envelope;
   return {kind: envelope.kind, row, observed_at: envelope.observed_at ?? row.observed_at, key: envelope.key ?? envelope.id};
 }
-function rememberTraits(evidence, nft, attributes, observedAt, origin) {
+function rememberTraitObservation(values, field, observation, now) {
+  const when = instant(observation.when);
+  if (when === null || when > now) return;
+  const previous = values[field];
+  const order = instantOrder(observation.when), prior = previous.length ? instantOrder(previous[0].when) : null;
+  // Every supported window selects the latest evidence at its trait clock.
+  // The cutoff controls its freshness label, not which observation wins.
+  // Retain all exact-time ties in insertion order for conflicts/provenance.
+  if (prior === null || order > prior) values[field] = [observation];
+  else if (order === prior) previous.push(observation);
+}
+function rememberTraits(evidence, nft, attributes, observedAt, origin, now) {
   if (!nft || attributes == null || instant(observedAt) === null) return;
   const parsed = {}; let malformed = !Array.isArray(attributes);
   if (!malformed) for (const attribute of attributes) {
@@ -62,7 +76,7 @@ function rememberTraits(evidence, nft, attributes, observedAt, origin) {
     const entries = parsed[field] || [];
     let error = malformed || entries.includes(null) ? 'malformed' : null;
     if (new Set(entries.map(traitKey)).size > 1) error = 'conflicting';
-    values[field].push({value: error ? null : entries[0] ?? null, error, source: origin, when: observedAt});
+    rememberTraitObservation(values, field, {value: error ? null : entries[0] ?? null, error, source: origin, when: observedAt}, now);
   }
   evidence.set(nft, values);
 }
@@ -92,7 +106,7 @@ function stats(peers, rentals = false) {
   if (rentals) Object.assign(result, {distinct_nft_count: new Set(peers.map(p => p.nft)).size, extension_count: 0, unknown_extension_count: 0, missing_hash_count: peers.filter(p => !p.tx_hash).length});
   if (!peers.length) return result;
   const prices = peers.map(p => p.price).sort(compare), middle = Math.floor(prices.length / 2);
-  const sum = prices.reduce(plus, rational(0n));
+  const sum = sumRationals(prices);
   const median = prices.length % 2 ? prices[middle] : multiply(plus(prices[middle - 1], prices[middle]), 1n, 2n);
   Object.assign(result, {mean: decimalText(multiply(sum, 1n, BigInt(prices.length))), median: decimalText(median, rentals ? 9 : 10), minimum: decimalText(prices[0]), maximum: decimalText(prices.at(-1)), observed_from: iso(Math.min(...peers.map(p => p.when))), observed_to: iso(Math.max(...peers.map(p => p.when)))});
   return result;
@@ -110,13 +124,39 @@ function eligibleSources(observations, metadata, cutoff, now) {
   }
   return eligible;
 }
-function readDataset(records, now, traitNow) {
-  const gifts = new Map(), listings = new Map(), ownedPrices = new Map(), history = [], collections = new Map(), conflicts = new Set(), evidence = new Map(), names = new Map(), settings = {};
+function createDataset(portfolioRecords, now, traitNow, rentalPricing = false) {
+  const gifts = new Map(), listings = new Map(), listingHistory = new Map(), ownedPrices = new Map(), ownedStatuses = new Map(), personalGifts = new Map(), history = [], collections = new Map(), conflicts = new Set(), evidence = new Map(), names = new Map(), settings = {};
+  const trackingNFTs = new Set();
+  for (const envelope of portfolioRecords) if (envelope.kind === 'portfolio' || envelope.kind === 'gift') {
+    const {row} = normalizedRecord(envelope), nft = addressKey(row?.nft_address);
+    if (nft) trackingNFTs.add(nft);
+  }
   const rememberCollection = (nft, collection) => {nft = addressKey(nft); collection = addressKey(collection); if (nft && collection) {if (!collections.has(nft)) collections.set(nft, new Set()); collections.get(nft).add(collection);}};
+  function add(records) {
   for (const envelope of records) {
     const {kind, row, observed_at, key} = normalizedRecord(envelope);
     if (!object(row)) continue;
     if (kind === 'settings') {Object.assign(settings, row); continue;}
+    if (kind === 'personal_gift') {
+      const nft=addressKey(row.nft_address),when=instant(observed_at);
+      if(nft&&when!==null&&when<=now) {
+        if(!personalGifts.has(nft))personalGifts.set(nft,[]);
+        personalGifts.get(nft).push({row,observed_at,when});
+      }
+      // An authenticated personal page supplies price/status observations, not
+      // collection metadata, ownership proof, membership or market samples.
+      continue;
+    }
+    if (kind === 'owned_status') {
+      const nft = addressKey(row.nft_address), when = instant(observed_at);
+      if (row.semantics_version === 'ton-owned-rental-status-v1' && nft && when !== null && when <= now) {
+        if (!ownedStatuses.has(nft)) ownedStatuses.set(nft, []);
+        ownedStatuses.get(nft).push({row, observed_at, when});
+      }
+      // Targeted status checks update neither collection/trait evidence nor
+      // membership, and never enter the market comparison sample.
+      continue;
+    }
     if (kind === 'owned_price') {
       const nft = addressKey(row.nft_address), when = instant(observed_at);
       if (nft && when !== null && when <= now) {
@@ -144,10 +184,10 @@ function readDataset(records, now, traitNow) {
       rememberCollection(nft, row.collection_address);
       for (const collection of row.collections || row.collection_addresses || []) rememberCollection(nft, collection);
       if (row.collection_conflict) conflicts.add(nft);
-      rememberTraits(evidence, nft, row.attributes, row.observed_at ?? observed_at, row.source || (kind === 'ownership' ? 'TON content' : 'Saved structured metadata'));
+      rememberTraits(evidence, nft, row.attributes, row.observed_at ?? observed_at, row.source || (kind === 'ownership' ? 'TON content' : 'Saved structured metadata'), traitNow);
       if (object(row.trait_evidence)) {
         const target = evidence.get(nft) || {model: [], backdrop: []};
-        for (const field of FIELDS) for (const observation of row.trait_evidence[field] || []) if (object(observation)) target[field].push({...observation});
+        for (const field of FIELDS) for (const observation of row.trait_evidence[field] || []) if (object(observation)) rememberTraitObservation(target, field, {...observation}, traitNow);
         evidence.set(nft, target);
       }
       continue;
@@ -160,12 +200,22 @@ function readDataset(records, now, traitNow) {
       if (row.collection_conflict) conflicts.add(nft);
       const valid = validListing(item) && addressKey(item.nft_address) === nft && addressKey(item.owner) !== null;
       const times = unique([...(row.occurrence_times || []), observed_at]).filter(t => instant(t) !== null).sort((a, b) => instantOrder(a) < instantOrder(b) ? -1 : 1);
+      // Tracking needs every saved occurrence: retaining only the latest repeat
+      // of each representation would lose earlier A -> B -> A price changes.
+      if (trackingNFTs.has(nft)) {
+        if (!listingHistory.has(nft)) listingHistory.set(nft, []);
+        for (const time of times) listingHistory.get(nft).push({nft, source: item, valid, when: instant(time), observed_at: time, price: valid ? rational(BigInt(item.price_per_day), 1000000000n) : null});
+      }
       // Repeated identical observations need at most these three timestamps:
       // latest overall (including future exclusion), latest at the comparison
       // instant, and latest now for the independent current asking price.
       const selected = times.length ? unique([times.at(-1), times.filter(t => instant(t) <= traitNow).at(-1), times.filter(t => instant(t) <= now).at(-1)]).filter(Boolean) : [observed_at];
       for (const time of selected) {
-        if (valid) rememberTraits(evidence, nft, item.attributes, time, 'Marketapp listing');
+        if (valid) rememberTraits(evidence, nft, item.attributes, time, 'Marketapp listing', traitNow);
+        // Rental comparisons use history prices. Other NFTs' listings still
+        // supply all dated traits and collection/conflict evidence above, but
+        // only displayed gifts need their asking-price snapshots and BigInts.
+        if (rentalPricing && !trackingNFTs.has(nft)) continue;
         const entry = {nft, source: item, valid, when: instant(time), observed_at: time, price: valid ? rational(BigInt(item.price_per_day), 1000000000n) : null, params: row.params || {}};
         if (!listings.has(nft)) listings.set(nft, []); listings.get(nft).push(entry);
       }
@@ -179,7 +229,8 @@ function readDataset(records, now, traitNow) {
       history.push({item, nft, observed_at: times.at(-1) ?? observed_at, fingerprint: row.fingerprint, key});
     }
   }
-  return {gifts, listings, ownedPrices, history, collections, conflicts, evidence, names, settings};
+  }
+  return {add, data: {gifts, listings, listingHistory, ownedPrices, ownedStatuses, personalGifts, history, collections, conflicts, evidence, names, settings}};
 }
 function listingPeers(data, traits, cutoff, now, custom, backdrop, rejected) {
   const peers = [];
@@ -195,10 +246,10 @@ function listingPeers(data, traits, cutoff, now, custom, backdrop, rejected) {
     if (!data.collections.get(nft)?.size) {count(rejected, 'missing_collection'); continue;}
     const metadata = traits.get(nft) || traitsFor(null, cutoff, now);
     if (metadata.invalid) {count(rejected, 'invalid_or_conflicting_traits'); continue;}
-    if (backdrop && (!metadata.backdrop_fresh || traitKey(metadata.backdrop) !== 'black')) {count(rejected, 'outside_backdrop_scope'); continue;}
+    if (backdrop && traitKey(metadata.backdrop) !== 'black') {count(rejected, 'outside_backdrop_scope'); continue;}
     const eligible = eligibleSources(dated, metadata, cutoff, now);
     if (!Object.values(eligible).some(Boolean)) {count(rejected, 'ineligible_comparison_source'); continue;}
-    peers.push({nft, collection: [...data.collections.get(nft)][0], price: group.at(-1).price, when: latest, eligible, model: metadata.model_fresh ? traitKey(metadata.model) : null, backdrop: metadata.backdrop_fresh ? traitKey(metadata.backdrop) : null});
+    peers.push({nft, collection: [...data.collections.get(nft)][0], price: group.at(-1).price, when: latest, eligible, model: traitKey(metadata.model), backdrop: traitKey(metadata.backdrop)});
   }
   return peers;
 }
@@ -221,17 +272,27 @@ function historyGroups(data, now, {window, rentalPricing = false, wanted = null}
     if (rentalPricing && (data.conflicts.has(nft) || (data.collections.get(nft)?.size || 0) > 1)) {reject(nft, 'collection_conflict'); continue;}
     const normalized = {...item, address: nft, collection_address: addressKey(item.collection_address), src: addressKey(item.src), dst: addressKey(item.dst)};
     const fields = [nft, item.ts, normalized.src, normalized.dst]; if (rentalPricing) fields.push(item.is_extend ?? null);
-    const eventKey = canonicalJSON(fields), variant = canonicalJSON(normalized);
-    if (!groups.has(eventKey)) groups.set(eventKey, new Map());
-    groups.get(eventKey).set(variant, {item, nft, collection: normalized.collection_address, when});
+    const eventKey = canonicalJSON(fields), entry = {item, nft, collection: normalized.collection_address, when};
+    if (!groups.has(eventKey)) {groups.set(eventKey, entry); continue;}
+    // Most event identities have a single variant. Keeping a second complete
+    // JSON string as every Map key doubled the history projection's footprint.
+    // Compare full normalized content only where identities actually collide;
+    // unknown fields and friendly-address aliases retain their old semantics.
+    const previous = groups.get(eventKey), variant = canonicalJSON(normalized);
+    if (previous instanceof Map) {previous.set(variant, entry); continue;}
+    const original = canonicalJSON({...previous.item, address: previous.nft, collection_address: previous.collection,
+      src: addressKey(previous.item.src), dst: addressKey(previous.item.dst)});
+    // Ambiguous groups retain the keyed representation so arbitrarily many
+    // variants cannot turn this optimization into a quadratic comparison loop.
+    groups.set(eventKey, variant === original ? entry : new Map([[original, previous], [variant, entry]]));
   }
   return {groups, rejected, perGift, observed, reject};
 }
 function rentalPeers(data, traits, window, now, backdrop) {
   const result = historyGroups(data, now, {window, rentalPricing: true}), peers = [];
   for (const variants of result.groups.values()) {
-    const row = variants.values().next().value, {item, nft, collection, when} = row;
-    if (variants.size !== 1) {result.reject(nft, 'ambiguous_history_variants', variants.size); continue;}
+    const row = variants instanceof Map ? variants.values().next().value : variants, {item, nft, collection, when} = row;
+    if (variants instanceof Map) {result.reject(nft, 'ambiguous_history_variants', variants.size); continue;}
     if (item.currency !== 'GRAM') {result.reject(nft, 'non_gram_currency'); continue;}
     if (item.is_extend !== false) {result.reject(nft, 'unverified_extension_semantics'); continue;}
     if (!safeInteger(item.duration) || item.duration <= 0) {result.reject(nft, 'missing_or_nonpositive_duration'); continue;}
@@ -244,8 +305,8 @@ function rentalPeers(data, traits, window, now, backdrop) {
     } catch {result.reject(nft, 'invalid_amount'); continue;}
     const metadata = traits.get(nft) || {};
     if (metadata.invalid) {result.reject(nft, 'invalid_or_conflicting_traits'); continue;}
-    if (backdrop && (!metadata.backdrop_fresh || traitKey(metadata.backdrop) !== 'black')) {result.reject(nft, 'outside_backdrop_scope'); continue;}
-    peers.push({nft, collection, when, price, model: metadata.model_fresh ? traitKey(metadata.model) : null, backdrop: metadata.backdrop_fresh ? traitKey(metadata.backdrop) : null, tx_hash: item.tx_hash});
+    if (backdrop && traitKey(metadata.backdrop) !== 'black') {result.reject(nft, 'outside_backdrop_scope'); continue;}
+    peers.push({nft, collection, when, price, model: traitKey(metadata.model), backdrop: traitKey(metadata.backdrop), tx_hash: item.tx_hash});
   }
   return {peers, rejected: result.rejected};
 }
@@ -255,8 +316,8 @@ function rentalCounts(data, gifts, now) {
   const wanted = new Set(gifts.filter(g => g.is_portfolio).map(g => addressKey(g.nft_address)));
   const result = historyGroups(data, now, {wanted}), accepted = new Map();
   for (const variants of result.groups.values()) {
-    const {item, nft, when} = variants.values().next().value;
-    if (variants.size !== 1) {result.reject(nft, 'ambiguous_history_variants', variants.size); continue;}
+    const {item, nft, when} = variants instanceof Map ? variants.values().next().value : variants;
+    if (variants instanceof Map) {result.reject(nft, 'ambiguous_history_variants', variants.size); continue;}
     if (['action', 'event_type'].some(field => ['return', 'returned', 'cancel', 'cancelled', 'canceled', 'transfer'].includes(traitKey(item[field])))) result.reject(nft, 'non_rental_action');
     else if (item.is_extend === true) result.reject(nft, 'extensions');
     else if (item.is_extend !== false) result.reject(nft, 'unknown_extension_status');
@@ -328,17 +389,280 @@ function refreshOwnedAsking(gift, observations, wallet) {
   }
   if (gift.price_source === 'Observed contract terms') gift.uncertainties.push('Configured rental-contract price; Marketapp listing visibility and counterpart settings propagation are not established.');
 }
-function giftDefaults(row) {
-  return {name: null, collection_name: null, collection_address: null, image_url: null, state: 'unknown', display_state: 'Unknown', ui_state: null, category: row.is_portfolio ? 'portfolio' : 'unresolved', is_portfolio: false, automatic_membership: false, membership_sources: [], verification_method: null, proof_badges: [], price_per_day: null, price_unit: null, price_source: null, rental_until: null, observed_at: null, market_observed_at: null, explorer_url: null, uncertainties: [], ...row, membership_sources: [...(row.membership_sources || [])], proof_badges: [...(row.proof_badges || [])], uncertainties: [...(row.uncertainties || [])]};
+function eligiblePersonalGifts(gift, observations, wallet) {
+  if(!gift.is_portfolio||gift.collection_conflict||!observations?.length)return [];
+  const tonAddress=value=>{try{return strictAddress(value);}catch{return null;}};
+  const owner=tonAddress(wallet),nft=tonAddress(gift.nft_address),collection=tonAddress(gift.collection_address);
+  if(!owner||!nft||!collection)return [];
+  return observations.filter(({row})=>row.provider==='marketapp_website'&&row.semantics_version==='marketapp-my-nfts-v1'
+    &&row.scope==='my_nfts'&&row.authenticated===true&&row.ownership_verified===false&&row.visible===true
+    &&tonAddress(row.wallet)===owner&&tonAddress(row.nft_address)===nft&&tonAddress(row.collection_address)===collection
+    &&['for_rent','rented','unknown'].includes(row.rental_state)&&row.rental_until===null);
 }
-function projectDashboard(records, input = {}, context = {}) {
+// For the two pinned Marketapp variants, rent helper 49 deploys the derived
+// role-1 contract with created_at=NOW, duration=D and expiry=NOW+D. Extension
+// helper 50 adds the same increment to duration and expiry, preserving identity.
+// Consequently expiry-duration is the original rental start, including for
+// older saved observations that did not retain created_at. This helper is only
+// used after the full NFT/owner/holder/hash/stability checks below succeed.
+function verifiedRentalStart(row, observedAt) {
+  if (row.role !== 1 || row.status !== 1 || !['rented', 'expired_pending_return'].includes(row.rental_state)
+      || !Object.hasOwn(CONTRACT_VARIANTS, row.code_hash) || row.rental_duration_unit !== 'seconds'
+      || !safeInteger(row.rental_duration) || row.rental_duration <= 0 || row.rental_duration > 0xffffffff) return null;
+  const start = row.rental_until - row.rental_duration;
+  if (!safeInteger(start) || start <= 0 || start * 1000 > observedAt) return null;
+  if (row.created_at !== undefined && ((row.created_at_unit !== undefined && row.created_at_unit !== 'Unix seconds')
+      || !safeInteger(row.created_at) || row.created_at !== start)) return null;
+  return iso(start * 1000);
+}
+function ownedStatusProof(gift, observation, owner, now) {
+  const tonAddress = value => {try {return strictAddress(value);} catch {return null;}};
+  const row = observation.row;
+  const logicalTime = value => typeof value === 'string' && /^(?:0|[1-9]\d{0,19})$/.test(value) && BigInt(value) <= 18446744073709551615n;
+  const direct = row.rental_state === 'held_directly' && tonAddress(row.observed_owner) === owner;
+  const contract = ['idle_rental_contract', 'rented', 'expired_pending_return'].includes(row.rental_state)
+    && tonAddress(row.nft) === tonAddress(gift.nft_address)
+    && tonAddress(row.holding_contract) && tonAddress(row.observed_owner) === tonAddress(row.holding_contract)
+    && tonAddress(row.marketplace) === MARKETAPP_OPERATOR && Object.hasOwn(CONTRACT_VARIANTS, row.code_hash)
+    && row.code_hash_verified === true && row.data_hash_verified === true && typeof row.data_hash === 'string' && /^[0-9a-f]{64}$/.test(row.data_hash)
+    && logicalTime(row.account_last_transaction_lt) && typeof row.decoder_version === 'string' && row.decoder_version.length > 0
+    && safeInteger(row.rental_until) && row.rental_until >= 0 && row.rental_until <= 253402300799 && row.rental_until_unit === 'Unix seconds'
+    && (row.rental_state === 'idle_rental_contract' ? row.role === 0 && row.status === 0 && row.renter === null && row.rental_until === 0
+      : row.role === 1 && row.status === 1 && tonAddress(row.renter) && tonAddress(row.counterpart) && row.rental_until > 0);
+  const valid = row.verified === true && tonAddress(row.owner) === owner
+    && tonAddress(row.nft_address) === tonAddress(gift.nft_address)
+    && tonAddress(row.collection_address) && tonAddress(row.collection_address) === tonAddress(gift.collection_address)
+    && logicalTime(row.nft_last_transaction_lt)
+    && instant(row.rechecked_at) !== null && instant(row.rechecked_at) >= observation.when && instant(row.rechecked_at) <= now
+    && (direct || contract);
+  return {valid, direct};
+}
+function retainVerifiedRentalStart(gift, observations, wallet, now) {
+  if (!gift.is_portfolio || gift.collection_conflict || !observations?.length) return;
+  const tonAddress = value => {try {return strictAddress(value);} catch {return null;}};
+  const owner = tonAddress(wallet);
+  if (!owner || !tonAddress(gift.nft_address) || !tonAddress(gift.collection_address)) return;
+  const groups = new Map();
+  for (const observation of observations) {
+    if (tonAddress(observation.row.wallet) !== owner) continue;
+    const order = instantOrder(observation.observed_at);
+    if (!groups.has(order)) groups.set(order, []);
+    groups.get(order).push(observation);
+  }
+  let latestStart = null;
+  for (const group of groups.values()) {
+    // Every simultaneous observation must independently pass the complete
+    // scope, holder, hash and NFT stability checks. Do not combine partial
+    // evidence or pick a convenient variant from a conflicting timestamp.
+    if (!group.every(observation => ownedStatusProof(gift, observation, owner, now).valid)) continue;
+    const starts = group.map(observation => verifiedRentalStart(observation.row, observation.when));
+    if (starts.includes(null) || new Set(starts).size !== 1) continue;
+    if (latestStart === null || starts[0] > latestStart) latestStart = starts[0];
+  }
+  // This is dated evidence that a rental began, not proof that the same rental
+  // is still active. New website snapshots may clear current expiry/start
+  // fields without erasing a rental that was already independently verified.
+  gift.last_verified_rental_started_at = latestStart;
+  gift.last_verified_rental_start_source = latestStart ? 'verified_contract' : null;
+}
+function refreshOwnedStatus(gift, observations, wallet, now, personalObservations) {
+  if (!gift.is_portfolio) return;
+  const tonAddress = value => {try {return strictAddress(value);} catch {return null;}};
+  const owner = tonAddress(wallet);
+  if (!owner) return;
+  if (gift.collection_conflict || !tonAddress(gift.collection_address) || !tonAddress(gift.nft_address)) {
+    gift.status_is_historical = true; gift.status_check_reason = gift.collection_conflict ? 'collection_conflict' : 'unresolved_identity';
+    gift.previous_rental_state = gift.state;
+    gift.previous_status_observed_at = gift.status_observed_at ?? gift.ownership_observed_at ?? gift.observed_at ?? null;
+    gift.state = 'unknown'; gift.display_state = 'Unknown'; gift.ui_state = null;
+    gift.rental_until = null; gift.rental_until_unix_seconds = null;
+    gift.uncertainties.push('Rental status was not refreshed because NFT or collection identity is unresolved.');
+    return;
+  }
+  // The configured wallet is part of the frozen verification scope. Ignore
+  // old observations from a different wallet rather than reassigning evidence.
+  const personal=eligiblePersonalGifts(gift,personalObservations,wallet),expiryFailures=[];
+  const selected = (observations || []).filter(o => {
+    if(tonAddress(o.row.wallet)!==owner)return false;
+    if(isSupplementaryExpiryFailure(o.row)&&tonAddress(o.row.nft_address)===tonAddress(gift.nft_address)
+      &&tonAddress(o.row.collection_address)===tonAddress(gift.collection_address)) {
+      const anchor=instantOrder(o.row.personal_status_observed_at);
+      const matching=anchor===null?[]:personal.filter(web=>instantOrder(web.observed_at)===anchor);
+      if(anchor!==null&&anchor<=instantOrder(o.observed_at)&&matching.length&&matching.every(web=>web.row.rental_state==='rented')) {
+        expiryFailures.push(o);return false;
+      }
+    }
+    return true;
+  });
+  if(expiryFailures.length) {
+    const latest=expiryFailures.reduce((a,b)=>instantOrder(a.observed_at)>instantOrder(b.observed_at)?a:b);
+    const failedOrder=instantOrder(latest.observed_at);
+    if(selected.every(o=>instantOrder(o.observed_at)<failedOrder)&&personal.every(o=>instantOrder(o.observed_at)<=failedOrder)) {
+      gift.rental_expiry_checked_at=latest.observed_at;gift.rental_expiry_check_reason=latest.row.reason;
+      gift.uncertainties.push('The supplementary TON expiry check was unavailable; the Marketapp rental status keeps its original observation time.');
+    }
+  }
+  if (!selected.length) return;
+  const order = selected.reduce((latest, o) => instantOrder(o.observed_at) > latest ? instantOrder(o.observed_at) : latest, instantOrder(selected[0].observed_at));
+  const latest = selected.filter(o => instantOrder(o.observed_at) === order), chosen = latest.at(-1), row = chosen.row;
+  const seedTime = gift.status_observed_at ?? gift.ownership_observed_at ?? gift.observed_at;
+  if (instant(seedTime) !== null && instant(seedTime) <= now && order < instantOrder(seedTime)) return;
+  const conflict = new Set(latest.map(o => canonicalJSON([o.row.verified, o.row.rental_state, o.row.rental_until, o.row.owner, o.row.observed_owner, o.row.holding_contract, o.row.collection_address, o.row.reason]))).size > 1;
+  const proof = ownedStatusProof(gift, chosen, owner, now), direct = proof.direct;
+  const valid = !conflict && proof.valid;
+  gift.status_checked_at = row.checked_at ?? chosen.observed_at;
+  gift.status_observed_at = chosen.observed_at;
+  gift.status_source = 'TON Center'; gift.status_check_reason = conflict ? 'conflicting_status_observations' : valid ? row.reason : row.verified === true ? 'invalid_status_evidence' : row.reason;
+  gift.status_is_historical = !valid;
+  // Preserve the previously displayed dated state while making uncertainty
+  // explicit. The immutable source envelopes remain the historical record.
+  gift.previous_rental_state = gift.state; gift.previous_status_observed_at = seedTime ?? null;
+  if (!valid) {
+    gift.state = 'unknown'; gift.display_state = 'Unknown'; gift.ui_state = null;
+    gift.rental_until = null; gift.rental_until_unix_seconds = null;
+    gift.uncertainties.push('The latest TON rental-status check could not verify the current state; previous dated ownership evidence is retained.');
+    return;
+  }
+  let state = row.rental_state;
+  if (state === 'rented' && row.rental_until * 1000 <= now) state = 'expired_pending_return';
+  gift.state = state;
+  gift.display_state = {held_directly: 'Held directly', idle_rental_contract: 'Idle rental contract', rented: 'Rented', expired_pending_return: 'Expired, pending return'}[state];
+  gift.ownership_observed_at = chosen.observed_at;
+  gift.rental_until_unix_seconds = row.rental_until ?? null;
+  gift.rental_until = row.rental_until > 0 ? iso(row.rental_until * 1000) : null;
+  const starts = latest.map(o => verifiedRentalStart(o.row, o.when));
+  gift.current_rental_started_at = new Set(starts).size === 1 ? starts[0] : null;
+  gift.current_rental_start_source = gift.current_rental_started_at ? 'verified_contract' : null;
+  gift.holding_contract = row.holding_contract ?? null;
+  gift.status_provenance = Object.fromEntries(['provider', 'wallet', 'nft_address', 'collection_address', 'observed_owner', 'holding_contract', 'owner', 'nft_last_transaction_lt', 'account_last_transaction_lt', 'code_hash', 'data_hash', 'code_hash_verified', 'data_hash_verified', 'decoder_version', 'contract_variant', 'storage_layout_version', 'marketplace', 'created_at', 'created_at_unit', 'role', 'status', 'rental_duration', 'rental_duration_unit', 'rental_until', 'rental_until_unit', 'renter', 'counterpart', 'semantics_version', 'rechecked_at'].filter(key => Object.hasOwn(row, key)).map(key => [key, row[key]]));
+  // TON idle state does not prove Marketapp listing visibility. Only a later
+  // observed listing may retain For rent, and never for a direct/active rental.
+  const newerListing = state === 'idle_rental_contract' && gift.ui_state === 'for_rent' && instantOrder(gift.market_observed_at) > order;
+  gift.ui_state = newerListing ? 'for_rent' : state === 'rented' ? 'rented' : null;
+  if (newerListing) gift.display_state = 'For rent';
+  gift.proof_badges = unique([...gift.proof_badges, direct ? 'TON holder observation' : 'TON rental-status observation']);
+  // Return only evidence validated during this projection. A portfolio seed
+  // can contain old display fields and cannot establish a compatible expiry.
+  return {order, state, rental_until: gift.rental_until, rental_until_unix_seconds: gift.rental_until_unix_seconds,
+    current_rental_started_at: gift.current_rental_started_at, current_rental_start_source: gift.current_rental_start_source,
+    provenance: gift.status_provenance};
+}
+function refreshPersonalGift(gift, observations, wallet, now, verifiedStatus) {
+  const eligible=eligiblePersonalGifts(gift,observations,wallet);
+  if(!eligible.length)return;
+  const order=eligible.reduce((latest,o)=>instantOrder(o.observed_at)>latest?instantOrder(o.observed_at):latest,instantOrder(eligible[0].observed_at));
+  const latest=eligible.filter(o=>instantOrder(o.observed_at)===order),chosen=latest.at(-1),row=chosen.row;
+  const priceOf=o=>o.row.currency==='GRAM'&&typeof o.row.price_per_day==='string'
+    &&/^(?:0|[1-9]\d{0,35})(?:\.\d{1,9})?$/.test(o.row.price_per_day)?decimalText(decimal(o.row.price_per_day)):null;
+  const priceGroups=new Map();
+  for(const observation of eligible) {const key=instantOrder(observation.observed_at);if(!priceGroups.has(key))priceGroups.set(key,[]);priceGroups.get(key).push(observation);}
+  let validPrice=null;
+  for(const [priceTime,group] of priceGroups) {
+    const values=group.map(priceOf);
+    if(values.every(price=>price!==null)&&new Set(values).size===1&&(!validPrice||priceTime>validPrice.order))validPrice={order:priceTime,observation:group.at(-1),price:values[0]};
+  }
+  const priceOrder=instantOrder(gift.price_observed_at);
+  const checkedOrder=instantOrder(gift.price_checked_at),historicalCheck=gift.price_is_historical===true;
+  if(validPrice&&(priceOrder===null||validPrice.order>=priceOrder)) {
+    gift.price_per_day=validPrice.price;gift.price_unit='GRAM';gift.price_source='Marketapp account';
+    gift.price_observed_at=validPrice.observation.observed_at;gift.price_is_historical=historicalCheck&&checkedOrder!==null&&checkedOrder>validPrice.order;
+  }
+  if((instantOrder(gift.price_observed_at)===null||order>=instantOrder(gift.price_observed_at))&&(checkedOrder===null||order>=checkedOrder)) {
+    const prices=latest.map(priceOf);
+    gift.price_checked_at=chosen.observed_at;
+    if(prices.every(price=>price!==null)&&new Set(prices).size===1)gift.price_check_reason='observed_account_price';
+    else {
+      gift.price_is_historical=gift.price_per_day!==null;gift.price_checked_at=chosen.observed_at;
+      gift.price_check_reason=new Set(prices).size>1?'conflicting_account_prices':'account_price_unavailable';
+      gift.uncertainties.push('The latest Marketapp account observation has no unambiguous GRAM asking price; the previous dated price is retained.');
+    }
+  }
+  const statusTime=gift.status_observed_at??gift.ownership_observed_at??gift.observed_at;
+  const priorTimes=[statusTime,...(gift.ui_state==='for_rent'?[gift.market_observed_at]:[])].filter(value=>instant(value)!==null&&instant(value)<=now);
+  const priorOrder=priorTimes.length?priorTimes.reduce((max,value)=>instantOrder(value)>max?instantOrder(value):max,instantOrder(priorTimes[0])):null;
+  const conflict=new Set(latest.map(o=>o.row.rental_state)).size>1;
+  const labels=latest.map(o=>o.row.rental_remaining_display);
+  const remaining=!conflict&&row.rental_state==='rented'&&labels.every(label=>typeof label==='string'&&label.length>0&&label.length<=64
+    &&label.trim()===label&&!/[\u0000-\u001f\u007f]/.test(label))&&new Set(labels).size===1?labels[0]:null;
+  const showRemaining=()=>{if(remaining!==null){gift.rental_remaining_display=remaining;gift.rental_remaining_observed_at=chosen.observed_at;}};
+  if(priorOrder!==null&&order<priorOrder) {
+    // A later idle contract observation is compatible with earlier personal
+    // listing visibility. Preserve its original website timestamp separately;
+    // the TON check does not establish a fresh listing or a delisting.
+    const marketOrder=instantOrder(gift.market_observed_at);
+    if(!conflict&&row.rental_state==='for_rent'&&gift.state==='idle_rental_contract'
+      &&gift.status_source==='TON Center'&&gift.status_is_historical===false
+      &&(marketOrder===null||order>=marketOrder)) {
+      gift.ui_state='for_rent';gift.display_state='For rent';gift.market_observed_at=chosen.observed_at;
+      gift.visibility_source='Marketapp account';gift.visibility_observed_at=chosen.observed_at;gift.visibility_is_historical=true;
+      gift.visibility_provenance=Object.fromEntries(['provider','wallet','nft_address','collection_address','semantics_version','scope','authenticated','ownership_verified','visible','rental_state'].filter(key=>Object.hasOwn(row,key)).map(key=>[key,row[key]]));
+      gift.proof_badges=unique([...gift.proof_badges,'Marketapp account observation']);
+      gift.uncertainties.push('Marketapp availability was observed earlier; the newer idle contract check does not confirm current listing visibility.');
+    }
+    // A later verified active rental can keep an earlier rounded account label
+    // as dated display evidence. The precise TON expiry takes precedence.
+    if(verifiedStatus?.state==='rented'&&verifiedStatus.order>order)showRemaining();
+    return;
+  }
+  const tonState=gift.state==='idle_rental_contract'?'for_rent':gift.state;
+  const providerConflict=gift.status_source==='TON Center'&&instantOrder(gift.status_observed_at)===order
+    &&['rented','for_rent'].includes(row.rental_state)&&tonState!==row.rental_state;
+  gift.previous_rental_state=gift.state;gift.previous_status_observed_at=statusTime??null;
+  gift.previous_rental_until=gift.rental_until??null;gift.previous_rental_until_unix_seconds=gift.rental_until_unix_seconds??null;
+  gift.previous_status_provenance=gift.status_provenance??null;
+  gift.status_source='Marketapp account';gift.status_observed_at=chosen.observed_at;gift.status_checked_at=chosen.observed_at;
+  gift.status_is_historical=conflict||providerConflict||row.rental_state==='unknown';
+  gift.status_check_reason=conflict?'conflicting_account_status':providerConflict?'conflicting_provider_status':row.rental_state==='unknown'?'account_status_unknown':'observed_account_status';
+  gift.status_provenance=Object.fromEntries(['provider','wallet','nft_address','collection_address','semantics_version','scope','authenticated','ownership_verified','visible','rental_state','rental_until','rental_remaining_display'].filter(key=>Object.hasOwn(row,key)).map(key=>[key,row[key]]));
+  // Marketapp's rounded remaining-time label cannot establish an exact expiry.
+  // Prior precise TON expiry stays dated evidence, not a current countdown.
+  gift.rental_until=null;gift.rental_until_unix_seconds=null;
+  gift.current_rental_started_at=null;gift.current_rental_start_source=null;
+  if(conflict||providerConflict||row.rental_state==='unknown') {
+    gift.state='unknown';gift.ui_state=null;gift.display_state='Unknown';
+    gift.uncertainties.push(providerConflict?'Simultaneous TON and Marketapp account rental states conflict; current status is unresolved.':'The latest Marketapp account rental status is unresolved; previous dated evidence is retained.');
+    return;
+  }
+  if(row.rental_state==='rented') {
+    gift.state='rented';gift.ui_state='rented';gift.display_state='Rented';showRemaining();
+    // Simultaneous matching observations do not invalidate the independently
+    // verified exact TON expiry. Never borrow it from older or seeded fields.
+    if(verifiedStatus?.state==='rented'&&verifiedStatus.order===order) {
+      gift.rental_until=verifiedStatus.rental_until;gift.rental_until_unix_seconds=verifiedStatus.rental_until_unix_seconds;
+      gift.current_rental_started_at=verifiedStatus.current_rental_started_at;gift.current_rental_start_source=verifiedStatus.current_rental_start_source;
+      gift.rental_expiry_provenance=verifiedStatus.provenance;
+    }
+  }
+  else {
+    // Personal-page availability establishes observed listing visibility, not
+    // current on-chain custody or a newly verified holding contract.
+    gift.state=gift.state==='idle_rental_contract'?'idle_rental_contract':'unknown';gift.ui_state='for_rent';gift.display_state='For rent';
+    gift.market_observed_at=chosen.observed_at;
+  }
+  gift.proof_badges=unique([...gift.proof_badges.filter(value=>value!=='TON rental-status observation'),'Marketapp account observation']);
+}
+function giftDefaults(row) {
+  return {name: null, collection_name: null, collection_address: null, image_url: null, state: 'unknown', display_state: 'Unknown', ui_state: null, category: row.is_portfolio ? 'portfolio' : 'unresolved', is_portfolio: false, automatic_membership: false, membership_sources: [], verification_method: null, proof_badges: [], price_per_day: null, price_unit: null, price_source: null, rental_until: null, observed_at: null, market_observed_at: null, explorer_url: null, uncertainties: [], ...row, current_rental_started_at: null, current_rental_start_source: null, last_verified_rental_started_at: null, last_verified_rental_start_source: null, rental_remaining_display: null, rental_remaining_observed_at: null, rental_expiry_provenance: null, membership_sources: [...(row.membership_sources || [])], proof_badges: [...(row.proof_badges || [])], uncertainties: [...(row.uncertainties || [])]};
+}
+function createBuilder(portfolioRecords, input = {}, context = {}) {
   const now = instant(context.now ?? Date.now()); if (now === null) throw new Error('Pricing time must include a timezone');
   const selectedSource = input.pricing_source ?? input.source ?? 'listings', backdrop = input.pricing_backdrop ?? input.backdrop ?? null;
   if (!['listings', 'rentals'].includes(selectedSource)) throw new Error('Unknown pricing source');
   if (backdrop !== null && backdrop !== 'Black') throw new Error('Pricing backdrop must be Black or omitted');
   const window = resolveCloudWindow(input, now), rental = selectedSource === 'rentals';
   const traitNow = rental ? now : instant(window.window_to), cutoff = rental ? now - DAY : instant(window.window_from);
-  const data = readDataset(records, now, traitNow), traits = new Map();
+  let dataset = createDataset(portfolioRecords, now, traitNow, rental);
+  return {
+    add(records) {if (!dataset) throw new Error('The dashboard projection is already finished'); dataset.add(records);},
+    finish() {
+      if (!dataset) throw new Error('The dashboard projection is already finished');
+      const data = dataset.data; dataset = null;
+      return projectDashboard(data, {now, selectedSource, backdrop, window, rental, traitNow, cutoff, context});
+    },
+  };
+}
+function projectDashboard(data, {now, selectedSource, backdrop, window, rental, traitNow, cutoff, context}) {
+  const traits = new Map();
   for (const [nft, evidence] of data.evidence) traits.set(nft, traitsFor(evidence, cutoff, traitNow));
   const gifts = [...data.gifts.values()].map(giftDefaults);
   const rejected = {}; let peers;
@@ -372,10 +696,12 @@ function projectDashboard(records, input = {}, context = {}) {
     const pricing = {...cohortCache.get(cacheKey), recommended_price_per_day: null, basis: null, confidence: 'none', reason: rental ? 'Rental records from at least 3 distinct peer NFTs are required.' : 'At least 3 distinct fresh peer NFTs are required.', warnings: [...trait.warnings, ...(rental ? warnings : [])], ...metadata};
     if (!gift.is_portfolio) pricing.reason = 'Portfolio membership is unresolved; comparisons are shown without a recommendation.';
     else if (!collection) pricing.reason = conflict ? 'Collection evidence conflicts.' : 'Collection identity is unknown.';
-    else if (backdrop && (!trait.backdrop_fresh || traitKey(trait.backdrop) !== 'black')) pricing.reason = 'This gift has no current evidence for the selected exact Black backdrop.';
+    else if (backdrop && traitKey(trait.backdrop) !== 'black') pricing.reason = 'This gift has no valid saved evidence for the selected exact Black backdrop.';
     else {
       const expected = model && traitKey(trait.backdrop) === 'black' ? 'model_black' : model ? 'model' : 'collection', choices = [];
-      if (trait.model_fresh) {if (trait.backdrop_fresh && traitKey(trait.backdrop) === 'black') choices.push('model_black'); if (!backdrop) choices.push('model');}
+      // Identity traits remain usable as they age. Price/event windows still
+      // apply independently; traitsFor rejects unknown or conflicting values.
+      if (model) {if (traitKey(trait.backdrop) === 'black') choices.push('model_black'); if (!backdrop) choices.push('model');}
       choices.push('collection');
       for (const basis of choices) if (pricing[basis][rental ? 'distinct_nft_count' : 'sample_count'] >= 3) {
         const fallback = basis !== expected;
@@ -383,7 +709,7 @@ function projectDashboard(records, input = {}, context = {}) {
         if (rental) pricing.reason = `Mean observed daily rental rate for the ${basis.replace(/_/g, ' + ')} comparison.${fallback ? ' Using a broader group because more specific evidence is insufficient.' : ''}`;
         else pricing.reason = {model_black: 'Mean asking price for the same model and exact Black backdrop.', model: 'Mean asking price for the same model.', collection: 'Collection mean; a more specific eligible group has insufficient evidence.'}[basis];
         if (fallback) {
-          if (!rental) pricing.reason = `The ${expected === 'model_black' ? 'same-model and exact Black' : 'same-model'} comparison is stale or has fewer than 3 eligible peers; using the ${basis === 'model' ? 'same-model' : 'collection'} mean.`;
+          if (!rental) pricing.reason = `The ${expected === 'model_black' ? 'same-model and exact Black' : 'same-model'} comparison has fewer than 3 eligible peers; using the ${basis === 'model' ? 'same-model' : 'collection'} mean.`;
           pricing.warnings.push("Broader averages may not capture this model or backdrop's price premium.");
         }
         if (backdrop && basis === 'collection') pricing.reason = `The same-model + Black group has fewer than 3 ${rental ? 'distinct' : 'eligible'} gifts or insufficient model evidence; using the collection + Black mean.`;
@@ -394,8 +720,21 @@ function projectDashboard(records, input = {}, context = {}) {
     gift.pricing = pricing;
     refreshAsking(gift, data.listings.get(nft), now);
     refreshOwnedAsking(gift, data.ownedPrices.get(nft), data.settings.wallet ?? data.settings.wallet_address);
+    retainVerifiedRentalStart(gift, data.ownedStatuses.get(nft), data.settings.wallet ?? data.settings.wallet_address, now);
+    const verifiedStatus=refreshOwnedStatus(gift, data.ownedStatuses.get(nft), data.settings.wallet ?? data.settings.wallet_address, now, data.personalGifts.get(nft));
+    refreshPersonalGift(gift, data.personalGifts.get(nft), data.settings.wallet ?? data.settings.wallet_address, now, verifiedStatus);
   }
   rentalCounts(data, gifts, now);
+  const historyByGift = new Map(), trackedNFTs = new Set(gifts.filter(gift => gift.is_portfolio).map(gift => addressKey(gift.nft_address)));
+  for (const row of data.history) {
+    if (!trackedNFTs.has(row.nft)) continue;
+    if (!historyByGift.has(row.nft)) historyByGift.set(row.nft, []);
+    historyByGift.get(row.nft).push(row);
+  }
+  for (const gift of gifts) {
+    const nft = addressKey(gift.nft_address);
+    gift.price_tracking = buildGiftPriceTracking({gift, wallet: data.settings.wallet ?? data.settings.wallet_address, listings: data.listingHistory.get(nft), ownedPrices: data.ownedPrices.get(nft), personalGifts:data.personalGifts.get(nft), history: historyByGift.get(nft), now});
+  }
   gifts.sort((a, b) => Number(!a.is_portfolio) - Number(!b.is_portfolio) || (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase()) || a.id.localeCompare(b.id));
   const portfolio = gifts.filter(g => g.is_portfolio), by = test => portfolio.filter(test).length;
   const summary = {portfolio_count: portfolio.length, automatic_count: by(g => g.automatic_membership), review_count: by(g => g.membership_sources.includes('local_review') && !g.automatic_membership), for_rent_count: by(g => g.ui_state === 'for_rent'), idle_count: by(g => g.state === 'idle_rental_contract'), rented_count: by(g => g.state === 'rented'), direct_count: by(g => g.state === 'held_directly'), sale_count: by(g => g.state === 'listed_for_sale'), unresolved_count: gifts.length - portfolio.length, uncertain_count: by(g => ['unknown', 'uncertain', 'expired_pending_return'].includes(g.state))};
@@ -403,11 +742,19 @@ function projectDashboard(records, input = {}, context = {}) {
   const activity = data.history.filter(h => h.item && portfolioKeys.has(h.nft) && instant(h.observed_at) !== null && instant(h.observed_at) <= now).map((h, index) => ({id: `history-${h.key ?? index}`, type: 'portfolio_gift_history', title: 'Portfolio gift history', nft_address: h.nft, name: data.gifts.get(h.nft)?.name, observed_at: h.observed_at, source: 'Marketapp', price: h.item.price, currency: h.item.currency, note: 'Gift history does not establish proceeds received by this wallet'})).sort((a, b) => instant(b.observed_at) - instant(a.observed_at)).slice(0, 100);
   const pricing = {...metadata, generated_at: iso(now), min_samples: 3, fresh_peer_count: new Set(peers.map(p => p.nft)).size, excluded_counts: rejected, recommended_count: recommended, coverage: 'observed_sample', methodology: rental ? 'Arithmetic mean of observed rental daily rates, one weight per unambiguous rental record; minimum three distinct peer NFTs for a recommendation.' : 'Latest fresh base daily asking price per distinct NFT; arithmetic means rounded to one nanoGRAM (half up). Collection averages require unfiltered occurrences; model averages exclude backdrop and symbol filters; Black averages exclude symbol filters. Exact Black only. Eligible portfolio and wallet-owned listings, including the gift being compared, are included on the same terms as other listings.', warnings};
   if (rental) pricing.rental_record_count = peers.length; else pricing.max_age_hours = String((traitNow - cutoff) / 3600000);
-  return {wallet: data.settings.wallet ?? data.settings.wallet_address ?? null, generated_at: iso(now), summary, gifts, pricing, activity, runs: context.runs || {discovery: [], market: []}, coverage: {note: 'Portfolio ownership is imported, dated evidence. Cloud price collection does not refresh TON ownership. Each market observation has its own timestamp; saved coverage is a bounded sample.', enumeration_complete: false, pending_verification_count: gifts.filter(g => !g.is_portfolio).length, imported_gift_count: gifts.length, ...(context.coverage || {})}, review: {enabled: true, files: [], warnings: [], note: 'Imported local review annotations remain separate from automatic portfolio membership.'}, capabilities: context.capabilities || {network_enabled: false, marketapp_configured: false, ton_configured: false, wallet_configured: Boolean(data.settings.wallet), csrf_token: ''}};
+  return {wallet: data.settings.wallet ?? data.settings.wallet_address ?? null, generated_at: iso(now), summary, gifts, pricing, activity, runs: context.runs || {discovery: [], market: []}, coverage: {note: 'Portfolio membership is imported, dated evidence. Targeted TON checks refresh prices and rental status for known gifts; they do not discover gifts or establish Marketapp listing visibility. Each market observation has its own timestamp; saved coverage is a bounded sample.', enumeration_complete: false, pending_verification_count: gifts.filter(g => !g.is_portfolio).length, imported_gift_count: gifts.length, ...(context.coverage || {})}, review: {enabled: true, files: [], warnings: [], note: 'Imported local review annotations remain separate from automatic portfolio membership.'}, capabilities: context.capabilities || {network_enabled: false, marketapp_configured: false, ton_configured: false, wallet_configured: Boolean(data.settings.wallet), csrf_token: ''}};
 }
-return projectDashboard;
+return createBuilder;
 }
 
+// Seed membership before consuming pages: a portfolio row may follow its older
+// listing/history observations. Each source page can then be released without
+// dropping displayed gifts' asking prices or price-change timelines.
+export function createCloudDashboardBuilder(portfolioRecords, input = {}, context = {}) {
+  return createProjection()(portfolioRecords, input, context);
+}
 export function buildCloudDashboard(records, input = {}, context = {}) {
-  return createProjection()(records, input, context);
+  const builder = createCloudDashboardBuilder(records, input, context);
+  builder.add(records);
+  return builder.finish();
 }

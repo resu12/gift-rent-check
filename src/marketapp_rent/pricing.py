@@ -14,6 +14,7 @@ import json
 from .addresses import address_key
 from .discovery_models import item_collection, parse_ton
 from .models import Listing, _reject_constant, _unique_object
+from .monetary import bounded_decimal
 
 
 _NANO = Decimal("0.000000001")
@@ -40,7 +41,7 @@ def _trait_key(value):
 
 
 def _load(value):
-    return json.loads(value, parse_float=Decimal, parse_constant=_reject_constant, object_pairs_hook=_unique_object)
+    return json.loads(value, parse_float=bounded_decimal, parse_constant=_reject_constant, object_pairs_hook=_unique_object)
 
 
 def _remember_traits(evidence, nft, attributes, source, observed_at):
@@ -159,8 +160,9 @@ def _stats(peers):
 def _enrich_listings(store, gifts, wallet=None, *, now=None, max_age_hours=24, min_samples=3, as_of=False, return_context=False, backdrop=None):
     """Mutate gift comparison fields and return a JSON-safe sample summary.
 
-    Known old subject traits remain visible, with their age warning, so a later
-    collection can target them. They do not qualify a model recommendation.
+    Latest valid saved traits describe the NFT even when older than the price
+    window. Their observation dates and age warnings remain visible; only
+    listing prices and source eligibility expire with that window.
     A new listing observation supersedes an earlier price; duplicates never
     inflate the distinct-NFT sample size.
     """
@@ -297,7 +299,7 @@ def _enrich_listings(store, gifts, wallet=None, *, now=None, max_age_hours=24, m
         if metadata["invalid"]:
             rejected["invalid_or_conflicting_traits"] += 1
             continue
-        if backdrop and (not metadata["backdrop_fresh"] or _trait_key(metadata["backdrop"]) != "black"):
+        if backdrop and _trait_key(metadata["backdrop"]) != "black":
             rejected["outside_backdrop_scope"] += 1
             continue
         eligible = _eligible_sources(dated, metadata, cutoff, instant)
@@ -307,8 +309,8 @@ def _enrich_listings(store, gifts, wallet=None, *, now=None, max_age_hours=24, m
         peers.append({"nft": nft, "collection": next(iter(collections[nft])),
                       "price": listing["price"], "when": latest,
                       "eligible": eligible,
-                      "model": _trait_key(metadata["model"]) if metadata["model_fresh"] else None,
-                      "backdrop": _trait_key(metadata["backdrop"]) if metadata["backdrop_fresh"] else None})
+                      "model": _trait_key(metadata["model"]),
+                      "backdrop": _trait_key(metadata["backdrop"])})
 
     recommended = 0
     for gift in gifts:
@@ -333,14 +335,14 @@ def _enrich_listings(store, gifts, wallet=None, *, now=None, max_age_hours=24, m
             pricing["reason"] = "Portfolio membership is unresolved; comparisons are shown without a recommendation."
         elif collection is None:
             pricing["reason"] = "Collection evidence conflicts." if conflict else "Collection identity is unknown."
-        elif backdrop and (not metadata["backdrop_fresh"] or _trait_key(metadata["backdrop"]) != "black"):
-            pricing["reason"] = "This gift has no current evidence for the selected exact Black backdrop."
+        elif backdrop and _trait_key(metadata["backdrop"]) != "black":
+            pricing["reason"] = "This gift has no valid saved evidence for the selected exact Black backdrop."
         else:
             choices = []
             expected_basis = ("model_black" if model_key and _trait_key(metadata["backdrop"]) == "black"
                               else "model" if model_key else "collection")
-            if metadata["model_fresh"]:
-                if metadata["backdrop_fresh"] and _trait_key(metadata["backdrop"]) == "black":
+            if model_key is not None:
+                if _trait_key(metadata["backdrop"]) == "black":
                     choices.append("model_black")
                 if not backdrop:
                     choices.append("model")
@@ -356,7 +358,7 @@ def _enrich_listings(store, gifts, wallet=None, *, now=None, max_age_hours=24, m
                                            "collection": "Collection mean; a more specific eligible group has insufficient evidence."}[basis])
                     if fallback:
                         label = "same-model and exact Black" if expected_basis == "model_black" else "same-model"
-                        pricing["reason"] = (f"The {label} comparison is stale or has fewer than {min_samples} eligible peers; "
+                        pricing["reason"] = (f"The {label} comparison has fewer than {min_samples} eligible peers; "
                                              f"using the {'same-model' if basis == 'model' else 'collection'} mean.")
                         pricing["warnings"].append("Broader averages may not capture this model or backdrop's price premium.")
                     if backdrop and basis == "collection":

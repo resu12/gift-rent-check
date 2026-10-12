@@ -1,4 +1,4 @@
-import type { MarketappAnalyticsPeriod, MarketappAnalyticsRefreshAdapter, MarketappAnalyticsRefreshChallenge, MarketappAnalyticsRefreshResult, MarketappAnalyticsRefreshStatus, MarketappLoginAccount, MarketappLoginProof, MarketappWalletDevice, PersonalRentalAnalytics } from '../data/types.ts';
+import type { MarketappAnalyticsPeriod, MarketappAnalyticsRefreshAdapter, MarketappAnalyticsRefreshChallenge, MarketappAnalyticsRefreshResult, MarketappAnalyticsRefreshStatus, MarketappAnalyticsRememberedSession, MarketappLoginAccount, MarketappLoginProof, MarketappWalletDevice, PersonalRentalAnalytics } from '../data/types.ts';
 import { isSafeMarketappChallenge, MarketappWalletFailure, safeWalletLaunchUrl } from './marketappLoginFlow.ts';
 import type { MarketappLoginFailureReason, MarketappLoginWallet, MarketappLoginWalletOption, MarketappWalletFactory } from './marketappLoginFlow.ts';
 import { canonicalMainnetAddress } from './walletIdentity.ts';
@@ -6,7 +6,7 @@ import { cloudRefreshRetryMetadata } from './cloudTransport.ts';
 import type { CloudRetryMetadata } from './cloudTransport.ts';
 
 const failures = {
-  rate_limited: { code: 'MA-LIMIT', message: 'Wait at least one minute between wallet requests; at most five are allowed per hour.' },
+  rate_limited: { code: 'MA-LIMIT', message: 'Wait at least one minute between refreshes; at most five are allowed per hour.' },
   expired: { code: 'MA-EXPIRED', message: 'This wallet approval expired or was already used. Start a new refresh.' },
   access_denied: { code: 'MA-ACCESS', message: 'Open this private Mini App with the approved Telegram account.' },
   wallet_required: { code: 'MA-ADDRESS', message: 'Save a valid TON mainnet wallet address before refreshing analytics.' },
@@ -29,6 +29,9 @@ const failures = {
   reload_failed: { code: 'MA-RELOAD', message: 'Analytics were saved, but the dashboard could not reload them. Check saved status.' },
   result_unconfirmed: { code: 'MA-STATUS', message: 'The last refresh result is not available yet. Check saved status before trying again.' },
   status_unavailable: { code: 'MA-STATUS', message: 'The last refresh status could not be checked. Try Check status again.' },
+  reconnect_required: { code: 'MA-RECONNECT', message: 'Marketapp login expired. Refresh again to approve a new wallet login.' },
+  disconnect_failed: { code: 'MA-DISCONNECT', message: 'Marketapp login could not be disconnected. Try Disconnect again.' },
+  storage_capacity: { code: 'MA-STORAGE', message: 'Updates are paused to protect saved data. Clean up storage from Status, then try again.' },
 } as const;
 export type MarketappAnalyticsRefreshFailure = keyof typeof failures;
 export function marketappAnalyticsRefreshFailure(reason?: MarketappAnalyticsRefreshFailure) {
@@ -39,6 +42,8 @@ const refreshFailureCodes: Record<string, MarketappAnalyticsRefreshFailure> = {
     MARKETAPP_REFRESH_INVALID_INPUT: 'invalid_input', MARKETAPP_REFRESH_PRIVATE_ACCESS_DENIED: 'access_denied',
     MARKETAPP_REFRESH_WALLET_REQUIRED: 'wallet_required', MARKETAPP_REFRESH_AUTH_REJECTED: 'auth_rejected',
     MARKETAPP_REFRESH_PAGE_CHANGED: 'page_changed', MARKETAPP_REFRESH_FAILED: 'update_failed',
+    MARKETAPP_REFRESH_RECONNECT_REQUIRED: 'reconnect_required',
+    STORAGE_CAPACITY_PAUSED: 'storage_capacity', STORAGE_FULL: 'storage_capacity',
 };
 function transportFailure(error: unknown, stage: 'start' | 'update'): MarketappAnalyticsRefreshFailure {
   const code = error && typeof error === 'object' && 'code' in error ? error.code : null;
@@ -54,13 +59,21 @@ function walletFailure(reason?: MarketappLoginFailureReason): MarketappAnalytics
   return 'wallet_error';
 }
 export interface MarketappAnalyticsRefreshView {
-  phase: 'idle' | 'ready' | 'reconciling' | 'confirming' | 'interrupted' | 'preparing' | 'choosing' | 'awaiting_approval' | 'updating' | 'saved' | 'failed' | 'cancelled' | 'expired';
+  phase: 'idle' | 'ready' | 'reconciling' | 'confirming' | 'interrupted' | 'preparing' | 'choosing' | 'awaiting_approval' | 'updating' | 'saved' | 'failed' | 'cancelled' | 'expired' | 'disconnecting';
   periodDays?: MarketappAnalyticsPeriod;
   options?: MarketappLoginWalletOption[];
   launchUrl?: string | null;
   failure?: MarketappAnalyticsRefreshFailure;
   rateLimit?: { deadline: number; remainingSeconds: number; reason: 'cooldown' | 'hourly' };
   statusChecking?: boolean;
+  session?: MarketappAnalyticsRememberedSession;
+  sessionReady?: boolean;
+  /** Derived only from a fully validated refresh result, never a status marker. */
+  capturedAt?: string;
+  fingerprint?: string;
+  loadingSaved?: boolean;
+  /** Outcome time distinguishes a recovered older attempt from newer saved figures. */
+  outcomeAt?: string;
 }
 export function marketappRefreshRetryText(seconds: number): string {
   const remaining = Math.max(0, Math.ceil(seconds));
@@ -73,7 +86,12 @@ const date = (value: unknown): value is string => typeof value === 'string' && /
 const isoTime = (value: unknown): value is string => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{3})?Z$/.test(value) && Number.isFinite(Date.parse(value)) && date(value.slice(0, 10));
 
 export function isSafeMarketappRefreshStatus(value: unknown): value is MarketappAnalyticsRefreshStatus {
-  if (!object(value) || Object.keys(value).join(',') !== 'attempt') return false;
+  if (!object(value) || !Object.hasOwn(value, 'attempt') || Object.keys(value).some(key => !['attempt', 'session'].includes(key))) return false;
+  if (Object.hasOwn(value, 'session')) {
+    const session = value.session;
+    if (!object(session) || Object.keys(session).sort().join(',') !== 'expires_at,remembered' || typeof session.remembered !== 'boolean' ||
+        (session.remembered ? !isoTime(session.expires_at) : session.expires_at !== null)) return false;
+  }
   if (value.attempt === null) return true;
   const attempt = value.attempt;
   if (!object(attempt) || Object.keys(attempt).some(key => !['attempt_id', 'state', 'period_days', 'updated_at', 'error_code'].includes(key)) ||
@@ -90,7 +108,7 @@ export function isSafeMarketappRefreshChallenge(value: unknown, wallet: string |
 }
 
 /** Check identity and normalized data before reporting a completed refresh. */
-export function isSafeMarketappRefreshResult(value: unknown, challenge: MarketappAnalyticsRefreshChallenge, now = Date.now()): value is MarketappAnalyticsRefreshResult {
+export function isSafeMarketappRefreshResult(value: unknown, challenge: Pick<MarketappAnalyticsRefreshChallenge, 'attempt_id' | 'wallet' | 'period_days' | 'expires_at'>, now = Date.now()): value is MarketappAnalyticsRefreshResult {
   if (!object(value) || Object.keys(value).sort().join(',') !== 'analytics_refreshed,attempt_id,authenticated,snapshot' ||
       value.attempt_id !== challenge.attempt_id || value.authenticated !== true || value.analytics_refreshed !== true || !object(value.snapshot)) return false;
   const snapshot = value.snapshot;
@@ -135,6 +153,7 @@ function hasAccountData(account: MarketappLoginAccount, device?: MarketappWallet
 }
 interface Attempt {
   active: boolean; approvalPending: boolean; periodDays: MarketappAnalyticsPeriod; abort: AbortController;
+  rememberLogin?: boolean;
   challenge: MarketappAnalyticsRefreshChallenge | null; wallet: MarketappLoginWallet | null; timer?: ReturnType<typeof setTimeout>;
 }
 export function createMarketappAnalyticsRefreshController(transport: MarketappAnalyticsRefreshAdapter, walletFactory: MarketappWalletFactory,
@@ -147,8 +166,17 @@ export function createMarketappAnalyticsRefreshController(transport: MarketappAn
   let generation = 0, statusGeneration = 0, statusAbort: AbortController | null = null;
   let statusDeadline: ReturnType<typeof setTimeout> | undefined, statusPoll: ReturnType<typeof setTimeout> | undefined;
   let recoveryStarted: number | null = null, recoveryPolls = 0, serverPending = false, recoveredSavedId: string | null = null;
+  let confirmedSavedId: string | null = null, confirmedEvidence: { capturedAt: string; fingerprint: string } | null = null;
+  let session: MarketappAnalyticsRememberedSession | undefined;
+  let sessionStatusReady = !transport.refreshSaved || !transport.getStatus;
+  let disconnectAbort: AbortController | null = null, disconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let view: MarketappAnalyticsRefreshView = { phase: 'idle' };
-  const emit = (next: MarketappAnalyticsRefreshView) => { view = next; if (!disposed) update(next); };
+  const emit = (next: MarketappAnalyticsRefreshView) => {
+    const clean = { ...next }; delete clean.session; delete clean.sessionReady;
+    view = { ...clean, ...(clean.phase === 'failed' && !clean.outcomeAt ? { outcomeAt: new Date(clock.now()).toISOString() } : {}),
+      ...(session ? { session: { ...session } } : {}), ...(transport.refreshSaved ? { sessionReady: sessionStatusReady } : {}) };
+    if (!disposed) update(view);
+  };
   const clearStatus = () => {
     statusGeneration++; statusAbort?.abort(); statusAbort = null;
     if (statusDeadline !== undefined) clock.clear(statusDeadline);
@@ -187,16 +215,23 @@ export function createMarketappAnalyticsRefreshController(transport: MarketappAn
   const end = (attempt: Attempt, phase: 'failed' | 'cancelled' | 'expired', failure: MarketappAnalyticsRefreshFailure = 'wallet_error', retry?: CloudRetryMetadata | null) => {
     if (!isCurrent(attempt)) return; close(attempt, true);
     serverPending = false;
+    if (failure === 'reconnect_required' && session) session = { remembered: false, expires_at: null };
     if (phase === 'failed' && failure === 'rate_limited' && retry) { showLimit(attempt.periodDays, retry); return; }
     emit(phase === 'failed' ? { phase, periodDays: attempt.periodDays, failure } : { phase, periodDays: attempt.periodDays });
   };
-  const reloadSaved = async (periodDays: MarketappAnalyticsPeriod, id: string, reload: () => Promise<void>) => {
-    const token = generation; emit({ phase: 'saved', periodDays });
-    try { await reload(); if (!disposed && generation === token) recoveredSavedId = id; }
-    catch { if (!disposed && generation === token) emit({ phase: 'saved', periodDays, failure: 'reload_failed' }); }
+  const reloadSaved = async (periodDays: MarketappAnalyticsPeriod, id: string, reload: () => Promise<void>, report?: PersonalRentalAnalytics, outcomeAt?: string) => {
+    const token = generation;
+    if (report) { confirmedSavedId = id; confirmedEvidence = { capturedAt: report.captured_at, fingerprint: report.fingerprint }; }
+    const evidence = { ...(id === confirmedSavedId && confirmedEvidence ? confirmedEvidence : {}),
+      outcomeAt: report ? new Date(clock.now()).toISOString() : outcomeAt ?? new Date(clock.now()).toISOString() };
+    emit({ phase: 'saved', periodDays, ...evidence, loadingSaved: true });
+    try {
+      await reload();
+      if (!disposed && generation === token) { recoveredSavedId = id; emit({ phase: 'saved', periodDays, ...evidence }); }
+    } catch { if (!disposed && generation === token) emit({ phase: 'saved', periodDays, ...evidence, failure: 'reload_failed' }); }
   };
   async function reconcile(): Promise<boolean> {
-    if (disposed || !transport.getStatus || statusAbort || (limitDeadline !== null && limitDeadline > clock.now())) return false;
+    if (disposed || !transport.getStatus || statusAbort || disconnectAbort || (limitDeadline !== null && limitDeadline > clock.now())) return false;
     if (statusPoll !== undefined) clock.clear(statusPoll); statusPoll = undefined;
     const abort = new AbortController(), token = ++statusGeneration, ownerGeneration = generation, owner = current;
     statusAbort = abort;
@@ -213,6 +248,8 @@ export function createMarketappAnalyticsRefreshController(transport: MarketappAn
       const result = await transport.getStatus(abort.signal);
       if (!activeRead()) return false;
       if (!isSafeMarketappRefreshStatus(result)) { statusError(); return false; }
+      sessionStatusReady = true;
+      session = result.session ? { ...result.session } : undefined;
       const attempt = result.attempt;
       if (!attempt) {
         serverPending = false;
@@ -234,9 +271,13 @@ export function createMarketappAnalyticsRefreshController(transport: MarketappAn
         serverPending = false; recoveryStarted = null; recoveryPolls = 0;
         if (owner) close(owner, false);
         if (attempt.state === 'saved') {
-          if (recoveredSavedId === attempt.attempt_id) emit({ phase: 'saved', periodDays: attempt.period_days });
-          else await reloadSaved(attempt.period_days, attempt.attempt_id, onRecoveredSaved ?? (() => Promise.resolve()));
-        } else if (attempt.state === 'failed') emit({ phase: 'failed', periodDays: attempt.period_days, failure: refreshFailureCodes[attempt.error_code!] });
+          if (recoveredSavedId === attempt.attempt_id) {
+            const evidence = view.phase === 'saved' && view.periodDays === attempt.period_days
+              ? { ...(view.capturedAt ? { capturedAt: view.capturedAt } : {}), ...(view.fingerprint ? { fingerprint: view.fingerprint } : {}) } : {};
+            emit({ phase: 'saved', periodDays: attempt.period_days, ...evidence, outcomeAt: attempt.updated_at });
+          }
+          else await reloadSaved(attempt.period_days, attempt.attempt_id, onRecoveredSaved ?? (() => Promise.resolve()), undefined, attempt.updated_at);
+        } else if (attempt.state === 'failed') emit({ phase: 'failed', periodDays: attempt.period_days, failure: refreshFailureCodes[attempt.error_code!], outcomeAt: attempt.updated_at });
         else emit({ phase: attempt.state, periodDays: attempt.period_days });
       }
       return true;
@@ -262,21 +303,42 @@ export function createMarketappAnalyticsRefreshController(transport: MarketappAn
       if (!isSafeMarketappRefreshResult(result, challenge, clock.now())) { end(attempt, 'failed', 'invalid_response'); return; }
       // The login session and proof are released before the dashboard is reloaded.
       const periodDays = attempt.periodDays; clearStatus(); serverPending = false; recoveryStarted = null; recoveryPolls = 0; close(attempt, false);
-      await reloadSaved(periodDays, result.attempt_id, () => onSaved(result.snapshot));
+      await reloadSaved(periodDays, result.attempt_id, () => onSaved(result.snapshot), result.snapshot);
+      if (attempt.rememberLogin && transport.getStatus && !disposed) await reconcile();
     } catch (error) { end(attempt, 'failed', transportFailure(error, 'update'), cloudRefreshRetryMetadata(error)); }
   }
   return {
     get view() { return view; },
     reconcile,
-    async start(periodDays: MarketappAnalyticsPeriod): Promise<boolean> {
-      if (disposed || current || serverPending || ![30, 365].includes(periodDays)) return false;
+    async start(periodDays: MarketappAnalyticsPeriod, rememberLogin = false): Promise<boolean> {
+      if (disposed || current || serverPending || disconnectAbort || view.loadingSaved || !sessionStatusReady || ![30, 365].includes(periodDays)) return false;
       if (limitDeadline !== null && limitDeadline > clock.now()) return false;
       clearLimit(); clearStatus(); generation++; recoveryStarted = null; recoveryPolls = 0;
+      if (session?.remembered && session.expires_at && Date.parse(session.expires_at) <= clock.now()) session = { remembered: false, expires_at: null };
+      if (session?.remembered && transport.refreshSaved) {
+        const began = clock.now();
+        const attempt: Attempt = { active: true, approvalPending: true, periodDays, abort: new AbortController(), challenge: null, wallet: null };
+        current = attempt; emit({ phase: 'updating', periodDays });
+        try {
+          attempt.timer = clock.timer(() => end(attempt, 'failed', 'updating_timeout'), 120000);
+          const result = await transport.refreshSaved(periodDays, attempt.abort.signal);
+          if (!isCurrent(attempt)) return false;
+          const scope = { attempt_id: result?.attempt_id, wallet: savedWallet ?? '', period_days: periodDays, expires_at: new Date(began + 270000).toISOString() };
+          if (typeof scope.attempt_id !== 'string' || !/^[a-f0-9]{64}$/.test(scope.attempt_id) || !isSafeMarketappRefreshResult(result, scope, clock.now())) {
+            end(attempt, 'failed', 'invalid_response'); return false;
+          }
+          clearStatus(); serverPending = false; close(attempt, false);
+          await reloadSaved(periodDays, result.attempt_id, () => onSaved(result.snapshot), result.snapshot);
+          if (transport.getStatus && !disposed) await reconcile();
+          return true;
+        } catch (error) { end(attempt, 'failed', transportFailure(error, 'update'), cloudRefreshRetryMetadata(error)); return false; }
+      }
       const attempt: Attempt = { active: true, approvalPending: false, periodDays, abort: new AbortController(), challenge: null, wallet: null };
+      attempt.rememberLogin = rememberLogin && Boolean(session && transport.refreshSaved && transport.disconnectSession);
       current = attempt; emit({ phase: 'preparing', periodDays }); let stage: 'start' | 'chooser' = 'start';
       try {
         attempt.timer = clock.timer(() => end(attempt, 'failed', 'preparing_timeout'), 45000);
-        const challenge = await transport.start(periodDays, attempt.abort.signal);
+        const challenge = await transport.start(periodDays, attempt.abort.signal, attempt.rememberLogin);
         if (!isCurrent(attempt)) { if (challenge && /^[a-f0-9]{64}$/.test(challenge.attempt_id)) void cancelRemote(challenge.attempt_id); return false; }
         attempt.challenge = challenge;
         if (!isSafeMarketappRefreshChallenge(challenge, savedWallet, periodDays, clock.now())) { end(attempt, 'failed', 'invalid_challenge'); return false; }
@@ -302,6 +364,33 @@ export function createMarketappAnalyticsRefreshController(transport: MarketappAn
       } catch (error) { end(attempt, 'failed', error instanceof MarketappWalletFailure ? walletFailure(error.reason) : 'wallet_error'); return null; }
     },
     cancel() { if (current) end(current, 'cancelled'); },
-    dispose() { disposed = true; generation++; clearStatus(); clearLimit(); if (current) close(current, true); },
+    async disconnect(): Promise<boolean> {
+      if (disposed || current || serverPending || disconnectAbort || view.loadingSaved || !session?.remembered || !transport.disconnectSession) return false;
+      clearStatus(); generation++; const token = generation, abort = new AbortController(); disconnectAbort = abort;
+      emit({ phase: 'disconnecting' });
+      const active = () => !disposed && generation === token && disconnectAbort === abort;
+      try {
+        disconnectTimer = clock.timer(() => {
+          if (!active()) return;
+          disconnectAbort = null; abort.abort(); emit({ phase: 'failed', failure: 'disconnect_failed' });
+        }, 15000);
+        const result = await transport.disconnectSession(abort.signal);
+        if (!active()) return false;
+        if (!object(result) || Object.keys(result).join(',') !== 'disconnected' || result.disconnected !== true) throw new Error('Invalid disconnect result');
+        session = { remembered: false, expires_at: null }; emit({ phase: 'ready' }); return true;
+      } catch {
+        if (active()) emit({ phase: 'failed', failure: 'disconnect_failed' });
+        return false;
+      } finally {
+        if (disconnectAbort === abort) disconnectAbort = null;
+        if (generation === token && disconnectTimer !== undefined) clock.clear(disconnectTimer);
+        if (generation === token) disconnectTimer = undefined;
+      }
+    },
+    dispose() {
+      disposed = true; generation++; clearStatus(); clearLimit(); if (current) close(current, true);
+      disconnectAbort?.abort(); disconnectAbort = null;
+      if (disconnectTimer !== undefined) clock.clear(disconnectTimer); disconnectTimer = undefined;
+    },
   };
 }

@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {buildCloudDashboard, resolveCloudWindow, validateSavedCloudWindow, canonicalAddress, addressKey} from '../tgcloud/lib/cloud-pricing.js';
-import {decimal, decimalText, multiply, plus} from '../tgcloud/lib/cloud-pricing-core.js';
+import {buildCloudDashboard, createCloudDashboardBuilder, resolveCloudWindow, validateSavedCloudWindow, canonicalAddress, addressKey} from '../tgcloud/lib/cloud-pricing.js';
+import {decimal, decimalText, multiply, plus, rational, sumRationals} from '../tgcloud/lib/cloud-pricing-core.js';
 
 const NOW = Date.parse('2026-10-09T12:00:00Z'), RECENT = '2026-10-09T11:00:00Z';
 const address = n => `0:${n.toString(16).padStart(64, '0')}`;
@@ -51,6 +51,142 @@ test('exact decimal arithmetic handles huge values, fractions and half-up nano r
   assert.equal(decimalText(decimal('-0.0000000005')), '-0.000000001');
   assert.equal(decimalText(decimal('1e-9')), '0.000000001');
   assert.throws(() => decimal('NaN')); assert.throws(() => decimal('1e90000'));
+});
+
+test('balanced rational sums preserve exact values and half-up rounding across varied durations', () => {
+  const examples = [[], [decimal('0.0000000005')],
+    [decimal('9007199254740993123456789.000000001'), decimal('-9007199254740993123456789'), rational(1n, 7n)],
+    Array.from({length: 157}, (_, i) => rational(BigInt(i % 3 ? i + 1 : -i), BigInt(86401 + i * 7))),
+    [rational(1n, 3n), rational(1n, 6n), decimal('0.0000000005'), decimal('-0.5')],
+    [decimal('1e-1000'), decimal('1e1000'), decimal('-1e1000')],
+  ];
+  for (const values of examples) {
+    const expected = values.reduce(plus, rational(0n)), actual = sumRationals(values);
+    assert.deepEqual(actual, expected);
+    assert.equal(decimalText(actual), decimalText(expected));
+    if (values.length) assert.equal(decimalText(multiply(actual, 1n, BigInt(values.length))), decimalText(multiply(expected, 1n, BigInt(values.length))));
+  }
+  assert.equal(decimalText(sumRationals(examples[4])), '0.000000001');
+});
+
+test('thousands of distinct rental durations retain exact collection, model and Black statistics', () => {
+  // The sequential sum previously repeatedly reduced a denominator with over
+  // 6,000 digits and exhausted the hosted CPU limit on this sized sample.
+  const samples = 5900, amount = decimal('0.123456789'), rows = [];
+  const rate = index => multiply(amount, 86400n, BigInt(86401 + index * 7));
+  for (let index = 0; index < samples; index++) {
+    const nft = index + 10;
+    rows.push(historical(event(nft, {price: '0.123456789', price_nano: '123456789', duration: 86401 + index * 7})), traits(nft));
+  }
+  const result = dashboard(rows, {source: 'rentals'}), pricing = result.gifts.find(g => g.id === SUBJECT).pricing;
+  const median = decimalText(multiply(plus(rate(2949), rate(2950)), 1n, 2n));
+  for (const key of ['collection', 'model', 'model_black']) {
+    assert.equal(pricing[key].sample_count, samples);
+    assert.equal(pricing[key].distinct_nft_count, samples);
+    assert.equal(pricing[key].mean, '0.100908589');
+    assert.equal(pricing[key].median, median);
+    assert.equal(pricing[key].minimum, decimalText(rate(samples - 1)));
+    assert.equal(pricing[key].maximum, decimalText(rate(0)));
+  }
+  assert.equal(pricing.basis, 'model_black');
+  assert.equal(pricing.recommended_price_per_day, '0.100908589');
+  assert.equal(result.pricing.rental_record_count, samples);
+});
+
+test('compact rental groups preserve aliases, unknown-field variants, replays and malformed rejection counts', () => {
+  const base = event(2, {extra: {z: [1, {b: 2, a: 1}], a: true}});
+  const reordered = {...Object.fromEntries(Object.entries(base).reverse()), extra: {a: true, z: [1, {a: 1, b: 2}]}};
+  const alias = {...base, address: friendly(2), collection_address: friendly(3), src: friendly(900), dst: friendly(901)};
+  const changed = {...base, extra: {z: [1, {b: 3, a: 1}], a: true}};
+  const malformed = {...event(20), duration: 'invalid'};
+  const rows = [base, reordered, alias, changed, changed, malformed, malformed, event(11), event(12), event(13)].map(item => historical(item));
+  const result = dashboard(rows, {source: 'rentals'});
+  assert.equal(result.pricing.rental_record_count, 3);
+  assert.deepEqual(result.pricing.excluded_counts, {ambiguous_history_variants: 2, malformed_history: 1});
+  assert.equal(result.gifts[0].pricing.collection.mean, '0.2');
+  assert.deepEqual(result.gifts[0].rental_history.excluded_counts, {ambiguous_history_variants: 2});
+  assert.equal(result.gifts[0].rental_history.recorded_count, null);
+});
+
+test('rental-only listing pruning retains peer traits, collection conflicts and displayed asking prices', () => {
+  const records = [gift(), gift(4, {is_portfolio: false}), traits(),
+    listed(listing(2, '390000000')), listed(listing(4, '410000000')),
+    ...[10, 11, 12, 13].flatMap(nft => [listed(listing(nft)), historical(event(nft))]),
+    listed(listing(13), {collection: address(999)})];
+  const result = buildCloudDashboard(records, {source: 'rentals', backdrop: 'Black'}, {now: NOW});
+  const owned = result.gifts.find(g => g.id === SUBJECT), candidate = result.gifts.find(g => g.id === address(4));
+  assert.equal(owned.price_per_day, '0.39'); assert.equal(candidate.price_per_day, '0.41');
+  assert.equal(owned.pricing.collection.sample_count, 3); assert.equal(owned.pricing.model.sample_count, 3);
+  assert.equal(owned.pricing.model_black.sample_count, 3); assert.equal(owned.pricing.basis, 'model_black');
+  assert.equal(owned.pricing.recommended_price_per_day, '0.2');
+  assert.deepEqual(result.pricing.excluded_counts, {collection_conflict: 1});
+});
+
+test('streamed projections preserve late membership, settings order and arbitrary page boundaries', () => {
+  const records = [listed(listing(2, '350000000'), {when: '2026-10-08T11:00:00Z'}),
+    ...[2, 10, 11, 12].flatMap(nft => [historical(event(nft)), listed(listing(nft, '390000000'))]),
+    traits(), {kind: 'settings', record: {wallet: address(999)}},
+    gift(4, {is_portfolio: false}), listed(listing(4, '410000000')), gift(),
+    {kind: 'settings', record: {wallet: WALLET}}];
+  const seed = records.filter(row => ['portfolio', 'gift', 'settings'].includes(row.kind));
+  for (const source of ['rentals', 'listings']) for (const size of [1, 2, 7, 50]) {
+    const builder = createCloudDashboardBuilder(seed, {source, backdrop: 'Black'}, {now: NOW});
+    builder.add([]);
+    for (let from = 0; from < records.length; from += size) builder.add(records.slice(from, from + size));
+    const result = builder.finish();
+    assert.deepEqual(result, buildCloudDashboard(records, {source, backdrop: 'Black'}, {now: NOW}));
+    assert.equal(result.wallet, WALLET);
+    assert.equal(result.gifts.find(row => row.id === SUBJECT).price_per_day, '0.39');
+    assert.equal(result.gifts.find(row => row.id === address(4)).price_per_day, '0.41');
+    assert.throws(() => builder.add([]), /already finished/);
+    assert.throws(() => builder.finish(), /already finished/);
+  }
+});
+
+test('bounded trait evidence keeps precise latest ties, future exclusions and invalid newest observations', () => {
+  const latest = '2026-10-09T11:00:00.123002Z';
+  const rows = [traits(2, attributes(), latest, {source: 'Fresh B'}),
+    traits(2, {}, '2026-10-09T10:00:00Z', {source: 'Old malformed'}),
+    traits(2, attributes('Older'), '2026-10-09T11:00:00.123001Z'),
+    traits(2, attributes(), latest, {source: 'Fresh A'}),
+    traits(2, attributes('Future'), '2026-10-09T12:00:01Z'),
+    traits(2, null, RECENT, {trait_evidence: {model: [
+      {value: 'Ruby', error: null, source: 'Imported', when: latest},
+      {value: 'Invalid time', error: null, source: 'Invalid', when: 'not-a-date'},
+    ]}})];
+  for (const source of ['rentals', 'listings']) {
+    const result = subject(rows, {source});
+    assert.equal(result.model, 'Ruby'); assert.equal(result.backdrop, 'Black');
+    assert.equal(result.traits_source, 'Fresh A+Fresh B+Imported');
+    assert.equal(result.traits_observed_at, latest);
+    assert.deepEqual(result.trait_uncertainties, []);
+    const invalid = subject([...rows, traits(2, [...attributes(), {trait_type: 'Model', value: 'Other'}],
+      '2026-10-09T11:00:00.123003Z')], {source});
+    assert.equal(invalid.model, null);
+    assert.ok(invalid.trait_uncertainties.some(value => /conflicting/.test(value)));
+  }
+  const historic = subject([traits(2, attributes('Historic'), '2026-10-08T11:00:00Z'), ...rows],
+    {source: 'listings', timeframe: 'custom', date_from: '2026-10-08', date_to: '2026-10-08'});
+  assert.equal(historic.model, 'Historic');
+});
+
+test('a streamed large rental sample keeps every eligible event without retaining source pages', () => {
+  const samples = 70000, seed = [gift()], builder = createCloudDashboardBuilder(seed, {source: 'rentals'}, {now: NOW});
+  builder.add(seed);
+  for (let from = 0; from < samples; from += 100) {
+    const page = Array.from({length: Math.min(100, samples - from)}, (_, offset) => {
+      const index = from + offset, days = index % 30 + 1, amount = 120000000n * BigInt(days);
+      return historical(event(10 + index % 1000, {ts: NOW / 1000 - index - 1,
+        price: decimalText(rational(amount, 1000000000n)), price_nano: String(amount), duration: days * 86400}));
+    });
+    builder.add(page);
+  }
+  const result = builder.finish(), collection = result.gifts[0].pricing.collection;
+  assert.equal(result.pricing.rental_record_count, samples);
+  assert.equal(collection.sample_count, samples); assert.equal(collection.distinct_nft_count, 1000);
+  assert.equal(collection.mean, '0.12'); assert.equal(collection.median, '0.12');
+  assert.equal(collection.minimum, '0.12'); assert.equal(collection.maximum, '0.12');
+  assert.equal(result.gifts[0].pricing.recommended_price_per_day, '0.12');
 });
 
 test('collection, exact model and Black groups include the owned subject and exclude merely dark backdrops', () => {
@@ -139,13 +275,69 @@ test('rental counts ignore timeframe and currencies/amounts, but unknown stays u
   assert.equal(unresolved.rental_history.coverage, 'not_applicable'); assert.equal(unresolved.pricing.recommended_price_per_day, null);
 });
 
-test('rental Black collection baseline requires fresh metadata and does not fall back to all backdrops', () => {
+test('rental Black collection baseline accepts older valid metadata and never falls back to all backdrops', () => {
   const rows = [10, 11, 12].flatMap(n => [traits(n, attributes('Ruby', n === 12 ? 'Blue' : 'Black')), historical(event(n))]);
   assert.equal(subject(rows, {source: 'rentals'}).pricing.collection.sample_count, 3);
   const black = subject(rows, {source: 'rentals', backdrop: 'Black'}).pricing;
   assert.equal(black.collection.sample_count, 2); assert.equal(black.recommended_price_per_day, null);
   const stale = rows.map(r => r.kind === 'metadata' ? {...r, observed_at: '2026-10-07T11:00:00Z'} : r);
-  assert.equal(subject(stale, {source: 'rentals', backdrop: 'Black'}).pricing.collection.sample_count, 0);
+  assert.equal(subject(stale, {source: 'rentals', backdrop: 'Black'}).pricing.collection.sample_count, 2);
+});
+
+test('old saved target and peer traits retain matching recommendations across price sources and scopes', () => {
+  const old = '2026-01-01T12:00:00Z';
+  for (const source of ['rentals', 'listings']) for (const backdrop of [null, 'Black']) for (const peersModel of ['Ruby', 'Other']) {
+    const rows = [gift(2, {state: 'rented'}), gift(4), traits(2, attributes(), old), traits(4),
+      ...[10, 11, 12].flatMap(n => [traits(n, attributes(peersModel), old), source === 'rentals'
+        ? historical(event(n)) : listed(listing(n, '200000000', {attributes: []}))])];
+    const selection = {source, backdrop, timeframe: '30d'};
+    const result = buildCloudDashboard(rows, selection, {now: NOW});
+    const [older, recent] = result.gifts;
+    assert.equal(older.traits_observed_at, old);
+    assert.ok(older.trait_uncertainties.some(value => /older/.test(value)));
+    assert.equal(older.pricing.recommended_price_per_day, '0.2');
+    assert.equal(older.pricing.recommended_price_per_day, recent.pricing.recommended_price_per_day);
+    assert.equal(older.pricing.basis, peersModel === 'Ruby' ? 'model_black' : 'collection');
+    assert.deepEqual(older.pricing.collection, recent.pricing.collection);
+    assert.equal(older.pricing.collection.sample_count, 3);
+    // Crossing the metadata age cutoff changes its age warning, not the cohort.
+    const aged = buildCloudDashboard(rows, selection, {now: NOW + 2 * 86400000}).gifts[1];
+    assert.equal(aged.pricing.recommended_price_per_day, recent.pricing.recommended_price_per_day);
+    assert.equal(aged.pricing.basis, recent.pricing.basis);
+    // Saved traits never keep expired price observations or rentals eligible.
+    const expired = buildCloudDashboard(rows, selection, {now: NOW + 31 * 86400000}).gifts[0];
+    assert.equal(expired.pricing.recommended_price_per_day, null);
+    assert.equal(expired.pricing.collection.sample_count, 0);
+  }
+});
+
+test('saved traits do not bypass missing, malformed, conflicting, future or newer non-Black evidence', () => {
+  const old = '2026-01-01T12:00:00Z', newer = '2026-10-07T12:00:00Z';
+  const rejected = [[], [traits(2, {}, old)],
+    [traits(2, attributes(), old), traits(2, attributes('Ruby', 'Blue'), old)],
+    [traits(2, attributes(), '2026-10-10T12:00:00Z')],
+    [traits(2, attributes(), old), traits(2, {}, newer)],
+    [traits(2, attributes(), old), traits(2, attributes('Ruby', 'Blue'), newer)],
+    [traits(2, attributes(), old), traits(2, attributes('Ruby', 'Blue'), newer), traits(2, attributes(), newer)]];
+  for (const source of ['rentals', 'listings']) {
+    const peers = [10, 11, 12].flatMap(n => [traits(n, attributes(), old), source === 'rentals'
+      ? historical(event(n)) : listed(listing(n, '200000000', {attributes: []}))]);
+    for (const metadata of rejected) {
+      const result = buildCloudDashboard([gift(), ...metadata, ...peers], {source, backdrop: 'Black'}, {now: NOW}).gifts[0];
+      assert.equal(result.pricing.recommended_price_per_day, null);
+      assert.match(result.pricing.reason, /no valid saved evidence/);
+    }
+    for (const values of [{}, [...attributes(), {trait_type: 'Backdrop', value: 'Blue'}], attributes('Ruby', 'Onyx Black')]) {
+      const result = buildCloudDashboard([gift(), traits(2, attributes(), old), ...peers, traits(12, values, newer)],
+        {source, backdrop: 'Black'}, {now: NOW}).gifts[0];
+      assert.equal(result.pricing.collection.sample_count, 2);
+      assert.equal(result.pricing.recommended_price_per_day, null);
+    }
+    const changed = buildCloudDashboard([gift(), traits(2, attributes('Old model'), old), traits(2, attributes(), newer), ...peers],
+      {source, backdrop: 'Black'}, {now: NOW}).gifts[0];
+    assert.equal(changed.model, 'Ruby');
+    assert.equal(changed.pricing.basis, 'model_black');
+  }
 });
 
 test('saved portfolio labels, provenance and newer contract asking survive a price refresh', () => {

@@ -19,6 +19,7 @@ export interface SyncPresentation {
   actionLabel: string | null;
   rawReason: string | null;
   cacheNote: string | null;
+  availableAt: string | null;
 }
 
 interface SyncOptions { stopping?: boolean; now?: number; timeframeLabel?: string }
@@ -33,6 +34,12 @@ const titles: Record<JobKind, string> = {
 };
 const savedTitles: Record<JobKind, string> = {prices: 'Listing comparisons', rental_prices: 'Rental comparisons', collect: 'Market prices and rentals', refresh: 'Your gifts', discover: 'Wallet gifts'};
 
+function interruptedMessage(job: Job): string {
+  const lease = job.progress?.lease_until, serverTime = job.progress?.server_time;
+  return typeof lease === 'number' && Number.isSafeInteger(lease) && typeof serverTime === 'number' && Number.isSafeInteger(serverTime) && lease > serverTime
+    ? 'The last request is still finishing. Checking saved progress…' : 'Checking saved progress…';
+}
+
 function knownReason(value: string | null): Reason {
   const text = value?.toLowerCase() ?? '';
   if (/retry_exhausted|retries were exhausted|retry attempts exhausted/.test(text)) return 'retry_failed';
@@ -41,7 +48,7 @@ function knownReason(value: string | null): Reason {
   if (/invalid_response|malformed data|malformed response|response_too_large|page safety limit|unexpected_redirect|unexpected url|invalid_retry_after|unsupported retry deadline/.test(text)) return 'response';
   if (/stopped_by_you|user_stopped|stopped by you/.test(text)) return 'stopped';
   if (/daily_limit|dashboard_daily_budget|rolling 24.hour|daily.*(?:limit|allowance|budget)/.test(text)) return 'daily';
-  if (/retry_wait|provider retry deadline|retry.after|provider (?:cooldown|wait)|rate.limit/.test(text)) return 'retry';
+  if (/retry_wait|provider_wait|provider retry deadline|retry.after|provider (?:cooldown|wait)|rate.limit/.test(text)) return 'retry';
   if (/invocation_limit|duration_limit|attempt_budget|time[ _]budget|invocation_budget|page[ _]limit|request.*(?:limit|budget)|minute.*allowance|duration limit|allowance ended/.test(text)) return 'limit';
   if (/network_error|network failure|request_timeout|connection error/.test(text)) return 'network';
   if (/interrupted|worker_lease_lost|lease changed|request_lease_expired/.test(text)) return 'interrupted';
@@ -122,11 +129,32 @@ function cacheNote(job: Job, now: number): string | null {
 }
 
 function pausedMessage(reason: Reason): string {
-  if (reason === 'daily') return 'The daily request allowance is used up. Your progress is saved; continue when it resets.';
+  if (reason === 'daily') return 'The rolling 24-hour request allowance is used up. Your progress is saved; continue when requests leave the window.';
   if (reason === 'retry') return 'The data provider asked us to wait. Your progress is saved; continue later.';
   if (reason === 'limit') return 'This batch reached its limit. Continue to pick up where it stopped.';
   if (reason === 'stopped') return 'Stopped. Your progress is saved; continue whenever you are ready.';
   return 'Your progress is saved. Continue to pick up where it stopped.';
+}
+
+/** First usable capacity, not merely the first request leaving the window. */
+export function marketappAvailableAt(usedValue: unknown, limitValue: unknown, value: unknown): string | null {
+  const used = count(usedValue), limit = count(limitValue);
+  if (used === null || limit === null || limit === 0 || used < limit || typeof value !== 'string'
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return null;
+  const at = Date.parse(value);
+  return Number.isFinite(at) && at > 0 ? new Date(at).toISOString() : null;
+}
+
+export function availableAgainMessage(at: string, now = Date.now()): string {
+  const date = new Date(at);
+  if (date.getTime() <= now) return 'Availability time reached · try Continue.';
+  const current = new Date(now), tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const sameDay = (other: Date) => date.getFullYear() === other.getFullYear() && date.getMonth() === other.getMonth() && date.getDate() === other.getDate();
+  const day = sameDay(current) ? 'today' : sameDay(tomorrow) ? 'tomorrow'
+    : new Intl.DateTimeFormat(undefined, {month: 'short', day: 'numeric', ...(date.getFullYear() !== current.getFullYear() ? {year: 'numeric' as const} : {})}).format(date);
+  const time = new Intl.DateTimeFormat(undefined, {hour: '2-digit', minute: '2-digit', timeZoneName: 'short'}).format(date);
+  return `Available again ${day} at ${time}`;
 }
 
 function failedMessage(reason: Reason): string {
@@ -138,19 +166,21 @@ function failedMessage(reason: Reason): string {
 }
 
 /** The main surface needs the next step; diagnostics remain in Details. */
-export function compactJobMessage(job: Job, view: SyncPresentation): string {
+export function compactJobMessage(job: Job, view: SyncPresentation, now = Date.now()): string {
   const reason = knownReason(job.reason);
   if (view.state === 'paused') {
     if (reason === 'daily') {
-      const budget = object(job.progress?.marketapp_budget);
+      const budget = object(job.progress?.provider_budget ?? job.progress?.marketapp_budget);
       const used = count(budget?.rolling_24h_used), limit = count(budget?.rolling_24h_limit);
-      return used !== null && limit !== null && limit > used
-        ? 'Allowance available · ready to continue.' : 'Daily allowance used · progress saved.';
+      return budget?.provider_allowance_blocked !== true && used !== null && limit !== null && limit > used
+        ? 'Allowance available · ready to continue.' : view.availableAt
+          ? availableAgainMessage(view.availableAt, now) : 'Rolling 24-hour allowance used · progress saved.';
     }
     if (reason === 'retry') return 'Provider cooldown · continue later.';
     return 'Progress saved · ready to continue.';
   }
-  if (view.state === 'waiting') return 'Provider cooldown · retrying automatically.';
+  if (view.state === 'waiting') return job.progress?.client_interrupted === true
+    ? interruptedMessage(job) : 'Provider cooldown · retrying automatically.';
   if (view.state === 'stopping') return 'Saving progress and stopping…';
   if (view.state === 'preparing') return 'Preparing checks…';
   if (view.state === 'complete') return job.kind === 'refresh' || job.kind === 'discover'
@@ -161,8 +191,11 @@ export function compactJobMessage(job: Job, view: SyncPresentation): string {
     return 'Could not finish · saved data kept. Try again later.';
   }
   const detail = object(job.progress?.sync);
-  return typeof detail?.current_collection === 'string' && detail.current_collection.trim()
+  const current = typeof detail?.current_collection === 'string' && detail.current_collection.trim()
     ? `Checking ${detail.current_collection.trim()}` : job.kind === 'discover' ? 'Finding gifts…' : 'Checking for updates…';
+  const processed = count(detail?.processed_items);
+  return view.progress.completed === 0 && processed !== null && processed > 0 && detail?.phase !== 'discovering'
+    ? `${current} · ${number(processed)} records read` : current;
 }
 
 /** Human-facing status uses workload counts, never the HTTP request allowance. */
@@ -178,10 +211,12 @@ export function presentJobSync(job: Job, options: SyncOptions = {}): SyncPresent
     state = 'failed'; message = failedMessage(reason);
   } else if (job.state === 'partial' || requiresResume) {
     state = 'paused';
-    const budget = object(job.progress?.marketapp_budget), used = count(budget?.rolling_24h_used), limit = count(budget?.rolling_24h_limit);
-    message = reason === 'daily' && used !== null && limit !== null && limit > 0 && used < limit
+    const budget = object(job.progress?.provider_budget ?? job.progress?.marketapp_budget), used = count(budget?.rolling_24h_used), limit = count(budget?.rolling_24h_limit);
+    message = reason === 'daily' && budget?.provider_allowance_blocked !== true && used !== null && limit !== null && limit > 0 && used < limit
       ? 'Your request allowance is available again. Continue from your saved progress.'
       : pausedMessage(reason);
+  } else if (active && job.progress?.client_interrupted === true) {
+    state = 'waiting'; message = interruptedMessage(job);
   } else if (reason === 'retry') {
     state = 'waiting'; message = 'Waiting for the data provider before retrying. Your progress is saved.';
   } else if (job.state === 'queued' || detail?.phase === 'preparing') {
@@ -195,38 +230,72 @@ export function presentJobSync(job: Job, options: SyncOptions = {}): SyncPresent
     if (processed !== null && processed > 0 && detail?.phase !== 'discovering') message += ` ${number(processed)} records read.`;
   }
   const labels: Record<SyncPresentation['state'], string> = {preparing: 'Preparing', running: 'In progress', waiting: 'Waiting', paused: 'Paused', stopping: 'Stopping', complete: 'Complete', failed: 'Needs attention'};
+  const budget = object(job.progress?.provider_budget ?? job.progress?.marketapp_budget);
   return {
     title: (['paused', 'complete', 'failed'].includes(state) ? savedTitles[job.kind] : titles[job.kind]) || 'Saved data', objective: objective(job, options.timeframeLabel), state, stateLabel: labels[state], message,
     progress: jobProgress(job), actionLabel: state === 'paused' ? 'Continue' : state === 'failed' ? reason === 'cursor' ? 'Start again' : 'Retry' : null,
     rawReason: job.reason, cacheNote: cacheNote(job, options.now ?? Date.now()),
+    availableAt: state === 'paused' && reason === 'daily'
+      ? marketappAvailableAt(budget?.provider_allowance_blocked ? 1 : budget?.rolling_24h_used, budget?.provider_allowance_blocked ? 1 : budget?.rolling_24h_limit, budget?.available_at) : null,
   };
 }
 
-export function presentOwnedPriceSync(snapshot: OwnedPriceSnapshot, options: {stopping?: boolean} = {}): SyncPresentation {
+export function presentOwnedPriceSync(snapshot: OwnedPriceSnapshot, options: {stopping?: boolean; rentalStatus?: boolean} = {}): SyncPresentation {
   const run = snapshot.run, reason = knownReason(run?.reason ?? null);
+  const combined = options.rentalStatus === true;
+  const single = run?.scope === 'gift';
+  const verification = snapshot.verification;
+  const supplemental = verification?.stage === 'ton' && snapshot.provider === 'marketapp_website';
+  const finalizing = snapshot.phase === 'checking' && (verification?.stage === 'ton'
+    ? verification.total > 0 && verification.checked === verification.total
+    : Boolean(snapshot.provider && run && run.total > 0 && run.checked === run.total));
   let state: SyncPresentation['state'], message: string;
   if (options.stopping && snapshot.phase === 'checking') {
     state = 'stopping'; message = 'Finishing the current check, then stopping.';
   } else if (snapshot.phase === 'complete') {
     state = 'complete';
     const updated = count(run?.updated), unresolved = count(run?.unresolved);
-    message = run?.total === 0 ? 'No saved gifts need a price check.' : updated !== null ? `${number(updated)} gift price${updated === 1 ? '' : 's'} refreshed.` : 'Your gift price check is complete.';
-    if (unresolved !== null && unresolved > 0) message += ` ${number(unresolved)} could not be updated.`;
+    const statuses = count(run?.status_updated), statusUnresolved = count(run?.status_unresolved);
+    message = combined ? run?.total === 0 ? 'No saved gifts to check.' : statuses !== null ? `${number(statuses)} rental status${statuses === 1 ? '' : 'es'} checked.` : 'Gift check finished. Rental status was not confirmed.'
+      : run?.total === 0 ? 'No saved gifts need a price check.' : updated !== null ? `${number(updated)} gift price${updated === 1 ? '' : 's'} refreshed.` : 'Your gift price check is complete.';
+    if (snapshot.cacheHit) message = 'Your gifts were checked recently.';
+    const failures = combined ? statusUnresolved : unresolved;
+    if (failures !== null && failures > 0) message += ` ${number(failures)} could not be updated.`;
   } else if (snapshot.phase === 'unavailable') {
-    state = 'failed'; message = 'The price check could not finish. Your saved prices are still available.';
+    state = 'failed'; message = combined ? 'The gift check could not finish. Saved evidence is still available.' : 'The price check could not finish. Your saved prices are still available.';
   } else if (snapshot.phase === 'partial') {
-    state = 'paused'; message = reason === 'stopped' ? 'Stopped. Checked prices are saved.' : 'The price check paused. Checked prices are saved.';
-  } else if (reason === 'retry') {
-    state = 'waiting'; message = 'Waiting for the data provider before checking more prices.';
+    state = 'paused'; message = reason === 'retry' ? snapshot.provider === 'marketapp_website'
+      ? 'TON requested a pause. Marketapp gift data is saved. Try refreshing again later.'
+      : 'The provider requested a pause. Completed checks are saved. Try refreshing again later.'
+      : combined ? reason === 'stopped' ? 'Stopped. Completed checks are saved.' : 'The gift check paused. Completed checks are saved.'
+      : reason === 'stopped' ? 'Stopped. Checked prices are saved.' : 'The price check paused. Checked prices are saved.';
+  } else if (reason === 'retry' || verification?.waiting) {
+    state = 'waiting'; message = supplemental ? 'TON requested a pause. Saved gift data is already available.'
+      : verification?.stage === 'ton' ? 'TON requested a pause before continuing gift checks.'
+        : single ? 'Waiting for the data provider to check this gift.' : combined ? 'Waiting for the data provider before checking more gifts.' : 'Waiting for the data provider before checking more prices.';
   } else if (!run) {
     state = 'preparing'; message = 'Preparing to check your saved gifts.';
   } else {
-    state = 'running'; message = 'Checking current daily prices for your saved gifts.';
+    state = 'running'; message = finalizing ? 'Finishing gift checks and confirming saved results.'
+      : supplemental ? 'Marketapp data saved. Checking missing details and rental expiry on TON.'
+        : single ? combined ? 'Checking this gift’s rental status and daily price.' : 'Checking this gift’s daily price.' : snapshot.provider === 'marketapp_website' ? 'Refreshing your saved gifts from Marketapp.' : combined ? 'Checking rental status and daily prices for your saved gifts.' : 'Checking current daily prices for your saved gifts.';
   }
   const labels: Record<SyncPresentation['state'], string> = {preparing: 'Preparing', running: 'In progress', waiting: 'Waiting', paused: 'Paused', stopping: 'Stopping', complete: 'Complete', failed: 'Needs attention'};
+  let workload = progress(run?.checked, run?.total, 'gifts', snapshot.phase === 'complete');
+  if (verification?.stage === 'ton' && snapshot.phase === 'checking') {
+    workload = progress(verification.checked, verification.total, 'checks', false);
+    if (supplemental && verification.total > 0) workload.label = `${number(verification.checked)} of ${number(verification.total)} additional TON checks finished`;
+  }
+  // Checked gifts and completed supplemental work are distinct. Never imply
+  // a remaining one percent when the server is still confirming the result.
+  if (finalizing) workload = { ...workload, percent: null, indeterminate: true, label: 'Finishing gift checks…' };
+  else if (snapshot.provider && run && run.total > 0 && run.checked === run.total
+    && (snapshot.phase === 'partial' || snapshot.phase === 'unavailable')) {
+    workload = { ...workload, percent: null, indeterminate: false, label: 'Gift data saved · Check incomplete' };
+  }
   return {
-    title: ['paused', 'complete', 'failed'].includes(state) ? 'Your gift prices' : 'Updating your gift prices', objective: 'Checking daily prices for gifts you already own.', state, stateLabel: labels[state], message,
-    progress: progress(run?.checked, run?.total, 'gifts', snapshot.phase === 'complete'),
-    actionLabel: null, rawReason: run?.reason ?? null, cacheNote: null,
+    title: supplemental && snapshot.phase === 'checking' ? 'Checking additional gift details' : run?.scope === 'gift' ? ['paused', 'complete', 'failed'].includes(state) ? 'Selected gift' : 'Checking selected gift' : combined ? ['paused', 'complete', 'failed'].includes(state) ? 'Your gifts' : 'Updating your gifts' : ['paused', 'complete', 'failed'].includes(state) ? 'Your gift prices' : 'Updating your gift prices', objective: run?.scope === 'gift' ? 'Checking only the selected gift through TON.' : combined ? 'Checking rental status and daily prices for gifts you already own.' : 'Checking daily prices for gifts you already own.', state, stateLabel: labels[state], message,
+    progress: workload,
+    actionLabel: null, rawReason: run?.reason ?? null, cacheNote: null, availableAt: null,
   };
 }

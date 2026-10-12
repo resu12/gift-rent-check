@@ -19,19 +19,17 @@ export function RentalHistoryDetails({ gift }: { gift: Gift }) {
   const history = gift.rental_history;
   const count = history?.recorded_count;
   const excluded = Object.values(history?.excluded_counts || {}).reduce((sum, value) => sum + value, 0);
-  return <section className="detail-section rental-history-details"><h3>Rental history</h3>
+  return <details className="detail-section detail-disclosure rental-history-details"><summary>Rental history{count != null && <> · {count.toLocaleString()} recorded</>}</summary>
     <dl><div><dt>Recorded rental starts</dt><dd>{count == null ? 'Unknown' : count.toLocaleString()}</dd></div>
       {excluded > 0 && <div><dt>Excluded records</dt><dd>{excluded.toLocaleString()}</dd></div>}
     </dl>
     <p>{count == null ? 'Not enough saved history to count rentals.' : 'All saved history · coverage may be incomplete.'}</p>
-    <details className="sync-details"><summary>History details</summary><div>
       <p>{history?.note || HISTORY_NOTE}</p>
       {(history?.first_rental_at || history?.last_rental_at || history?.observed_at) && <dl>
         {history?.first_rental_at && <div><dt>Earliest saved rental</dt><dd>{dateTime(history.first_rental_at)}</dd></div>}
         {history?.last_rental_at && <div><dt>Latest saved rental</dt><dd>{dateTime(history.last_rental_at)}</dd></div>}
         {history?.observed_at && <div><dt>History last observed</dt><dd>{dateTime(history.observed_at)}</dd></div>}
       </dl>}
-      <p>Select <b>Actual rentals</b> and refresh to collect more history. Continue paused work from Activity.</p>
-    </div></details>
-  </section>;
+      <p>Select <b>Actual rentals</b> and refresh to collect more history. Continue paused work from Status.</p>
+  </details>;
 }

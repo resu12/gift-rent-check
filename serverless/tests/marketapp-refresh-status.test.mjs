@@ -202,6 +202,15 @@ test('a planned fingerprint without a matching wallet-scoped snapshot never prov
   assert.equal((await missing.read()).attempt.error_code, 'MARKETAPP_REFRESH_FAILED'); missing.database.close();
 });
 
+test('an older identical snapshot cannot turn a fenced failed refresh into a successful save', async () => {
+  const t = setup();
+  t.seed({state: 'consumed', audit: outcome('failed', 2000, {stage: 'save_snapshot', authenticated: true,
+    code: 'MARKETAPP_REFRESH_EXPIRED', snapshot_fingerprint: fingerprint}), withSnapshot: false});
+  t.seedSnapshot({importedAt: iso(1000)}); t.setNow(base + 3000);
+  assert.equal((await t.read()).attempt.state, 'failed');
+  assert.equal((await t.read()).attempt.error_code, 'MARKETAPP_REFRESH_EXPIRED'); t.database.close();
+});
+
 test('malformed imported timestamps cannot recover a saved result from progress metadata', async () => {
   for (const importedAt of ['2026-10-09', '2026-10-09T12:00:00+00:00', '2026-02-30T00:00:00.000Z', 'invalid-private-value']) {
     const t = setup(); t.seed({state: 'consumed', audit: outcome('updating', 1000, {stage: 'save_snapshot', authenticated: true, snapshot_fingerprint: fingerprint})});

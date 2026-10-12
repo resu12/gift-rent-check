@@ -4,8 +4,10 @@ import {DatabaseSync} from 'node:sqlite';
 import {createCloudRepository} from '../tgcloud/lib/cloud-repository.js';
 import {createMarketappLoginEngine} from '../tgcloud/lib/marketapp-login.js';
 import {createMarketappSessionBox} from '../tgcloud/lib/marketapp-session-box.js';
+import {createMarketappRememberedSessionBox} from '../tgcloud/lib/marketapp-remembered-session-box.js';
+import {createMarketappRefreshStatusEngine} from '../tgcloud/lib/marketapp-refresh-status.js';
 import {createMarketappAnalyticsRefreshEngine, MarketappRefreshRequestError, marketappRefreshErrorResponse, parseMarketappSessionCookie, marketappAnalyticsUrl} from '../tgcloud/lib/marketapp-analytics-refresh.js';
-import {syntheticAnalyticsPage, syntheticWallet as wallet, syntheticFriendly} from './fixtures/marketapp-analytics-page-fixture.mjs';
+import {syntheticAnalyticsPage, syntheticWallet as wallet, syntheticFriendly, htmlAttribute} from './fixtures/marketapp-analytics-page-fixture.mjs';
 
 const ctx = {initData: {user: {id: 12345}}};
 const challenge = 'synthetic-public-refresh-challenge';
@@ -18,11 +20,14 @@ function response(url, text, headers = {}, options = {}) {
   return {status: 200, url, body: {async *[Symbol.asyncIterator]() {yield Buffer.from(text);}}, ...options,
     headers: {get: key => values[key.toLowerCase()] ?? null}};
 }
-function setup({fetch: supplied, records = [{kind: 'settings', record: {wallet}}], sessionBox: suppliedBox} = {}) {
+function setup({fetch: supplied, records = [{kind: 'settings', record: {wallet}}], sessionBox: suppliedBox, combinedActivity = false, responseEdit = null} = {}) {
   const database = new DatabaseSync(':memory:');
   database.exec(`CREATE TABLE marketapp_login_attempts(attempt_id TEXT PRIMARY KEY,owner_id TEXT NOT NULL,wallet TEXT NOT NULL,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,state TEXT NOT NULL,nonce_fingerprint TEXT,outcome_json TEXT);
     CREATE TABLE cloud_events(sequence INTEGER PRIMARY KEY,event_key TEXT NOT NULL,state_json TEXT NOT NULL,job_id INTEGER,job_json TEXT,records_json TEXT NOT NULL,raw_body TEXT,observed_at TEXT NOT NULL);
     CREATE TABLE collector_state(id INTEGER PRIMARY KEY,revision INTEGER NOT NULL,document TEXT NOT NULL);
+    CREATE TABLE marketapp_analytics_sessions(owner_id TEXT PRIMARY KEY,generation INTEGER NOT NULL DEFAULT 0,nonce_counter INTEGER NOT NULL DEFAULT 0,cookie_version INTEGER NOT NULL DEFAULT 0,wallet TEXT,wallet_revision INTEGER,ciphertext TEXT,created_at INTEGER,expires_at INTEGER);
+    CREATE TABLE marketapp_website_gates(scope_key TEXT PRIMARY KEY,lease_id TEXT,lease_until INTEGER NOT NULL DEFAULT 0,next_allowed_at INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE marketapp_website_requests(request_id TEXT PRIMARY KEY,scope_key TEXT NOT NULL,attempted_at INTEGER NOT NULL);
     CREATE TABLE personal_rental_analytics(fingerprint TEXT PRIMARY KEY,wallet TEXT NOT NULL,captured_at TEXT NOT NULL,imported_at TEXT NOT NULL,raw_snapshot TEXT NOT NULL,normalized_json TEXT NOT NULL);`);
   const state = {version: 2, next_job_id: 3, job: null, attempts: [123], next_allowed_at: 999};
   database.prepare('INSERT INTO cloud_events VALUES(1,?,?,?,?,?,?,?)').run('seed', JSON.stringify(state), null, null, JSON.stringify(records), null, '2026-10-09T12:00:00Z');
@@ -35,16 +40,23 @@ function setup({fetch: supplied, records = [{kind: 'settings', record: {wallet}}
   const request = async (url, options) => {
     requests.push({url, options});
     if (supplied) return supplied(url, options, {now: () => at, advance: ms => {at += ms;}});
-    if (url === 'https://marketapp.org/' && options.method === 'GET') return response(url, anon, {'Content-Type': 'text/html', 'Set-Cookie': anonymousCookie + '; Path=/; Secure; HttpOnly; SameSite=Lax'});
-    if (url === AUTH && options.method === 'POST') return response(url, '{"verified":true}', {'Content-Type': 'application/json', 'Set-Cookie': authenticatedCookie + '; Path=/; Secure; HttpOnly'});
+    const edit = result => responseEdit ? responseEdit(url, options, result, {now: () => at, advance: ms => {at += ms;}}) : result;
+    if (url === 'https://marketapp.org/' && options.method === 'GET') return edit(response(url, anon, {'Content-Type': 'text/html', 'Set-Cookie': anonymousCookie + '; Path=/; Secure; HttpOnly; SameSite=Lax'}));
+    if (url === AUTH && options.method === 'POST') return edit(response(url, '{"verified":true}', {'Content-Type': 'application/json', 'Set-Cookie': authenticatedCookie + '; Path=/; Secure; HttpOnly'}));
     if (options.method === 'GET' && [30, 365].some(days => url === marketappAnalyticsUrl(wallet, days))) {
       const days = url.includes('last365days') ? 365 : 30;
-      return response(url, syntheticAnalyticsPage({periodDays: days, capturedAt: new Date(at).toISOString(), lastDate: new Date(at).toISOString().slice(0, 10)}).html, {'Content-Type': 'text/html'});
+      const page = syntheticAnalyticsPage({periodDays: days, combinedActivity, capturedAt: new Date(at).toISOString(), lastDate: new Date(at).toISOString().slice(0, 10)});
+      if (combinedActivity) {
+        const raw = page.snapshot.charts[0].spec_raw;
+        page.html = page.html.replace('>3.00<', '>28<').replace(htmlAttribute(raw), htmlAttribute(raw.replace('"unit":"GRAM","data":[3,', '"unit":"GRAM","data":[27.9804,')));
+      }
+      return edit(response(url, page.html, {'Content-Type': 'text/html'}));
     }
     throw new Error('Unexpected mock route');
   };
-  const engine = createMarketappAnalyticsRefreshEngine({repository, fetch: request, ownerTelegramId: 12345, clock: async () => at, sessionBox: box});
-  return {database, repository, requests, engine, request, box, now: () => at, advance: ms => {at += ms;}};
+  const rememberedSessionBox = createMarketappRememberedSessionBox('11'.repeat(32));
+  const engine = createMarketappAnalyticsRefreshEngine({repository, fetch: request, ownerTelegramId: 12345, clock: async () => at, sessionBox: box, rememberedSessionBox,sleep:async milliseconds=>{at+=milliseconds;}});
+  return {database, repository, requests, engine, request, box, rememberedSessionBox, now: () => at, advance: ms => {at += ms;}};
 }
 function submission(start, at) {
   return {attempt_id: start.attempt_id, session_envelope: start.session_envelope,
@@ -60,6 +72,17 @@ const assertCode = (promise, code) => assert.rejects(promise, error => {
   return true;
 });
 const audit = t => JSON.parse(t.database.prepare('SELECT outcome_json FROM marketapp_login_attempts ORDER BY created_at DESC LIMIT 1').get().outcome_json);
+const sessionRow = t => t.database.prepare('SELECT * FROM marketapp_analytics_sessions WHERE owner_id=?').get('12345');
+const snapshots = t => t.database.prepare('SELECT count(*) AS n FROM personal_rental_analytics').get().n;
+async function remember(t, periodDays = 30) {
+  const start = await t.engine.startMarketappAnalyticsRefresh(ctx, {period_days: periodDays, remember_login: true});
+  return await t.engine.finishMarketappAnalyticsRefresh(ctx, submission(start, t.now()));
+}
+function walletChange(t, nextWallet) {
+  const sequence = t.database.prepare('SELECT MAX(sequence) AS sequence FROM cloud_events').get().sequence + 1;
+  t.database.prepare('INSERT INTO cloud_events VALUES(?,?,?,?,?,?,?,?)').run(sequence, `wallet-change-${sequence}`, '{}', null, null,
+    JSON.stringify([{kind: 'settings', record: {wallet: nextWallet}}]), null, new Date(t.now()).toISOString());
+}
 
 test('rate limits project exact database-clock cooldown and hourly deadlines without provider requests', async () => {
   const t = setup(), began = t.now();
@@ -90,10 +113,241 @@ test('all refresh operations authorize before database, clock, decryption or pro
   let accesses = 0;
   const engine = createMarketappAnalyticsRefreshEngine({ownerTelegramId: 12345, repository: new Proxy({}, {get() {accesses++; return async () => {};}}),
     clock: async () => {accesses++;}, fetch: async () => {accesses++;}, sessionBox: {seal() {accesses++;}, open() {accesses++;}}});
-  for (const name of ['startMarketappAnalyticsRefresh', 'finishMarketappAnalyticsRefresh', 'cancelMarketappAnalyticsRefresh']) {
+  for (const name of ['startMarketappAnalyticsRefresh', 'finishMarketappAnalyticsRefresh', 'cancelMarketappAnalyticsRefresh',
+    'refreshSavedMarketappAnalytics', 'refreshStartupMarketappAnalytics', 'disconnectMarketappAnalyticsSession', 'getMarketappAnalyticsSessionStatus']) {
     for (const unauthorized of [{}, {initData: {user: {id: 67890}}}]) await assertCode(engine[name](unauthorized, {}), 'MARKETAPP_REFRESH_PRIVATE_ACCESS_DENIED');
   }
   assert.equal(accesses, 0);
+});
+
+test('remembering is explicit envelope-bound consent and default refresh stores no website login', async () => {
+  for (const rememberLogin of [undefined, false]) {
+    const t = setup(), start = await t.engine.startMarketappAnalyticsRefresh(ctx, {period_days: 30, ...(rememberLogin === undefined ? {} : {remember_login: rememberLogin})});
+    assert.equal(t.box.open(start.session_envelope).remember_login, false);
+    await assertCode(t.engine.finishMarketappAnalyticsRefresh(ctx, {...submission(start, t.now()), remember_login: true}), 'MARKETAPP_REFRESH_INVALID_INPUT');
+    await t.engine.finishMarketappAnalyticsRefresh(ctx, submission(start, t.now()));
+    assert.equal(sessionRow(t).ciphertext, null); assert.equal(sessionRow(t).nonce_counter, 0);
+    assert.deepEqual(await t.engine.getMarketappAnalyticsSessionStatus(ctx), {remembered: false, expires_at: null}); t.database.close();
+  }
+  const t = setup();
+  for (const input of [{period_days: 30, remember_login: 'true'}, {period_days: 30, remember_login: 1}, {period_days: 30, cookie: 'private'}])
+    await assertCode(t.engine.startMarketappAnalyticsRefresh(ctx, input), 'MARKETAPP_REFRESH_INVALID_INPUT');
+  assert.equal(t.requests.length, 0); t.database.close();
+});
+
+test('approved login stores only ciphertext with a seven-day cap and supports either reporting period using one GET', async () => {
+  const t = setup(), before = await t.repository.read(), first = await remember(t), stored = sessionRow(t);
+  assert.equal(stored.expires_at - stored.created_at, 7 * 86400000); assert.equal(stored.nonce_counter, 1);
+  const plaintext = t.rememberedSessionBox.open(stored.ciphertext);
+  assert.equal(plaintext.cookie, authenticatedCookie); assert.equal(plaintext.wallet, wallet);
+  const persisted = JSON.stringify(t.database.prepare('SELECT * FROM marketapp_analytics_sessions').all());
+  for (const value of [anonymousCookie, authenticatedCookie, challenge, 'proof', 'signature', '<html>']) assert.equal(persisted.includes(value), false);
+  assert.deepEqual(await t.engine.getMarketappAnalyticsSessionStatus(ctx), {remembered: true, expires_at: new Date(stored.expires_at).toISOString()});
+  t.advance(60000);
+  const result = await t.engine.refreshSavedMarketappAnalytics(ctx, {period_days: 365});
+  assert.equal(result.authenticated, true); assert.equal(result.analytics_refreshed, true); assert.equal(result.snapshot.daily.length, 365);
+  assert.notEqual(result.attempt_id, first.attempt_id); assert.match(result.attempt_id, /^[a-f0-9]{64}$/);
+  assert.equal(t.requests.length, 4); assert.equal(t.requests[3].url, marketappAnalyticsUrl(wallet, 365));
+  assert.equal(t.requests[3].options.method, 'GET'); assert.equal(t.requests[3].options.headers.Cookie, authenticatedCookie);
+  assert.equal(t.requests[3].options.body, undefined); assert.equal(t.requests[3].options.headers.Authorization, undefined);
+  assert.deepEqual(await t.repository.read(), before); assert.equal(sessionRow(t).expires_at, stored.expires_at);
+  assert.equal(sessionRow(t).nonce_counter, 1); t.database.close();
+});
+
+test('provider Max-Age and Expires bound remembered lifetime at the earliest supplied deadline', async () => {
+  const t = setup({responseEdit: (url, options, original, clock) => url === AUTH ? response(url, '{"verified":true}', {
+    'Content-Type': 'application/json', 'Set-Cookie': `${authenticatedCookie}; Path=/; Max-Age=3600; Expires=${new Date(clock.now() + 1800000).toUTCString()}`}) : original});
+  await remember(t); assert.equal(sessionRow(t).expires_at, t.now() + 1800000);
+  t.advance(1800000); const requests = t.requests.length, count = snapshots(t);
+  await assertCode(t.engine.refreshSavedMarketappAnalytics(ctx, {period_days: 30}), 'MARKETAPP_REFRESH_RECONNECT_REQUIRED');
+  assert.equal(t.requests.length, requests); assert.equal(snapshots(t), count); assert.equal(sessionRow(t).ciphertext, null);
+  assert.equal(sessionRow(t).nonce_counter, 1); assert.equal(sessionRow(t).generation, 1); t.database.close();
+});
+
+test('saved GET cookie rotation uses a fresh durable nonce and omission never lengthens lifetime', async () => {
+  let rotate = false;
+  const t = setup({responseEdit: (url, options, original) => rotate && url.includes('/user/') ? response(url,
+    syntheticAnalyticsPage({capturedAt: new Date(t.now()).toISOString()}).html, {'Content-Type': 'text/html',
+      'Set-Cookie': 'session=synthetic-rotated-session; Path=/; Max-Age=600'}) : original});
+  await remember(t); const previous = sessionRow(t); t.advance(60000); rotate = true;
+  await t.engine.refreshSavedMarketappAnalytics(ctx, {period_days: 30});
+  const changed = sessionRow(t), payload = t.rememberedSessionBox.open(changed.ciphertext);
+  assert.equal(changed.nonce_counter, 2); assert.equal(changed.cookie_version, 2);
+  assert.notEqual(changed.ciphertext.slice(2, 50), previous.ciphertext.slice(2, 50));
+  assert.equal(payload.cookie, 'session=synthetic-rotated-session'); assert.equal(changed.expires_at, t.now() + 600000);
+  assert.equal(changed.created_at, previous.created_at); t.advance(60000); rotate = false;
+  await t.engine.refreshSavedMarketappAnalytics(ctx, {period_days: 30});
+  assert.equal(t.requests.at(-1).options.headers.Cookie, payload.cookie); assert.equal(sessionRow(t).expires_at, changed.expires_at);
+  assert.equal(sessionRow(t).nonce_counter, 2); t.database.close();
+});
+
+test('analytics and personal gift refresh serialize through the same durable owner lease',async()=>{
+  const t=setup();await remember(t);t.advance(60000);const before=t.requests.length;
+  const lease=await t.repository.acquireMarketappWebsiteLease('12345','synthetic-gifts-operation',t.now());assert.ok(lease);
+  await assertCode(t.engine.refreshSavedMarketappAnalytics(ctx,{period_days:30}),'MARKETAPP_REFRESH_RATE_LIMIT');
+  assert.equal(t.requests.length,before);assert.equal(sessionRow(t).cookie_version,1);
+  await t.repository.releaseMarketappWebsiteLease('12345',lease);
+  const result=await t.engine.refreshSavedMarketappAnalytics(ctx,{period_days:30});assert.equal(result.analytics_refreshed,true);
+  assert.equal(t.requests.length,before+1);t.database.close();
+});
+
+test('provider Retry-After remains durable after failed analytics and blocks personal gifts without HTTP',async()=>{
+  let throttle=false;
+  const t=setup({responseEdit:(url,options,original)=>throttle&&url.includes('/user/')?response(url,'synthetic-private-error',{'Content-Type':'text/html','Retry-After':'120'},{status:429}):original});
+  await remember(t);t.advance(60000);throttle=true;
+  await assertCode(t.engine.refreshSavedMarketappAnalytics(ctx,{period_days:30}),'MARKETAPP_REFRESH_RATE_LIMIT');
+  const count=t.requests.length,lease=await t.repository.acquireMarketappWebsiteLease('12345','gift-retry',t.now());
+  const denied=await t.repository.reserveMarketappWebsiteRequest('12345',lease,'gift-page',t.now());assert.equal(denied.retry_after_seconds,120);assert.equal(denied.allowed,false);
+  assert.equal(t.requests.length,count);assert.equal((await t.engine.getMarketappAnalyticsSessionStatus(ctx)).remembered,true);
+  const persisted=JSON.stringify(t.database.prepare('SELECT * FROM marketapp_website_gates').all());assert.equal(persisted.includes('synthetic-private-error'),false);t.database.close();
+});
+
+test('absent, expired, corrupted or owner/wallet-bound invalid sessions reconnect before consuming request budget', async () => {
+  const absent = setup(); await assertCode(absent.engine.refreshSavedMarketappAnalytics(ctx, {period_days: 30}), 'MARKETAPP_REFRESH_RECONNECT_REQUIRED');
+  assert.equal(absent.requests.length, 0); assert.equal(absent.database.prepare('SELECT count(*) AS n FROM marketapp_login_attempts').get().n, 0); absent.database.close();
+  for (const change of [t => t.advance(7 * 86400000), t => t.database.exec("UPDATE marketapp_analytics_sessions SET ciphertext='02ff'"),
+    t => t.database.prepare('UPDATE marketapp_analytics_sessions SET wallet=?').run(`0:${'22'.repeat(32)}`),
+    t => t.database.exec('UPDATE marketapp_analytics_sessions SET expires_at=expires_at+1')]) {
+    const t = setup(); await remember(t); change(t); const count = snapshots(t);
+    await assertCode(t.engine.refreshSavedMarketappAnalytics(ctx, {period_days: 30}), 'MARKETAPP_REFRESH_RECONNECT_REQUIRED');
+    assert.equal(t.requests.length, 3); assert.equal(snapshots(t), count); assert.equal(sessionRow(t).ciphertext, null);
+    assert.equal(sessionRow(t).nonce_counter, 1); t.database.close();
+  }
+});
+
+test('remembered refreshes and wallet starts share the same cooldown and rolling hourly allowance', async () => {
+  const t = setup(); await remember(t);
+  await assertCode(t.engine.refreshSavedMarketappAnalytics(ctx, {period_days: 30}), 'MARKETAPP_REFRESH_RATE_LIMIT');
+  for (let index = 1; index < 5; index++) {t.advance(60000); await t.engine.refreshSavedMarketappAnalytics(ctx, {period_days: index % 2 ? 30 : 365});}
+  t.advance(60000);
+  await assertCode(t.engine.startMarketappAnalyticsRefresh(ctx, {period_days: 30, remember_login: true}), 'MARKETAPP_REFRESH_RATE_LIMIT');
+  await assertCode(t.engine.refreshSavedMarketappAnalytics(ctx, {period_days: 30}), 'MARKETAPP_REFRESH_RATE_LIMIT');
+  assert.equal(t.requests.length, 7); await t.engine.disconnectMarketappAnalyticsSession(ctx);
+  await assertCode(t.engine.startMarketappAnalyticsRefresh(ctx, {period_days: 30}), 'MARKETAPP_REFRESH_RATE_LIMIT'); t.database.close();
+});
+
+test('transient requests and changed analytics pages preserve a valid login and previous snapshots', async () => {
+  for (const failure of ['network', 'http', 'page', 'missing_identity']) {
+    let failNow = false;
+    const t = setup({responseEdit: (url, options, original) => {
+      if (!failNow || !url.includes('/user/')) return original;
+      if (failure === 'network') throw new Error('synthetic-private-provider-error');
+      if (failure === 'http') return {...original, status: 503};
+      const page = syntheticAnalyticsPage().html;
+      return response(url, failure === 'page' ? page.replace('profile.rent.income', 'profile.rent.unverified') : page.replace(/Wallet\.init\([^;]+;/, ''), {'Content-Type': 'text/html'});
+    }});
+    await remember(t); const stored = sessionRow(t), count = snapshots(t); t.advance(60000); failNow = true;
+    await assertCode(t.engine.refreshSavedMarketappAnalytics(ctx, {period_days: 30}), failure==='http'?'MARKETAPP_REFRESH_RATE_LIMIT':['page', 'missing_identity'].includes(failure) ? 'MARKETAPP_REFRESH_PAGE_CHANGED' : 'MARKETAPP_REFRESH_FAILED');
+    assert.equal(sessionRow(t).ciphertext, stored.ciphertext); assert.equal(snapshots(t), count);
+    assert.equal(await t.engine.getMarketappAnalyticsSessionStatus(ctx).then(result => result.remembered), true); t.database.close();
+  }
+});
+
+test('definite logged-out, rejected, wrong-wallet or deleted-cookie responses clear only the matching saved login', async () => {
+  for (const failure of ['unauthorized', 'forbidden', 'redirect', 'logged_out', 'wrong_wallet', 'deleted']) {
+    let failNow = false;
+    const t = setup({responseEdit: (url, options, original) => {
+      if (!failNow || !url.includes('/user/')) return original;
+      if (failure === 'unauthorized') return {...original, status: 401};
+      if (failure === 'forbidden') return {...original, status: 403};
+      if (failure === 'redirect') return response(url, '', {'Content-Type': 'text/html', Location: '/'}, {status: 302});
+      if (failure === 'deleted') return response(url, syntheticAnalyticsPage().html, {'Content-Type': 'text/html', 'Set-Cookie': 'session=; Path=/; Max-Age=0'});
+      return response(url, failure === 'logged_out' ? anon : syntheticAnalyticsPage({identity: `0:${'22'.repeat(32)}`}).html, {'Content-Type': 'text/html'});
+    }});
+    await remember(t); const count = snapshots(t); t.advance(60000); failNow = true;
+    await assertCode(t.engine.refreshSavedMarketappAnalytics(ctx, {period_days: 30}), 'MARKETAPP_REFRESH_RECONNECT_REQUIRED');
+    assert.equal(sessionRow(t).ciphertext, null); assert.equal(sessionRow(t).nonce_counter, 1); assert.equal(snapshots(t), count);
+    assert.deepEqual(await t.engine.getMarketappAnalyticsSessionStatus(ctx), {remembered: false, expires_at: null}); t.database.close();
+  }
+});
+
+test('Disconnect fences saved and fresh in-flight refreshes without resurrecting ciphertext or importing results', async () => {
+  for (const fresh of [false, true]) {
+    let block = false, entered, release;
+    const waiting = new Promise(resolve => {entered = resolve;});
+    const resumed = new Promise(resolve => {release = resolve;});
+    const t = setup({responseEdit: async (url, options, original) => {
+      if (block && (fresh ? url === AUTH : url.includes('/user/'))) {entered(); await resumed;}
+      return original;
+    }});
+    if (!fresh) {await remember(t); t.advance(60000);}
+    const start = fresh ? await t.engine.startMarketappAnalyticsRefresh(ctx, {period_days: 30, remember_login: true}) : null;
+    const count = snapshots(t); block = true;
+    const operation = fresh ? t.engine.finishMarketappAnalyticsRefresh(ctx, submission(start, t.now())) : t.engine.refreshSavedMarketappAnalytics(ctx, {period_days: 30});
+    const rejected = assertCode(operation, 'MARKETAPP_REFRESH_EXPIRED');
+    await waiting; assert.deepEqual(await t.engine.disconnectMarketappAnalyticsSession(ctx), {disconnected: true}); release(); await rejected;
+    assert.equal(sessionRow(t).ciphertext, null); assert.equal(snapshots(t), count);
+    assert.equal(sessionRow(t).generation, 1); t.database.close();
+  }
+});
+
+test('the snapshot INSERT atomically fences Disconnect after JavaScript validation', async () => {
+  const t = setup(); await remember(t); t.advance(60000); const count = snapshots(t);
+  const original = t.repository.importPersonalAnalyticsFenced;
+  t.repository.importPersonalAnalyticsFenced = async (...args) => {await t.engine.disconnectMarketappAnalyticsSession(ctx); return await original(...args);};
+  await assertCode(t.engine.refreshSavedMarketappAnalytics(ctx, {period_days: 365}), 'MARKETAPP_REFRESH_EXPIRED');
+  assert.equal(snapshots(t), count); assert.equal(sessionRow(t).ciphertext, null); t.database.close();
+});
+
+test('wallet changes and changes back invalidate remembered and pending proof bindings', async () => {
+  for (const fresh of [false, true]) {
+    const t = setup();
+    const start = fresh ? await t.engine.startMarketappAnalyticsRefresh(ctx, {period_days: 30, remember_login: true}) : null;
+    if (!fresh) {await remember(t); t.advance(60000);}
+    walletChange(t, `0:${'22'.repeat(32)}`); walletChange(t, wallet); const count = snapshots(t), requestCount = t.requests.length;
+    await assertCode(fresh ? t.engine.finishMarketappAnalyticsRefresh(ctx, submission(start, t.now()))
+      : t.engine.refreshSavedMarketappAnalytics(ctx, {period_days: 30}), fresh ? 'MARKETAPP_REFRESH_EXPIRED' : 'MARKETAPP_REFRESH_RECONNECT_REQUIRED');
+    assert.equal(snapshots(t), count); assert.equal(t.requests.length, requestCount);
+    if (!fresh) assert.equal(sessionRow(t).ciphertext, null); t.database.close();
+  }
+});
+
+test('Disconnect never resets the nonce counter; reconnect and rotations reserve new values', async () => {
+  const t = setup(); await remember(t); const first = sessionRow(t);
+  await t.engine.disconnectMarketappAnalyticsSession(ctx); await t.engine.disconnectMarketappAnalyticsSession(ctx);
+  assert.equal(sessionRow(t).nonce_counter, 1); assert.equal(sessionRow(t).generation, 2); t.advance(60000);
+  await remember(t); const next = sessionRow(t);
+  assert.equal(next.nonce_counter, 2); assert.equal(next.cookie_version, 2); assert.equal(next.generation, 2);
+  assert.notEqual(first.ciphertext.slice(2, 50), next.ciphertext.slice(2, 50)); t.database.close();
+});
+
+test('failed cookie CAS writes burn reserved nonces across Disconnect and wallet changes', async () => {
+  for (const change of ['disconnect', 'wallet']) {
+    const t = setup(), original = t.repository.storeMarketappSession;
+    let reservedEnvelope;
+    t.repository.storeMarketappSession = async (...args) => {
+      reservedEnvelope = args[2].ciphertext;
+      if (change === 'disconnect') await t.engine.disconnectMarketappAnalyticsSession(ctx);
+      else walletChange(t, `0:${'22'.repeat(32)}`);
+      return await original(...args);
+    };
+    await assertCode(remember(t), 'MARKETAPP_REFRESH_EXPIRED');
+    assert.equal(sessionRow(t).ciphertext, null); assert.equal(sessionRow(t).nonce_counter, 1); assert.equal(snapshots(t), 1);
+    t.repository.storeMarketappSession = original;
+    if (change === 'wallet') walletChange(t, wallet);
+    t.advance(60000); await remember(t);
+    assert.equal(sessionRow(t).nonce_counter, 2);
+    assert.notEqual(sessionRow(t).ciphertext.slice(2, 50), reservedEnvelope.slice(2, 50)); t.database.close();
+  }
+});
+
+test('parallel nonce reservations are durable and unique before any ciphertext is stored', async () => {
+  const t = setup(), sessionFence = await t.repository.marketappSessionFence('12345');
+  const values = await Promise.all(Array.from({length: 4}, () => t.repository.reserveMarketappSessionNonce('12345', sessionFence.generation)));
+  assert.deepEqual(values.sort((a, b) => a - b), [1, 2, 3, 4]);
+  assert.equal(sessionRow(t).nonce_counter, 4); assert.equal(sessionRow(t).ciphertext, null);
+  await remember(t); assert.equal(sessionRow(t).cookie_version, 5); t.database.close();
+});
+
+test('safe connection status is available without any refresh attempts and never returns ciphertext', async () => {
+  const t = setup(), statusEngine = createMarketappRefreshStatusEngine({repository: t.repository, ownerTelegramId: 12345,
+    clock: async () => t.now(), sessionStatus: context => t.engine.getMarketappAnalyticsSessionStatus(context)});
+  assert.deepEqual(await statusEngine.getMarketappAnalyticsRefreshStatus(ctx), {attempt: null, session: {remembered: false, expires_at: null}});
+  await remember(t); const result = await statusEngine.getMarketappAnalyticsRefreshStatus(ctx);
+  assert.equal(result.session.remembered, true); assert.equal(result.session.expires_at, new Date(sessionRow(t).expires_at).toISOString());
+  assert.deepEqual(Object.keys(result.session).sort(), ['expires_at', 'remembered']);
+  for (const value of ['ciphertext', authenticatedCookie, challenge, 'cookie_version']) assert.equal(JSON.stringify(result).includes(value), false);
+  t.database.close();
 });
 
 test('start binds an encrypted short-lived cookie to the owner, wallet, exact period and independent ID', async () => {
@@ -102,7 +356,8 @@ test('start binds an encrypted short-lived cookie to the owner, wallet, exact pe
   assert.equal(start.challenge, challenge); assert.match(start.session_envelope, /^[0-9a-f]+$/); assert.ok(start.session_envelope.length <= 16500);
   assert.equal(Date.parse(start.expires_at) - t.now(), 300000);
   const opened = t.box.open(start.session_envelope);
-  assert.deepEqual(opened, {version: 1, attempt_id: start.attempt_id, owner: '12345', wallet, period_days: 365, created_at: t.now(), expires_at: t.now() + 300000, cookie: anonymousCookie, challenge});
+  assert.deepEqual(opened, {version: 1, attempt_id: start.attempt_id, owner: '12345', wallet, period_days: 365, created_at: t.now(), expires_at: t.now() + 300000,
+    cookie: anonymousCookie, cookie_expires_at: null, challenge, remember_login: false, session_generation: 0, wallet_revision: 1, session_version: 0});
   const row = t.database.prepare('SELECT * FROM marketapp_login_attempts').get();
   assert.equal(row.state, 'issued');
   assert.deepEqual(audit(t), {version: 1, flow: 'analytics_refresh', state: 'awaiting_approval', stage: 'prepare', code: null,
@@ -137,6 +392,24 @@ test('a verified proof performs exactly three fixed requests then saves immutabl
     const newRow = rows.find(row => row.fingerprint === result.snapshot.fingerprint);
     assert.equal(await t.repository.importPersonalAnalytics(result.snapshot, newRow.raw_snapshot, newRow.imported_at), false);
     assert.equal(t.database.prepare('SELECT count(*) AS n FROM personal_rental_analytics').get().n, 2); t.database.close();
+  }
+});
+
+test('combined activity with rounded annual summary follows the same authorized immutable refresh flow', async () => {
+  for (const days of [30, 365]) {
+    const t = setup({combinedActivity: true}), before = await t.repository.read();
+    const start = await t.engine.startMarketappAnalyticsRefresh(ctx, {period_days: days});
+    const result = await t.engine.finishMarketappAnalyticsRefresh(ctx, submission(start, t.now()));
+    assert.equal(result.authenticated, true); assert.equal(result.analytics_refreshed, true);
+    assert.equal(result.snapshot.daily.length, days); assert.equal(result.snapshot.summary.rent_volume, '28');
+    assert.equal(result.snapshot.daily[0].rent_volume, '27.9804'); assert.equal(result.snapshot.summary.rentals, 4);
+    assert.equal(t.requests.length, 3); assert.deepEqual(await t.repository.read(), before);
+    const row = t.database.prepare('SELECT * FROM personal_rental_analytics WHERE fingerprint = ?').get(result.snapshot.fingerprint);
+    const raw = JSON.parse(row.raw_snapshot);
+    assert.ok(raw.charts.some(chart => chart.key === 'profile.rent.activity' && chart.spec_raw.includes('27.9804')));
+    assert.equal(raw.summary[0].value, '28'); assert.equal(audit(t).state, 'saved');
+    for (const value of [anonymousCookie, authenticatedCookie, challenge, 'synthetic-discarded-nonce', '<html>']) assert.equal(JSON.stringify(row).includes(value), false);
+    t.database.close();
   }
 });
 
@@ -342,7 +615,7 @@ test('deadline and wallet fences remain effective after a slow pre-import diagno
       const result = await record(...args);
       if (args[2].state === 'updating' && args[2].stage === 'save_snapshot') {
         if (mode === 'deadline') t.advance(90000);
-        else t.repository.records = async () => [{kind: 'settings', record: {wallet: `0:${'22'.repeat(32)}`}}];
+        else t.repository.analyticsWalletRecords = async () => [{kind: 'settings', record: {wallet: `0:${'22'.repeat(32)}`}}];
       }
       return result;
     };
@@ -355,9 +628,175 @@ test('deadline and wallet fences remain effective after a slow pre-import diagno
 
 test('snapshot storage failures retain bounded diagnostics without database error text', async () => {
   const t = setup(), start = await t.engine.startMarketappAnalyticsRefresh(ctx, {period_days: 30});
-  t.repository.importPersonalAnalytics = async () => {throw new Error('synthetic private database credential with 999 rent_volume');};
+  t.repository.importPersonalAnalyticsFenced = async () => {throw new Error('synthetic private database credential with 999 rent_volume');};
   await assertCode(t.engine.finishMarketappAnalyticsRefresh(ctx, submission(start, t.now())), 'MARKETAPP_REFRESH_FAILED');
   const failed = audit(t); assert.equal(failed.state, 'failed'); assert.equal(failed.stage, 'save_snapshot'); assert.equal(failed.authenticated, true); assert.equal(failed.analytics_refreshed, false);
   assert.match(failed.snapshot_fingerprint, /^[0-9a-f]{64}$/); assert.ok(!JSON.stringify(failed).includes('synthetic private'));
   assert.equal(t.database.prepare('SELECT count(*) AS n FROM personal_rental_analytics').get().n, 1); t.database.close();
+});
+
+test('startup validates its exact period before storage and never initiates wallet login', async () => {
+  const t = setup();
+  for (const input of [{}, null, {period_days: 90}, {period_days: '30'}, {period_days: 30, remember_login: true}, {period_days: 365, url: AUTH}])
+    await assertCode(t.engine.refreshStartupMarketappAnalytics(ctx, input), 'MARKETAPP_REFRESH_INVALID_INPUT');
+  assert.deepEqual(await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30}), {state: 'unavailable', period_days: 30, reason: 'no_login'});
+  assert.equal(t.requests.length, 0); assert.equal(t.database.prepare('SELECT count(*) AS n FROM marketapp_login_attempts').get().n, 0);
+  t.database.close();
+  const absent = setup({records: []});
+  assert.deepEqual(await absent.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 365}), {state: 'unavailable', period_days: 365, reason: 'wallet_missing'});
+  assert.equal(absent.requests.length, 0); absent.database.close();
+});
+
+test('startup refresh skips a fresh linked provider snapshot, then performs only one remembered GET at 15 minutes', async () => {
+  const t = setup(), first = await remember(t), attempts = t.database.prepare('SELECT count(*) AS n FROM marketapp_login_attempts').get().n;
+  const fresh = {state: 'fresh', period_days: 30, captured_at: first.snapshot.captured_at};
+  assert.deepEqual(await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30}), fresh);
+  t.advance(899999); assert.deepEqual(await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30}), fresh);
+  assert.equal(t.requests.length, 3); assert.equal(t.database.prepare('SELECT count(*) AS n FROM marketapp_login_attempts').get().n, attempts);
+  t.advance(1); const result = await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30});
+  assert.deepEqual(result, {state: 'saved', period_days: 30, captured_at: new Date(t.now()).toISOString()});
+  assert.equal(t.requests.length, 4); assert.equal(t.requests.at(-1).url, marketappAnalyticsUrl(wallet, 30));
+  assert.equal(t.requests.at(-1).options.method, 'GET'); assert.equal(t.requests.at(-1).options.headers.Cookie, authenticatedCookie);
+  assert.equal(t.requests.at(-1).options.headers.Authorization, undefined); assert.equal(t.requests.at(-1).options.body, undefined);
+  assert.deepEqual(await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30}), {...result, state: 'fresh'});
+  assert.equal(t.requests.length, 4); assert.equal(JSON.stringify(result).includes(authenticatedCookie), false); t.database.close();
+});
+
+test('startup freshness accepts final audits written after insertion using advancing database timestamps', async () => {
+  const t = setup(), first = await remember(t);
+  const row = t.database.prepare('SELECT attempt_id,outcome_json FROM marketapp_login_attempts WHERE attempt_id=?').get(first.attempt_id);
+  const outcome = JSON.parse(row.outcome_json); t.advance(12); outcome.observed_at = new Date(t.now()).toISOString();
+  t.database.prepare('UPDATE marketapp_login_attempts SET outcome_json=? WHERE attempt_id=?').run(JSON.stringify(outcome), row.attempt_id);
+  assert.deepEqual(await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30}), {state: 'fresh', period_days: 30, captured_at: first.snapshot.captured_at});
+  assert.equal(t.requests.length, 3); t.database.close();
+});
+
+test('startup freshness is period scoped and browser imports do not impersonate a successful provider refresh', async () => {
+  const t = setup(); await remember(t); t.advance(60000);
+  const page = syntheticAnalyticsPage({periodDays: 365, capturedAt: new Date(t.now()).toISOString()});
+  const raw = JSON.stringify(page.snapshot);
+  const snapshot = (await import('../tgcloud/lib/personal-analytics.js')).normalizePersonalAnalytics(raw, wallet);
+  await t.repository.importPersonalAnalytics(snapshot, raw, new Date(t.now()).toISOString());
+  const result = await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 365});
+  assert.equal(result.state, 'saved'); assert.equal(result.period_days, 365); assert.equal(t.requests.length, 4);
+  assert.equal(t.requests.at(-1).url, marketappAnalyticsUrl(wallet, 365));
+  assert.equal((await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30})).state, 'fresh'); assert.equal(t.requests.length, 4); t.database.close();
+});
+
+test('startup recovers a committed provider snapshot when its final success audit was lost', async () => {
+  const t = setup(); await remember(t); t.advance(900000);
+  const record = t.repository.recordMarketappRefreshOutcome;
+  t.repository.recordMarketappRefreshOutcome = async (...args) => args[2].state === 'saved' ? false : record(...args);
+  const first = await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 365}); assert.equal(first.state, 'saved');
+  assert.equal(audit(t).state, 'updating'); assert.equal(audit(t).stage, 'save_snapshot');
+  t.advance(10); assert.deepEqual(await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 365}), {...first, state: 'fresh'});
+  assert.equal(t.requests.length, 4); t.database.close();
+});
+
+test('failed startup refreshes retain saved data and receive durable 15-minute reopen backoff', async () => {
+  let failing = false;
+  const t = setup({responseEdit: (url, options, original) => {if (failing && url.includes('/user/')) throw new Error('private synthetic cookie and financial values'); return original;}});
+  await remember(t); t.advance(900000); const count = snapshots(t), failedAt = t.now(); failing = true;
+  assert.deepEqual(await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30}), {state: 'unavailable', period_days: 30, reason: 'refresh_failed'});
+  assert.equal(snapshots(t), count); assert.equal(t.requests.length, 4); assert.equal((await t.engine.getMarketappAnalyticsSessionStatus(ctx)).remembered, true);
+  t.advance(300000);
+  assert.deepEqual(await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30}), {state: 'limited', period_days: 30, reason: 'cooldown', retry_at: new Date(failedAt + 900000).toISOString()});
+  assert.equal(t.requests.length, 4); failing = false; t.advance(600000);
+  assert.equal((await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30})).state, 'saved'); assert.equal(t.requests.length, 5); t.database.close();
+});
+
+test('startup reservation crash gap retains its 15-minute backoff after the unfinished attempt expires', async () => {
+  const t = setup(); await remember(t); t.advance(900000);
+  const created = t.now(), expires = created + 300000;
+  assert.equal(await t.repository.reserveMarketappLoginAttempt({id: 'cd'.repeat(32), owner: '12345', wallet, created, expires}, {cooldown_ms: 60000, hourly_attempts: 5}), true);
+  t.advance(300001);
+  assert.deepEqual(await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30}), {state: 'limited', period_days: 30, reason: 'cooldown', retry_at: new Date(created + 900000).toISOString()});
+  assert.equal(t.requests.length, 3); t.advance(599999);
+  assert.equal((await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30})).state, 'saved'); assert.equal(t.requests.length, 4); t.database.close();
+});
+
+test('startup keeps pending manual wallet approval and a busy personal-gifts lease intact without HTTP', async () => {
+  const t = setup(); await remember(t); t.advance(900000);
+  const pending = await t.engine.startMarketappAnalyticsRefresh(ctx, {period_days: 365}); const before = t.requests.length;
+  const busy = await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30});
+  assert.equal(busy.state, 'busy'); assert.equal(busy.reason, 'active_refresh'); assert.equal(t.requests.length, before);
+  assert.equal((await t.repository.marketappLoginAttempt(pending.attempt_id, '12345')).state, 'issued');
+  await t.engine.cancelMarketappAnalyticsRefresh(ctx, {attempt_id: pending.attempt_id}); t.advance(900000);
+  const lease = await t.repository.acquireMarketappWebsiteLease('12345', 'personal-gifts', t.now());
+  assert.deepEqual(await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30}), {state: 'busy', period_days: 30, reason: 'website_busy'});
+  assert.equal(t.requests.length, before); assert.equal(t.database.prepare("SELECT lease_id FROM marketapp_website_gates WHERE scope_key='private:12345'").get().lease_id, lease.id);
+  await t.repository.releaseMarketappWebsiteLease('12345', lease); t.database.close();
+});
+
+test('two concurrent startup instances issue a single provider GET and the next open sees the saved snapshot', async () => {
+  let block = false, entered, release;
+  const waiting = new Promise(resolve => {entered = resolve;}), resumed = new Promise(resolve => {release = resolve;});
+  const t = setup({responseEdit: async (url, options, original) => {if (block && url.includes('/user/')) {entered(); await resumed;} return original;}});
+  await remember(t); t.advance(900000); block = true;
+  const second = createMarketappAnalyticsRefreshEngine({repository: t.repository, fetch: t.request, ownerTelegramId: 12345,
+    clock: async () => t.now(), sessionBox: t.box, rememberedSessionBox: t.rememberedSessionBox});
+  const first = t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30}); await waiting;
+  assert.equal((await second.refreshStartupMarketappAnalytics(ctx, {period_days: 30})).state, 'busy'); assert.equal(t.requests.length, 4);
+  release(); const result = await first; assert.equal(result.state, 'saved');
+  assert.deepEqual(await second.refreshStartupMarketappAnalytics(ctx, {period_days: 30}), {...result, state: 'fresh'}); assert.equal(t.requests.length, 4); t.database.close();
+});
+
+test('startup preserves the original rolling five-attempt allowance and honors provider Retry-After', async () => {
+  let throttle = false;
+  const t = setup({responseEdit: (url, options, original) => throttle && url.includes('/user/') ? response(url, 'private throttle text', {'Content-Type': 'text/html', 'Retry-After': '3600'}, {status: 429}) : original});
+  await remember(t);
+  for (let i = 0; i < 4; i++) {t.advance(60000); await t.engine.refreshSavedMarketappAnalytics(ctx, {period_days: i % 2 ? 365 : 30});}
+  t.advance(900000); const before = t.requests.length;
+  const limited = await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30});
+  assert.equal(limited.state, 'limited'); assert.equal(limited.reason, 'request_limit'); assert.equal(t.requests.length, before);
+  t.advance(3600000); throttle = true; const throttleAt = t.now();
+  assert.deepEqual(await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30}), {state: 'limited', period_days: 30, reason: 'cooldown', retry_at: new Date(throttleAt + 3600000).toISOString()});
+  assert.equal(t.requests.length, before + 1); t.advance(900000);
+  const retry = await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30}); assert.equal(retry.state, 'limited');
+  assert.equal(retry.retry_at, new Date(throttleAt + 3600000).toISOString()); assert.equal(t.requests.length, before + 1); t.database.close();
+});
+
+test('expired and rejected startup logins return a safe no-login result without prompting or deleting analytics', async () => {
+  for (const failure of ['expired', 'rejected']) {
+    let rejected = false;
+    const t = setup({responseEdit: (url, options, original) => rejected && url.includes('/user/') ? {...original, status: 401} : original});
+    await remember(t); const count = snapshots(t);
+    t.advance(failure === 'expired' ? 7 * 86400000 : 900000); rejected = failure === 'rejected';
+    assert.deepEqual(await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30}), {state: 'unavailable', period_days: 30, reason: 'no_login'});
+    assert.equal(t.requests.length, failure === 'expired' ? 3 : 4); assert.equal(snapshots(t), count);
+    assert.equal(sessionRow(t).ciphertext, null); t.database.close();
+  }
+});
+
+test('Disconnect during startup fetch fences insertion and returns a safe result with previous analytics retained', async () => {
+  let block = false, entered, release;
+  const waiting = new Promise(resolve => {entered = resolve;}), resumed = new Promise(resolve => {release = resolve;});
+  const t = setup({responseEdit: async (url, options, original) => {if (block && url.includes('/user/')) {entered(); await resumed;} return original;}});
+  await remember(t); t.advance(900000); const count = snapshots(t); block = true;
+  const first = t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 365}); await waiting;
+  await t.engine.disconnectMarketappAnalyticsSession(ctx); release();
+  assert.deepEqual(await first, {state: 'unavailable', period_days: 365, reason: 'no_login'});
+  assert.equal(snapshots(t), count); assert.equal(sessionRow(t).ciphertext, null); assert.equal(t.requests.length, 4); t.database.close();
+});
+
+test('startup never treats a missing linked snapshot or future capture as fresh success', async () => {
+  for (const mode of ['missing', 'future', 'wrong_state']) {
+    const t = setup(), first = await remember(t); t.advance(900000);
+    if (mode === 'missing') t.database.prepare('DELETE FROM personal_rental_analytics WHERE fingerprint=?').run(first.snapshot.fingerprint);
+    else if (mode === 'future') t.database.prepare('UPDATE personal_rental_analytics SET captured_at=? WHERE fingerprint=?').run(new Date(t.now() + 60000).toISOString(), first.snapshot.fingerprint);
+    else t.database.prepare("UPDATE marketapp_login_attempts SET state='cancelled' WHERE attempt_id=?").run(first.attempt_id);
+    assert.equal((await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 30})).state, 'saved');
+    assert.equal(t.requests.length, 4); t.database.close();
+  }
+});
+
+test('startup respects the shared website daily allowance without any provider request', async () => {
+  const t = setup(); await remember(t); t.advance(900000);
+  const attempted = t.now() - 5000;
+  const insert = t.database.prepare('INSERT INTO marketapp_website_requests VALUES(?,?,?)');
+  for (let i = 0; i < 100; i++) insert.run(`synthetic-daily-${i}`, 'private:12345', attempted);
+  const result = await t.engine.refreshStartupMarketappAnalytics(ctx, {period_days: 365});
+  assert.equal(result.state, 'limited'); assert.equal(result.retry_at, new Date(attempted + 86400000).toISOString());
+  assert.equal(t.requests.length, 3); assert.equal(snapshots(t), 2);
+  assert.equal(t.database.prepare("SELECT lease_id FROM marketapp_website_gates WHERE scope_key='private:12345'").get().lease_id, null); t.database.close();
 });

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
 import ipaddress
 import json
+import heapq
 from pathlib import Path
 import re
 from typing import Any
@@ -14,11 +15,13 @@ from urllib.parse import urlsplit
 
 from .addresses import address_key, canonical_address, preferred_address
 from .discovery_store import DiscoveryStore
-from .storage import Store
+from .storage import Store, ProjectionContext
 from .pricing import enrich_pricing
 from .rental_counts import enrich_rental_counts
-from .ton_decoder import decode_contract
+from .price_tracking import enrich_price_tracking
+from .ton_decoder import CONTRACT_VARIANTS, MARKETAPP_OPERATOR, STORAGE_LAYOUT_VERSION, decode_contract
 from .util import utc_now
+from .monetary import bounded_decimal, decimal_text
 
 _STATES = {"held_directly", "idle_rental_contract", "rented", "expired_pending_return", "unknown", "uncertain"}
 _EXCLUDED = {"different_holder_or_beneficiary", "outside_supported_catalog"}
@@ -47,14 +50,14 @@ def _decimal(value: Any, *, nanos: bool = False) -> str | None:
     if isinstance(value, bool) or value is None or value == "":
         return None
     try:
-        number = Decimal(str(value))
-        if not number.is_finite() or number < 0:
+        number = bounded_decimal(value)
+        if number < 0:
             return None
         with localcontext() as context:
             context.prec = max(40, len(number.as_tuple().digits) + 12)
             if nanos:
                 number /= Decimal(1_000_000_000)
-            return format(number, "f")
+            return decimal_text(number)
     except (InvalidOperation, ValueError):
         return None
 
@@ -171,6 +174,59 @@ def _expiry(value: Any) -> tuple[str | None, str | None]:
         return datetime.fromtimestamp(int(value), timezone.utc).isoformat(), str(int(value))
     except (ValueError, TypeError, OverflowError, OSError):
         return None, None
+
+
+def _current_rental_start(row: dict, *, wallet: str | None, nft: str, collection: str | None,
+                          state: str, method: str) -> str | None:
+    """Pinned role-1 contracts preserve expiry minus accumulated duration on extension."""
+    if method not in {"automatic", "validated_supplemental_evidence"} or row.get("verified") is not True:
+        return None
+    if state not in {"rented", "expired_pending_return"} or row.get("rental_state") != state:
+        return None
+    code_hash = row.get("code_hash")
+    if not isinstance(code_hash, str) or code_hash not in CONTRACT_VARIANTS or (
+        row.get("contract_variant") != CONTRACT_VARIANTS[code_hash]
+        or row.get("storage_layout_version") != STORAGE_LAYOUT_VERSION
+        or not _text(row.get("decoder_version"))
+        or row.get("code_hash_verified") is not True or row.get("data_hash_verified") is not True
+        or not isinstance(row.get("data_hash"), str) or not re.fullmatch(r"[0-9a-f]{64}", row["data_hash"])
+    ):
+        return None
+    try:
+        if (canonical_address(row.get("wallet_address")) != canonical_address(wallet)
+            or canonical_address(row.get("owner")) != canonical_address(wallet)
+            or canonical_address(row.get("nft_address")) != canonical_address(nft)
+            or canonical_address(row.get("nft")) != canonical_address(nft)
+            or canonical_address(row.get("collection_address")) != canonical_address(collection)
+            or canonical_address(row.get("marketplace")) != MARKETAPP_OPERATOR):
+            return None
+        for field in ("holding_contract", "renter", "counterpart"):
+            canonical_address(row.get(field))
+    except ValueError:
+        return None
+    if any(type(row.get(field)) is not int or row[field] != 1 for field in ("role", "status")):
+        return None
+    duration, expiry = row.get("rental_duration"), row.get("rental_until")
+    if (type(duration) is not int or not 0 < duration <= 4294967295
+        or type(expiry) is not int or not 0 < expiry <= 253402300799
+        or row.get("rental_duration_unit") != "seconds" or row.get("rental_until_unit") != "Unix seconds"):
+        return None
+    started = expiry - duration
+    observed = _instant(row.get("observed_at"))
+    contract = _instant(row.get("contract_observed_at"))
+    rechecked = _instant(row.get("nft_rechecked_at"))
+    if started <= 0 or observed is None or contract is None or rechecked is None or not contract <= rechecked <= observed or started > observed.timestamp():
+        return None
+    for field in ("nft_last_transaction_lt", "account_last_transaction_lt"):
+        value = row.get(field)
+        if not isinstance(value, str) or not re.fullmatch(r"(?:0|[1-9][0-9]{0,19})", value) or int(value) > 18446744073709551615:
+            return None
+    created = row.get("created_at")
+    if "created_at" in row and (type(created) is not int or created != started):
+        return None
+    if "created_at_unit" in row and row["created_at_unit"] != "Unix seconds":
+        return None
+    return datetime.fromtimestamp(started, timezone.utc).isoformat()
 
 
 def _metadata(store: Store) -> dict[str, dict]:
@@ -294,6 +350,9 @@ def _supplement(directory: Path | None, wallet: str | None) -> tuple[dict[str, d
             raise ValueError("Supplemental contract data did not verify")
         return {nft: {**decoded, "observed_at": after["observed_at"], "wallet_address": wallet,
                       "collection_address": canonical_address(last["collection_address"]),
+                      "nft_last_transaction_lt": str(last["last_transaction_lt"]),
+                      "nft_rechecked_at": after["observed_at"], "contract_observed_at": account["observed_at"],
+                      "rental_duration_unit": "seconds", "rental_until_unit": "Unix seconds",
                       "nft_address": nft, "supplemental_source": "evidence/live-recheck"}}, []
     except (OSError, ValueError, KeyError, TypeError, StopIteration) as exc:
         return {}, [f"Supplemental evidence was not verified: {str(exc)[:160]}"]
@@ -312,6 +371,8 @@ def _run_summary(run: dict, kind: str, checkpoints: list[dict] | None = None) ->
 
 def build_dashboard(store: Store, wallet: str | None = None, review_path: Path | None = None, *, pricing_source="listings", timeframe="30d", date_from=None, date_to=None, pricing_backdrop=None, owned_price_observations=()) -> dict:
     """Build a JSON-safe projection without network access, DB writes, or enrollment."""
+    store = ProjectionContext(store)
+    owned_price_observations = tuple(owned_price_observations)
     discovery = DiscoveryStore(store)
     discovery_runs = discovery.runs()
     wallet = canonical_address(wallet) if wallet else (discovery_runs[-1]["wallet_address"] if discovery_runs else None)
@@ -436,6 +497,8 @@ def build_dashboard(store: Store, wallet: str | None = None, review_path: Path |
             else:
                 uncertainties.append("The displayed price predates newer evidence and is retained as a historical observation")
         expiry, expiry_raw = _expiry(chosen.get("rental_until") or chosen.get("rental_until_unix_seconds"))
+        rental_started = None if not is_portfolio or collection_conflict else _current_rental_start(
+            chosen, wallet=wallet, nft=nft, collection=collection, state=state, method=method)
         sources = list(member.get("membership_sources", []))
         if review_linked:
             sources.append("local_review")
@@ -462,6 +525,9 @@ def build_dashboard(store: Store, wallet: str | None = None, review_path: Path |
             "verification_method": method, "proof_badges": list(dict.fromkeys(proof)),
             **price_evidence, "price_unit": "GRAM" if price_evidence["price_per_day"] is not None else None,
             "rental_until": expiry, "rental_until_unix_seconds": expiry_raw,
+            "current_rental_started_at": rental_started,
+            "current_rental_start_source": "verified_contract" if rental_started else None,
+            **({"status_is_historical": False} if rental_started else {}),
             "observed_at": chosen.get("observed_at"), "market_observed_at": market_observed_at,
             "last_listing_observed_at": listing.get("observed_at"), "explorer_url": explorer,
             "review_stale": bool(annotation and not review_current),
@@ -474,6 +540,7 @@ def build_dashboard(store: Store, wallet: str | None = None, review_path: Path |
         })
     gifts.sort(key=lambda row: (not row["is_portfolio"], row["name"].casefold(), row["id"]))
     enrich_rental_counts(store, gifts)
+    enrich_price_tracking(store, gifts, wallet, owned_price_observations=owned_price_observations)
     pricing_summary = enrich_pricing(store, gifts, wallet, source=pricing_source, timeframe=timeframe, date_from=date_from, date_to=date_to, backdrop=pricing_backdrop)
     portfolio = [gift for gift in gifts if gift["is_portfolio"]]
     summary = {"portfolio_count": len(portfolio), "automatic_count": sum(gift["automatic_membership"] for gift in portfolio),
@@ -496,15 +563,29 @@ def build_dashboard(store: Store, wallet: str | None = None, review_path: Path |
                              "name": named[key]["name"], "nft_address": key, "state": observation.get("rental_state"),
                              "observed_at": observation.get("observed_at"), "source": "TON Center",
                              "verified": observation.get("verified"), "reason": _text(observation.get("reason"))})
-    for observation in store.observations("history"):
-        data = observation["data"]
+    # Keep only the newest 100 candidates before constructing their strings.
+    # nlargest retains the former stable ordering for equal/invalid dates.
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+    portfolio_keys = {key for key, gift in named.items() if gift["is_portfolio"]}
+    def activity_candidates():
+        for row in activity:
+            yield (_instant(row.get("observed_at")) or oldest, "ownership", row)
+        for observation in store.observations("history", identities=portfolio_keys):
+            key = address_key(observation["data"].get("nft_address"))
+            if key in portfolio_keys:
+                yield (_instant(observation.get("observed_at")) or oldest, "history", observation)
+    newest = heapq.nlargest(100, activity_candidates(), key=lambda item: item[0])
+    activity = []
+    for _, kind, row in newest:
+        if kind == "ownership":
+            activity.append(row)
+            continue
+        data = row["data"]
         key = address_key(data.get("nft_address"))
-        if key in named and named[key]["is_portfolio"]:
-            activity.append({"id": f"history-{observation['id']}", "type": "portfolio_gift_history", "title": "Portfolio gift history",
-                             "name": named[key]["name"], "nft_address": key, "observed_at": observation["observed_at"],
-                             "source": "Marketapp", "price": _decimal(data.get("price")), "currency": _text(data.get("currency")),
-                             "note": "Gift history does not establish proceeds received by this wallet"})
-    activity.sort(key=lambda row: _instant(row.get("observed_at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        activity.append({"id": f"history-{row['id']}", "type": "portfolio_gift_history", "title": "Portfolio gift history",
+                         "name": named[key]["name"], "nft_address": key, "observed_at": row["observed_at"],
+                         "source": "Marketapp", "price": _decimal(data.get("price")), "currency": _text(data.get("currency")),
+                         "note": "Gift history does not establish proceeds received by this wallet"})
     latest_discovery = runs["discovery"][-1] if runs["discovery"] else None
     return {"wallet": wallet, "generated_at": utc_now(), "summary": summary, "gifts": gifts, "pricing": pricing_summary, "activity": activity[:100], "runs": runs,
             "coverage": {"latest_discovery": latest_discovery, "latest_market": runs["market"][-1] if runs["market"] else None,

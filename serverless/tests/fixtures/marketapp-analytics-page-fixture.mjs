@@ -9,7 +9,7 @@ export function syntheticFriendly(address = syntheticWallet, tag = 0x11) {
 }
 export const htmlAttribute = value => value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 export function syntheticAnalyticsPage({periodDays = 30, wallet = syntheticWallet, identity = wallet,
-  lastDate = '2026-10-09', capturedAt = '2026-10-09T12:00:00Z', optionalCharts = true, durationHistogram = true} = {}) {
+  lastDate = '2026-10-09', capturedAt = '2026-10-09T12:00:00Z', optionalCharts = true, durationHistogram = true, combinedActivity = false} = {}) {
   const dates = Array.from({length: periodDays}, (_, index) => new Date(Date.parse(lastDate + 'T00:00:00Z') - (periodDays - 1 - index) * 86400000).toISOString().slice(0, 10));
   const numbers = Array.from({length: periodDays}, (_, index) => index === 0 ? 3 : 0);
   const chart = (key, series, unit) => ({key, spec_raw: JSON.stringify({categories: null, gran: 'day', kind: 'column', series, stacking: null, unit, x: dates})});
@@ -21,7 +21,12 @@ export function syntheticAnalyticsPage({periodDays = 30, wallet = syntheticWalle
     {label: 'Extensions', value: '25%', foot: '', definition: ''},
     {label: 'Spent on rent', value: '0', foot: '0 rentals', definition: ''},
   ];
-  const charts = [
+  const charts = combinedActivity ? [{key: 'profile.rent.activity', spec_raw: JSON.stringify({categories: null, combo: true, gran: 'day',
+    kind: 'column', stacking: 'normal', unit: '', x: dates, series: [
+      {axis: 0, color: 1, name: 'New rentals', type: 'column', unit: '', data: numbers},
+      {axis: 0, color: 2, name: 'Extensions', type: 'column', unit: '', data: numbers.map((_, index) => index === 0 ? 1 : 0)},
+      {axis: 1, color: 9, name: 'Rent volume', opacity: 0.85, type: 'line', unit: 'GRAM', data: numbers},
+    ]})}] : [
     chart('profile.rent.income', [{name: 'Rent volume', data: numbers}], 'GRAM'),
     chart('profile.rent.rentals', [{name: 'New rentals', data: numbers}, {name: 'Extensions', data: numbers.map((_, index) => index === 0 ? 1 : 0)}], ''),
   ];

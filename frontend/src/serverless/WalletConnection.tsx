@@ -1,12 +1,14 @@
 import { useEffect, useId, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useTonConnectUI, useTonWallet } from '@tonconnect/ui-react';
 import { Icon } from '../Icons';
 import { observeWalletRestoration, shortWalletAddress, walletBinding } from './walletIdentity';
 import './walletConnection.css';
 
-export function WalletConnection({ savedWallet, dashboardReady = true }: {
+export function WalletConnection({ savedWallet, dashboardReady = true, activityTarget }: {
   savedWallet: string | null;
   dashboardReady?: boolean;
+  activityTarget?: HTMLElement | null;
 }) {
   const wallet = useTonWallet();
   const [tonConnectUI] = useTonConnectUI();
@@ -60,6 +62,21 @@ export function WalletConnection({ savedWallet, dashboardReady = true }: {
       setExpanded(true);
     } finally { pendingRef.current = false; setPending(null); }
   }
+
+  if (activityTarget) return createPortal(<div className="activity-connection-row wallet-activity" ref={rootRef}>
+    <div className="activity-connection-heading"><Icon name="wallet" size={20} /><h3>Wallet</h3><span className={`connection-status${warning ? ' warning' : ''}`}>{!restored ? 'Checking…' : hasSession ? warning ? 'Needs attention' : 'Connected' : 'Not connected'}</span></div>
+    <p className="activity-connection-note">Your gift portfolio.</p>
+    {(binding.address || savedWallet || hasSession) && <code className="activity-wallet-address" title={binding.address || savedWallet || undefined}>{binding.address ? shortWalletAddress(binding.address) : savedWallet ? <>Saved: {shortWalletAddress(savedWallet)}</> : 'Address unavailable'}</code>}
+    {binding.state === 'different_wallet' && <p className="wallet-connection-warning" role="status">This wallet differs from your saved portfolio. Connecting does not change your saved gifts.</p>}
+    {(binding.state === 'unsupported_network' || binding.state === 'invalid_address') && <p className="wallet-connection-warning" role="status">{binding.state === 'unsupported_network' ? 'Switch your wallet to TON mainnet, then reconnect.' : 'The wallet address could not be checked. Disconnect and reconnect.'}</p>}
+    {error && <p role="alert" className="wallet-connection-warning">{error}</p>}
+    <button type="button" className="button secondary small" disabled={!restored || pending !== null} onClick={() => { void act(hasSession ? 'disconnect' : 'connect'); }}>{pending === 'disconnect' ? 'Disconnecting…' : pending === 'connect' ? 'Opening wallet…' : hasSession ? 'Disconnect wallet' : 'Connect wallet'}</button>
+    <details className="activity-access-details"><summary>Addresses & access</summary>
+      {binding.address && <div className="wallet-connection-address"><span>Connected wallet</span><code>{binding.address}</code></div>}
+      {savedWallet && binding.address !== savedWallet && <div className="wallet-connection-address"><span>Saved portfolio</span><code>{savedWallet}</code></div>}
+      <p className="wallet-connection-note">Read-only access approved in your wallet. Connecting does not switch portfolios. Disconnecting keeps saved gifts and price updates.</p>
+    </details>
+  </div>, activityTarget);
 
   return <div className={`wallet-connection${warning ? ' has-warning' : ''}`} ref={rootRef}>
     <div className="wallet-connection-controls">

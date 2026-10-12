@@ -1,3 +1,5 @@
+import type { ActivityComparisonEvidence } from './activityFreshness.ts';
+
 export type JobKind = 'refresh' | 'discover' | 'collect' | 'prices' | 'rental_prices';
 export type JobState = 'queued' | 'running' | 'partial' | 'complete' | 'failed';
 
@@ -55,6 +57,53 @@ export interface GiftRentalHistory {
   excluded_counts: Record<string, number>;
 }
 
+export interface PriceTrackingPeriod {
+  window_from: string;
+  window_to: string;
+  recorded_rentals: number | null;
+  recorded_volume: string | null;
+  average_daily_rate: string | null;
+  rental_days: string | null;
+  excluded_counts: Record<string, number>;
+  coverage: 'observed_sample';
+}
+
+export interface PriceTrackingComparison {
+  days: 7 | 14 | 30;
+  /** Ready describes elapsed time. History coverage remains an observed sample. */
+  status: 'pending' | 'partial' | 'ready';
+  comparable_days: string;
+  before: PriceTrackingPeriod;
+  after: PriceTrackingPeriod;
+}
+
+export interface ObservedPriceChange {
+  id: string;
+  observed_at: string;
+  previous_observed_at: string;
+  from_price_per_day: string;
+  to_price_per_day: string;
+  delta_per_day: string;
+  percent_change: string | null;
+  comparisons: PriceTrackingComparison[];
+}
+
+export interface GiftPriceTrackingData {
+  version: 1;
+  semantics_version: 'observed-price-performance-v1';
+  source: 'TON contract' | 'Marketapp listing' | 'Marketapp account' | null;
+  unit: 'GRAM/day';
+  observation_count: number;
+  change_count: number;
+  last_observed_at: string | null;
+  baseline_price_per_day: string | null;
+  baseline_observed_at: string | null;
+  coverage: 'observed_sample' | 'no_observations';
+  /** Newest first; the projection includes up to five changes. */
+  changes: ObservedPriceChange[];
+  warnings: string[];
+}
+
 export interface Gift {
   id: string;
   nft_address: string;
@@ -76,6 +125,8 @@ export interface Gift {
   price_source: string | null;
   price_observed_at?: string | null;
   price_is_historical?: boolean;
+  /** Last attempted targeted price check; it is not a successful price observation. */
+  price_checked_at?: string | null;
   model?: string | null;
   backdrop?: string | null;
   traits_source?: string | null;
@@ -83,8 +134,20 @@ export interface Gift {
   trait_uncertainties?: string[];
   pricing?: GiftPricing | null;
   rental_history?: GiftRentalHistory;
+  price_tracking?: GiftPriceTrackingData;
   rental_until: string | number | null;
   rental_until_unix_seconds?: number | string | null;
+  current_rental_started_at?: string | null;
+  current_rental_start_source?: 'verified_contract' | null;
+  last_verified_rental_started_at?: string | null;
+  last_verified_rental_start_source?: 'verified_contract' | null;
+  /** Rounded Marketapp label; display evidence, never an exact expiry. */
+  rental_remaining_display?: string | null;
+  rental_remaining_observed_at?: string | null;
+  status_is_historical?: boolean;
+  status_checked_at?: string | null;
+  status_observed_at?: string | null;
+  collection_conflict?: boolean;
   review_stale?: boolean;
   review_source_filename?: string | null;
   reviewed_at?: string | null;
@@ -113,9 +176,20 @@ export interface DashboardSummary {
 }
 
 export interface Capabilities {
+  /** Public account incarnation, required for mutating refresh requests. */
+  account_generation?: number;
+  /** Public accounts are enabled only by this deployment's backend. */
+  public_account?: boolean;
   marketapp_login_test?: boolean;
   marketapp_analytics_refresh?: boolean;
+  /** Telegram-only, bounded automatic comparison checks using the account API key. */
+  startup_comparison_refresh?: boolean;
   owned_price_refresh?: boolean;
+  /** Telegram personal-gift refresh can use a retained wallet without a current wallet approval. */
+  personal_gift_refresh?: boolean;
+  /** Telegram-only, account-authorized one-gift TON price/status checks. */
+  owned_price_refresh_single?: boolean;
+  owned_status_refresh?: boolean;
   hosting?: 'local' | 'serverless';
   supported_jobs?: JobKind[];
   ownership_note?: string;
@@ -131,6 +205,9 @@ export interface Capabilities {
     requests_per_second: number;
     used_24h: number;
     remaining_24h: number;
+    resets_at?: string | null;
+    available_at?: string | null;
+    provider_allowance_blocked?: boolean;
   };
 }
 
@@ -164,6 +241,8 @@ export interface PersonalRentalAnalytics {
 }
 
 export interface Dashboard {
+  /** Revision of the committed snapshot and time-dependent calculation window. */
+  update_token?: string;
   wallet: string | null;
   generated_at: string;
   summary: DashboardSummary;
@@ -174,12 +253,15 @@ export interface Dashboard {
   review: DataRecord[] | DataRecord;
   capabilities: Capabilities;
   pricing?: DataRecord;
+  /** Saved per-source update coverage; independent of dashboard generation time. */
+  data_freshness?: ActivityComparisonEvidence;
   personal_analytics?: PersonalRentalAnalytics | null;
   personal_analytics_snapshots?: PersonalRentalAnalytics[];
 }
 
 export interface Job {
   id: number;
+  account_generation?: number;
   kind: JobKind;
   state: JobState;
   created_at: string;
@@ -230,9 +312,17 @@ export interface Job {
 
 export interface JobStartOptions { forceRefresh?: boolean }
 
+export interface ComparisonStartupResult {
+  state: 'started' | 'fresh' | 'busy' | 'limited' | 'unavailable';
+  job?: Job;
+  retry_at?: string;
+  reason?: 'active_job' | 'provider_wait' | 'cooldown' | 'daily_limit' | 'provider_limit'
+    | 'key_missing' | 'portfolio_missing' | 'wallet_missing' | 'stopped' | 'failed';
+}
+
 export interface MarketappSettingsStatus {
   configured: boolean;
-  source: 'environment' | 'secure_store' | 'session' | 'none';
+  source: 'environment' | 'secure_store' | 'session' | 'none' | 'serverless_private' | 'encrypted_backend';
   persistent_storage_available: boolean;
   network_enabled: boolean;
   can_manage: boolean;
@@ -292,10 +382,26 @@ export interface MarketappAnalyticsRefreshStatus {
     updated_at: string;
     error_code?: string;
   } | null;
+  session?: MarketappAnalyticsRememberedSession;
+}
+export interface MarketappAnalyticsRememberedSession {
+  remembered: boolean;
+  expires_at: string | null;
+}
+export interface MarketappAnalyticsStartupResult {
+  state: 'saved' | 'fresh' | 'unavailable' | 'busy' | 'limited';
+  period_days: MarketappAnalyticsPeriod;
+  captured_at?: string;
+  retry_at?: string;
+  reason?: 'no_login' | 'wallet_missing' | 'refresh_failed' | 'active_refresh' | 'website_busy' | 'cooldown' | 'request_limit';
 }
 export interface MarketappAnalyticsRefreshAdapter {
   getStatus?(signal?: AbortSignal): Promise<MarketappAnalyticsRefreshStatus>;
-  start(periodDays: MarketappAnalyticsPeriod, signal?: AbortSignal): Promise<MarketappAnalyticsRefreshChallenge>;
+  /** Silent, bounded refresh using an already remembered login; never opens a wallet. */
+  refreshStartup?(periodDays: MarketappAnalyticsPeriod, signal?: AbortSignal): Promise<MarketappAnalyticsStartupResult>;
+  start(periodDays: MarketappAnalyticsPeriod, signal?: AbortSignal, rememberLogin?: boolean): Promise<MarketappAnalyticsRefreshChallenge>;
+  refreshSaved?(periodDays: MarketappAnalyticsPeriod, signal?: AbortSignal): Promise<MarketappAnalyticsRefreshResult>;
+  disconnectSession?(signal?: AbortSignal): Promise<{ disconnected: true }>;
   finish(challenge: MarketappAnalyticsRefreshChallenge, account: MarketappLoginAccount & { walletStateInit: string; publicKey: string }, proof: MarketappLoginProof, device: MarketappWalletDevice, signal?: AbortSignal): Promise<MarketappAnalyticsRefreshResult>;
   cancel(attemptId: string, signal?: AbortSignal): Promise<void>;
 }
@@ -315,9 +421,14 @@ export interface MarketappLoginTestAdapter {
 
 export interface DashboardAdapter {
   readonly mode?: 'local' | 'serverless';
+  /** Telegram-only storage monitoring and resumable lossless maintenance. */
+  readonly storageMaintenance?: import('./storageMonitoring.ts').StorageMaintenanceAdapter;
+  readonly publicAccount?: import('../serverless/publicAccount.ts').PublicAccountAdapter;
   readonly marketappSettings?: MarketappSettingsAdapter;
   readonly marketappLoginTest?: MarketappLoginTestAdapter;
   readonly marketappAnalyticsRefresh?: MarketappAnalyticsRefreshAdapter;
+  /** One silent startup mutation; started jobs use the smaller automatic batch budget. */
+  startupComparisonRefresh?(selection: PricingSelection, signal?: AbortSignal): Promise<ComparisonStartupResult>;
   readonly personalAnalytics?: {
     importSnapshot(raw: string, csrf: string): Promise<PersonalRentalAnalytics>;
   };
@@ -326,9 +437,10 @@ export interface DashboardAdapter {
   subscribe?(listener: (event: { job?: Job; error?: string; savedDataChanged?: boolean }) => void): () => void;
   exportCsv?(dashboard: Dashboard, selection: PricingSelection): void;
   getDashboard(selection: PricingSelection, signal?: AbortSignal): Promise<Dashboard>;
+  getUpdateToken?(signal?: AbortSignal): Promise<string>;
   getJobs(signal?: AbortSignal): Promise<Job[]>;
   startJob(kind: JobKind, csrf: string, selection?: PricingSelection, options?: JobStartOptions): Promise<Job>;
-  resumeJob(id: number, csrf: string): Promise<Job>;
-  stopJob(id: number, csrf: string): Promise<Job>;
+  resumeJob(id: number, csrf: string, accountGeneration?: number): Promise<Job>;
+  stopJob(id: number, csrf: string, accountGeneration?: number): Promise<Job>;
   exportUrl(selection: PricingSelection): string;
 }

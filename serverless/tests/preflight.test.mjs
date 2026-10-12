@@ -4,6 +4,7 @@ import {mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync} from 'node:
 import {resolve, join, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
+import {stagePublicReleaseModules, writePublicReleaseConfig, syntheticPublicReleaseConfig} from './fixtures/public-release-modules.mjs';
 
 function fixture(t) {
   const taskRoot = fileURLToPath(new URL('../../.tmp/', import.meta.url));
@@ -13,6 +14,7 @@ function fixture(t) {
   for (const relative of ['tools', 'tgcloud/lib', 'dist/assets']) mkdirSync(join(directory, relative), {recursive: true});
   writeFileSync(join(directory, 'package.json'), '{"type":"module"}');
   writeFileSync(join(directory, 'tools/preflight.mjs'), readFileSync(new URL('../tools/preflight.mjs', import.meta.url)));
+  stagePublicReleaseModules(directory);
   const fakeSecret = 'test-secret-not-real';
   const fakeRefreshKey = 'ab'.repeat(32);
   writeFileSync(join(directory, 'tgcloud/lib/private-config.js'), `export const ownerTelegramId=42; export const marketappToken=${JSON.stringify(fakeSecret)};`);
@@ -56,4 +58,24 @@ test('a TON Connect manifest requires the explicit matching app and its public P
   writeFileSync(path, JSON.stringify(valid));
   writeFileSync(join(directory, 'dist/wallet-icon.png'), '<svg>not a PNG</svg>');
   assert.equal(run(['--app-id', '54321']).status, 1);
+});
+
+test('public publication uses the actual validator and requires its reviewed configuration and wallet manifest', t => {
+  const {directory, run, fakeSecret, fakeRefreshKey} = fixture(t);
+  stagePublicReleaseModules(directory, {runtime: true});
+  writePublicReleaseConfig(directory, syntheticPublicReleaseConfig);
+  assert.equal(run(['--app-id', '54321']).status, 1, 'Public mode cannot publish without its wallet manifest');
+  writeFileSync(join(directory, 'dist/tonconnect-manifest.json'), JSON.stringify({url: 'https://app54321.tgcloud.ai', name: 'Gift Rent Check', iconUrl: 'https://app54321.tgcloud.ai/wallet-icon.png'}));
+  writeFileSync(join(directory, 'dist/wallet-icon.png'), readFileSync(new URL('../../frontend/public/wallet-icon.png', import.meta.url)));
+  assert.equal(run(['--app-id', '54321']).status, 0, 'The real validator accepts a reviewed synthetic public deployment');
+  for (const invalid of [{storageEncryptionConfirmed: false}, {providerUseApproved: false}, {privacyPolicyUrl: ''}, {invitedUserIds: []}, {origin: 'https://app65432.tgcloud.ai'}, {perUserTonDailyAttempts: 1001}]) {
+    writePublicReleaseConfig(directory, {...syntheticPublicReleaseConfig, ...invalid});
+    const result = run(['--app-id', '54321']);
+    assert.equal(result.status, 1, JSON.stringify(invalid));
+    for (const secret of [fakeSecret, fakeRefreshKey]) assert.ok(!`${result.stdout}${result.stderr}`.includes(secret));
+  }
+  writePublicReleaseConfig(directory, {...syntheticPublicReleaseConfig, preservePrivateOwner: true});
+  assert.equal(run(['--app-id', '54321']).status, 0);
+  writeFileSync(join(directory, 'tgcloud/lib/private-config.js'), "export const ownerTelegramId=null; export const marketappToken='';");
+  assert.equal(run(['--app-id', '54321']).status, 1, 'Hybrid invitation access must retain a valid private owner configuration');
 });

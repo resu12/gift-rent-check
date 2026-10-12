@@ -1,0 +1,75 @@
+.price-tracking-overview{margin-bottom:20px;padding:16px 18px}
+.price-tracking-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.price-tracking-heading h2{margin:0;font-size:18px;font-weight:550;color:#dce7ef}
+.price-tracking-heading h2 svg{vertical-align:-3px;margin-right:7px;color:#91cdbd}
+.price-tracking-periods{display:flex;gap:2px;padding:3px;background:#101a27;border:1px solid #2e4157;border-radius:8px;flex-shrink:0}
+.price-tracking-periods button{background:transparent;border:0;border-radius:5px;color:#a7bdce;min-height:36px;padding:6px 10px;font-size:12px;cursor:pointer}
+.price-tracking-periods button.active{background:#244b40;color:#d7f3e7}
+.price-tracking-periods button:focus-visible,.price-tracking-change:focus-visible,.gift-price-tracking summary:focus-visible,.gift-price-tracking select:focus-visible{outline:2px solid #8ae3c7;outline-offset:3px}
+.price-tracking-list{display:flex;flex-direction:column;margin:0;padding:0;list-style:none}
+.price-tracking-list>li+li{border-top:1px solid #293a4c}
+.price-tracking-change{width:100%;border:0;border-radius:6px;background:transparent;padding:11px 0;text-align:left;color:#c7dbe8;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px 12px;cursor:pointer}
+.price-tracking-change:hover{background:#22374655}
+.price-tracking-change-name{font-size:13px;font-weight:550;line-height:1.45;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.price-tracking-change-rate{display:flex;align-items:center;justify-content:flex-end;gap:5px;font-variant-numeric:tabular-nums;font-size:13px;white-space:nowrap}
+.price-tracking-change-rate>span{color:#91a8bb}
+.price-tracking-change-rate>strong{font-weight:600;color:#dceee9}
+.price-tracking-change-rate svg{color:#73998d;flex-shrink:0}
+.price-tracking-change-cue{min-width:0;font-size:12px;color:#91a9bd;line-height:1.6;align-self:start}
+.price-tracking-result{justify-self:end;font-size:12px;color:#a3bacd;line-height:1.6;text-align:right;max-width:230px;overflow-wrap:anywhere}
+.price-tracking-result b{font-weight:550;color:#cee2dd;font-variant-numeric:tabular-nums}
+.price-tracking-result.waiting{color:#d9c498}
+.price-tracking-empty{margin:2px 0;font-size:13px;color:#9bb1c4;line-height:1.7}
+.price-tracking-saved-cue{font-size:12px;color:#92aa9d;margin:10px 0 0}
+.price-tracking-details{font-size:12px;color:#a9bfd0;margin-top:10px;border-top:1px solid #293c50;padding-top:4px}
+.price-tracking-details>summary{cursor:pointer;min-height:38px;align-content:center;color:#bed3e1}
+.price-tracking-metadata{margin:8px 0;display:grid;gap:7px;font-size:12px;line-height:1.5}
+.price-tracking-metadata>div{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.price-tracking-metadata dt{color:#91a9bd;flex-shrink:0;max-width:50%}
+.price-tracking-metadata dd{margin:0;text-align:right;color:#c1d5e3;overflow-wrap:anywhere}
+.price-tracking-method{color:#91a9bd;font-size:12px;line-height:1.65;margin:12px 0}
+.price-tracking-notes{font-size:12px;color:#91a9bd;line-height:1.65;padding-left:18px;margin:12px 0 0}
+.price-tracking-notes li+li{margin-top:5px}
+.price-tracking-exclusions{margin-top:12px;border-top:1px solid #304357;padding-top:12px}
+.price-tracking-exclusions h5,.gift-price-tracking-history h5{margin:0 0 5px;font-size:12px;color:#b4ccdc;font-weight:550}
+.price-tracking-exclusions table{width:100%;border-collapse:collapse;text-align:right;font-size:12px;line-height:1.5;font-variant-numeric:tabular-nums}
+.price-tracking-exclusions th,.price-tracking-exclusions td{padding:5px 3px;color:#a9bfd0;font-weight:400}
+.price-tracking-exclusions th:first-child{text-align:left;width:66%;overflow-wrap:anywhere}
+.price-tracking-exclusions tbody th{color:#91a9bd}
+.gift-price-tracking{font-size:13px;color:#b8cddd}
+.gift-price-tracking>summary{cursor:pointer;min-height:40px;align-content:center;font-size:14px;color:#bdd2e4}
+.gift-price-tracking-body{padding-top:8px}
+.gift-price-tracking-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 10px}
+.gift-price-tracking-header h4{font-size:14px;margin:0;color:#ccdde8;font-weight:550}
+.gift-price-tracking-header .price-tracking-periods button{padding:6px 9px}
+.gift-price-tracking-change-select{display:block;margin:4px 0 8px}
+.gift-price-tracking-change-select select{background:#101b2a;border:1px solid #344b61;color:#bdd2e0;font-size:12px;border-radius:7px;min-height:38px;padding:6px 9px;width:100%;max-width:100%}
+.gift-price-tracking-source{margin-top:8px;border:1px solid #304357;border-radius:9px;padding:12px;background:#152331}
+.gift-price-tracking-source-title{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:4px;flex-wrap:wrap}
+.gift-price-tracking-source-title>span:last-child{color:#b7dace;font-variant-numeric:tabular-nums}
+.gift-price-tracking-source-title>span{font-size:12px;color:#90a8bb;text-align:right}
+.gift-price-tracking-prices{display:flex;align-items:center;gap:9px;font-size:21px;font-variant-numeric:tabular-nums;line-height:1.5;color:#d5ece5}
+.gift-price-tracking-prices>span{color:#9eb4c5}
+.gift-price-tracking-prices svg{flex-shrink:0;color:#83ab9d}
+.gift-price-tracking-prices>strong{font-weight:550}
+.gift-price-tracking-price-cue{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:12px;color:#96b0c2;margin:4px 0 0;line-height:1.6;flex-wrap:wrap}
+.gift-price-tracking-coverage{font-size:12px;color:#ddc99d;line-height:1.6;margin:9px 0}
+.gift-price-tracking-performance{margin-top:12px}
+.gift-price-tracking-performance table{border-collapse:collapse;width:100%;text-align:right;font-size:13px;font-variant-numeric:tabular-nums;line-height:1.5}
+.gift-price-tracking-performance th,.gift-price-tracking-performance td{padding:7px 4px;border-bottom:1px solid #304356}
+.gift-price-tracking-performance thead th{font-size:12px;color:#a8bed0;font-weight:400}
+.gift-price-tracking-performance th:first-child{text-align:left;font-weight:400;color:#a9c0d3}
+.gift-price-tracking-performance td{color:#d1e3e6}
+.gift-price-tracking-performance th small{display:block;font-size:12px;color:#8eaabd;margin-top:2px;font-weight:400}
+.gift-price-tracking-performance td small{display:block;color:#91aab8;font-size:12px;font-weight:400;margin-top:2px}
+.gift-price-tracking-performance tbody tr:last-child>*{border-bottom:0}
+.gift-price-tracking-performance tbody tr:first-child td{font-weight:550}
+.gift-price-tracking-history{margin-top:12px;font-size:12px;border-top:1px solid #304357;padding-top:12px}
+.gift-price-tracking-history ol{list-style:none;padding:0;margin:2px 0 0;max-height:240px;overflow:auto}
+.gift-price-tracking-history li{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #2a3e50}
+.gift-price-tracking-history li:last-child{border-bottom:0}
+.gift-price-tracking-history time{font-size:12px;color:#97b0c4;line-height:1.5}
+.gift-price-tracking-history strong{font-weight:500;white-space:nowrap;font-size:13px;color:#d1e9e2;font-variant-numeric:tabular-nums}
+.gift-price-tracking-history strong small{font-size:12px;color:#91aab8;font-weight:400;margin-left:4px}
+@media(max-width:480px){.price-tracking-overview{padding:14px}.price-tracking-heading{gap:8px}.price-tracking-heading h2{font-size:16px}.price-tracking-periods button{font-size:12px;padding:6px 8px}.price-tracking-change{gap:3px 8px;padding:10px 0}.price-tracking-change-rate{font-size:13px;gap:4px}.price-tracking-change-rate svg{width:12px}.price-tracking-change-name{font-size:13px}.price-tracking-result{max-width:155px}.gift-price-tracking-source{padding:10px}.gift-price-tracking-source-title{gap:5px}.gift-price-tracking-prices{font-size:20px}.gift-price-tracking-performance th,.gift-price-tracking-performance td{padding:7px 3px}.price-tracking-metadata>div{gap:8px}}
+@media(max-width:360px){.price-tracking-heading h2 svg{display:none}.price-tracking-periods button{padding:6px}.price-tracking-change{grid-template-columns:minmax(0,1fr) auto}.price-tracking-change-cue{grid-column:1}.price-tracking-result{max-width:130px}}

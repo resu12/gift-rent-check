@@ -6,7 +6,13 @@ import {join} from 'node:path';
 try {
   const {ownerTelegramId, marketappToken} = await import('../tgcloud/lib/private-config.js');
   const {marketappRefreshKey} = await import('../tgcloud/lib/private-refresh-key.js');
-  if (!Number.isSafeInteger(ownerTelegramId) || ownerTelegramId <= 0 || typeof marketappToken !== 'string' || !marketappToken.trim()) throw new Error();
+  const {publicReleaseConfig} = await import('../tgcloud/lib/public-release-config.js');
+  if (publicReleaseConfig.enabled) {
+    const {validatePublicReleaseConfig} = await import('../tgcloud/lib/public-runtime.js');
+    validatePublicReleaseConfig(publicReleaseConfig);
+  }
+  if ((!publicReleaseConfig.enabled || publicReleaseConfig.preservePrivateOwner) &&
+      (!Number.isSafeInteger(ownerTelegramId) || ownerTelegramId <= 0 || typeof marketappToken !== 'string' || !marketappToken.trim())) throw new Error();
   if (typeof marketappRefreshKey !== 'string' || !/^[a-f0-9]{64}$/.test(marketappRefreshKey)) throw new Error();
   const root = fileURLToPath(new URL('../dist/', import.meta.url));
   async function check(dir) {
@@ -16,7 +22,7 @@ try {
       if (entry.isDirectory()) await check(path);
       else {
         const body = await readFile(path, 'utf8');
-        if (body.includes(marketappToken) || body.includes(marketappRefreshKey) || body.includes('mock-only-token') || body.includes('/mock-api/')) throw new Error();
+        if (marketappToken && body.includes(marketappToken) || body.includes(marketappRefreshKey) || body.includes('mock-only-token') || body.includes('/mock-api/')) throw new Error();
       }
     }
   }
@@ -28,10 +34,12 @@ try {
   let manifest;
   try { manifest = JSON.parse(await readFile(join(root, 'tonconnect-manifest.json'), 'utf8')); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (publicReleaseConfig.enabled && manifest === undefined) throw new Error();
   if (manifest !== undefined) {
     const args = process.argv.slice(2);
     if (args.length !== 2 || args[0] !== '--app-id' || !/^[1-9]\d*$/.test(args[1])) throw new Error();
     const expectedOrigin = `https://app${args[1]}.tgcloud.ai`;
+    if (publicReleaseConfig.enabled && publicReleaseConfig.origin !== expectedOrigin) throw new Error();
     if (manifest?.url !== expectedOrigin || manifest?.name !== 'Gift Rent Check' ||
         manifest?.iconUrl !== `${expectedOrigin}/wallet-icon.png` ||
         Object.keys(manifest).sort().join(',') !== 'iconUrl,name,url') throw new Error();
@@ -39,7 +47,7 @@ try {
     if (icon.length < 24 || !icon.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ||
         icon.toString('ascii', 12, 16) !== 'IHDR' || icon.readUInt32BE(16) !== 180 || icon.readUInt32BE(20) !== 180) throw new Error();
   }
-  console.log('Private owner, provider configuration, credential-free static build, and wallet manifest destination verified.');
+  console.log('Account mode, provider configuration, credential-free static build, and wallet manifest destination verified.');
 } catch {
   console.error('Preflight failed. Verify the private owner/provider configuration and rebuild the Serverless frontend for the explicit app ID. No values were logged.');
   process.exitCode = 1;

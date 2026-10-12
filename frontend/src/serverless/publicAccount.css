@@ -1,0 +1,55 @@
+.public-account-setup {max-width:760px; margin:0 auto 24px; padding:24px; border:1px solid var(--line,#304054); border-radius:20px; background:var(--surface,#141e2a);}
+.public-account-setup>header {display:flex; justify-content:space-between; align-items:flex-start; gap:12px;}
+.public-account-setup h2 {margin:0; font-size:24px;}
+.public-account-setup header p,.public-account-note {color:var(--muted,#a1b3c4); font-size:14px; line-height:1.5;}
+.public-account-step {padding:20px 0; border-bottom:1px solid var(--line,#304054);}
+.public-account-step-heading {display:flex; gap:10px; align-items:center; margin-bottom:12px;}
+.public-account-step-heading h3 {margin:0; font-size:17px;}
+.public-account-step-heading>span {margin-left:auto; color:var(--muted,#a1b3c4); font-size:13px;}
+.public-account-wallet,.public-account-actions,.public-account-key-row {display:flex; gap:12px; align-items:center; flex-wrap:wrap;}
+.public-account-wallet {justify-content:space-between;}
+.public-account-wallet code {overflow-wrap:anywhere;}
+.public-account-setup label {display:block; margin-bottom:8px; font-size:14px; color:var(--muted,#a1b3c4);}
+.public-account-setup input {min-width:0; flex:1; width:100%; padding:13px; border:1px solid var(--line,#304054); border-radius:10px; color:var(--text,#e1edfb); background:#101925; font-size:16px;}
+.public-account-key-row {flex-wrap:nowrap;}
+.public-account-connections {max-width:none;}
+.public-account-connections>header h2 {font-size:19px;}
+.public-account-connections .public-account-step {padding:14px 0;}
+.public-account-connections .public-account-step-heading {margin-bottom:5px;}
+.public-account-connections .public-account-step-heading h3 {font-size:16px;}
+.public-account-connections .public-account-note {font-size:12px;margin:0 0 9px;}
+.public-account-connections .public-account-step-heading>span {font-size:12px;}
+.public-account-connections .public-account-wallet code {font-size:12px;}
+.public-account-connections .public-account-key-check {gap:10px;margin-top:4px;}
+.public-account-connections .public-account-key-check .text-button {min-height:44px;}
+.public-account-connections .activity-access-details p {font-size:12px;margin:0 0 8px;}
+.public-account-key-editor {margin-top:16px;padding:16px;border:1px solid var(--line,#304054);border-radius:12px;}
+.public-account-key-check {display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px;}
+.public-account-key-check small {color:var(--muted,#a1b3c4);font-size:12px;}
+.public-account-actions .button {min-height:44px;}
+.public-account-discovery-options {padding-top:20px;border-bottom:1px solid var(--line,#304054);}
+.public-account-discovery-options>summary {display:flex;align-items:center;gap:10px;min-height:44px;cursor:pointer;font-size:15px;}
+.public-account-discovery-options>summary::before {content:'▸';}
+.public-account-discovery-options[open]>summary::before {content:'▾';}
+.public-account-discovery-options>summary::-webkit-details-marker {display:none;}
+.public-account-discovery-options>summary>span {margin-left:auto;font-size:13px;color:var(--muted,#a1b3c4);}
+.public-account-discovery-options .public-account-step {border-bottom:0;}
+.public-account-note {margin:10px 0;}
+.public-account-notice {color:var(--teal,#80e1c7);}
+.public-account-error {color:#f2b7b7;}
+.public-account-error p {margin-bottom:6px;}
+.public-account-wallets>div {display:flex; flex-wrap:wrap; gap:8px; margin:10px 0;}
+.public-account-discovery {margin:12px 0;}
+.public-account-discovery>div {display:flex; justify-content:space-between; gap:12px;}
+.public-account-discovery progress {display:block; width:100%; height:8px; margin:12px 0; accent-color:var(--teal,#80e1c7);}
+.public-account-discovery small {color:var(--muted,#a1b3c4);}
+.public-account-privacy {padding-top:20px;}
+.public-account-privacy summary {cursor:pointer; color:var(--muted,#a1b3c4);}
+.public-account-delete {color:#f2b7b7;}
+.public-account-delete-confirm {margin-top:16px; padding:16px; border:1px solid #865757; border-radius:12px;}
+.public-account-delete-confirm p {font-size:14px; line-height:1.5;}
+.public-account-delete-confirm .public-account-actions {margin-top:12px;}
+.public-account-policy-links {display:flex; gap:20px; align-items:center; padding-top:16px; color:var(--muted,#a1b3c4); font-size:14px;}
+.public-account-policy-links a {display:inline-block; padding:8px 0; color:inherit; text-decoration:underline; text-underline-offset:3px;}
+@media(max-width:600px) {.public-account-setup {padding:18px; border-radius:16px;} .public-account-setup h2 {font-size:21px;} .public-account-setup>header p {margin-bottom:0;} .public-account-step {padding:16px 0;}}
+@media(max-width:420px) {.public-account-key-editor {padding:12px;} .public-account-key-row {flex-wrap:wrap;} .public-account-key-row .button {width:100%;}}

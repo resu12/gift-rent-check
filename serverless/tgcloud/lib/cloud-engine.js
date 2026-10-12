@@ -1,12 +1,16 @@
 import {validatePage} from './engine.js';
-import {buildCloudDashboard, resolveCloudWindow, validateSavedCloudWindow, addressKey} from './cloud-pricing.js';
+import {buildCloudDashboard, createCloudDashboardBuilder, resolveCloudWindow, validateSavedCloudWindow, addressKey} from './cloud-pricing.js';
 import {planHistoryRefresh, validHistoryPlan, completedHistoryCoverage, historyRefreshProgress} from './history-refresh.js';
 import {MARKET_CACHE_POLICY, pruneMarketCache, cachedMarketStream, completedMarketStream, marketCacheKey, marketCacheProgress} from './market-cache.js';
+import {comparisonFreshness, recordComparisonCompletion} from './comparison-freshness.js';
 import {newCollectionSchedule, validCollectionSchedule, nextCollectionStream, commitCollectionTurn, collectionEfficiency} from './collection-schedule.js';
-import {effectiveMarketAttempts} from './market-budget.js';
+import {effectiveMarketAttempts, marketBudgetAvailableAt} from './market-budget.js';
 import {normalizePersonalAnalytics, configuredAnalyticsWallet, PERSONAL_ANALYTICS_MAX_BYTES} from './personal-analytics.js';
+import {fetchBoundedResponse, BoundedResponseError, boundedRawEvidence} from './bounded-response.js';
+import {withStorageReservation} from './storage-admission.js';
 
-export const CLOUD_LIMITS = Object.freeze({page_size: 100, invocation_attempts: 100, daily_attempts: 500, duration_ms: 300000, interval_ms: 1000, retry_attempts: 4, lease_ms: 120000, response_bytes: 1048576, import_bytes: 524288, import_records: 250});
+export const CLOUD_LIMITS = Object.freeze({page_size: 100, invocation_attempts: 100, daily_attempts: 500, duration_ms: 300000, timeout_ms: 30000, interval_ms: 1000, retry_attempts: 4, lease_ms: 120000, response_bytes: 1048576, import_bytes: 524288, import_records: 250});
+export const STARTUP_COMPARISON_POLICY = Object.freeze({version: 1, cooldown_ms: 3600000, invocation_attempts: 20, duration_ms: 60000});
 export class CloudRequestError extends Error {}
 const BASE = 'https://api.marketapp.org';
 const ROUTES = Object.freeze({collection: '/v1/collections/gifts/', listing: '/v1/rent/gifts/', history: '/v1/rent/gifts/history/'});
@@ -17,12 +21,23 @@ const size = value => {let n = 0; for (const c of value) {const p = c.codePointA
 const canonicalJson = value => JSON.stringify(value, (_k, v) => object(v) ? Object.fromEntries(Object.keys(v).sort().map(k => [k, v[k]])) : v);
 const stableKey = value => addressKey(value);
 const isActive = job => job && ['queued', 'running'].includes(job.state);
+const collectionLeaseDeadline = job => !job || !Object.hasOwn(job, 'lease_until') ? 0
+  : Number.isSafeInteger(job.lease_until) && job.lease_until >= 0 ? job.lease_until : null;
+const expiredCollectionInvocation = (job, at) => isActive(job)
+  && Number.isSafeInteger(job.invocation_deadline) && job.invocation_deadline > 0 && job.invocation_deadline <= at
+  && collectionLeaseDeadline(job) !== null && collectionLeaseDeadline(job) <= at;
+// Status reads project an ended invocation as paused without rewriting its
+// checkpoint. Switching source must apply the same bound inside the CAS commit;
+// a live or malformed request fence must still prevent overlapping work.
+const collectionBlocksSwitch = (job, at) => Boolean(job && (collectionLeaseDeadline(job) === null
+  || collectionLeaseDeadline(job) > at || isActive(job) && !expiredCollectionInvocation(job, at)));
 const messages = {
   stopped_by_you: 'Stopped by you. Resume continues the saved traversal.',
   invocation_limit: 'The 100-request invocation limit was reached. Resume when ready.',
   daily_limit: 'The rolling 24-hour request allowance was reached. Resume after its reset.',
   duration_limit: 'The five-minute collection allowance ended. Resume when ready.',
   retry_wait: 'Waiting for the provider retry deadline.',
+  provider_wait: 'Waiting for the provider allowance. Your progress is saved.',
   retry_exhausted: 'Provider retries were exhausted. Start a fresh collection.',
   authentication_failed: 'Marketapp rejected authentication. Check the private backend token.',
   invalid_response: 'Marketapp returned malformed data. The saved cursor was not advanced.',
@@ -34,6 +49,7 @@ const messages = {
   invalid_retry_after: 'The provider returned an unsupported retry deadline.',
   incompatible_history_plan: 'The saved history refresh plan is incompatible. Start a fresh collection; saved records are retained.',
   incompatible_schedule: 'The saved collection schedule is incompatible. Start a fresh collection; saved records are retained.',
+  startup_identity_changed: 'The wallet binding changed. Start a fresh comparison refresh.',
 };
 
 function validateHistory(item) {
@@ -101,7 +117,7 @@ export function cloudSyncProgress(job) {
   };
 }
 
-export function createCloudEngine({repository, fetch: request, ownerTelegramId, marketappToken, now: localNow = () => Date.now(), clock = null, random = Math.random, limits = {}, dashboard = buildCloudDashboard, ownedPriceRefresh = false}) {
+export function createCloudEngine({repository, fetch: request, ownerTelegramId, marketappToken, now: localNow = () => Date.now(), clock = null, random = Math.random, limits = {}, dashboard = buildCloudDashboard, ownedPriceRefresh = false, providerStatus = null, startupIdentity = null}) {
   const cap = {...CLOUD_LIMITS, ...limits};
   let observedTime = null;
   const now = () => clock ? observedTime ?? localNow() : localNow();
@@ -119,34 +135,63 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
     if (!/^[1-9]\d*$/.test(allowed) || observed !== allowed) throw new CloudRequestError('Private access denied');
   };
   const cleanAttempts = state => state.attempts = state.attempts.filter(at => at > now() - 86400000);
+  // The bound is persisted with the invocation, so ordinary step endpoints
+  // cannot accidentally turn an automatic opening into a full manual scan.
+  const invocationAttempts = job => job?.invocation_policy?.origin === 'startup_comparisons'
+    ? Math.min(cap.invocation_attempts, STARTUP_COMPARISON_POLICY.invocation_attempts,
+      Number.isSafeInteger(job.invocation_policy.attempt_limit) && job.invocation_policy.attempt_limit > 0 ? job.invocation_policy.attempt_limit : STARTUP_COMPARISON_POLICY.invocation_attempts) : cap.invocation_attempts;
+  const invocationDuration = job => job?.invocation_policy?.origin === 'startup_comparisons'
+    ? Math.min(cap.duration_ms, STARTUP_COMPARISON_POLICY.duration_ms,
+      Number.isSafeInteger(job.invocation_policy.duration_ms) && job.invocation_policy.duration_ms > 0 ? job.invocation_policy.duration_ms : STARTUP_COMPARISON_POLICY.duration_ms) : cap.duration_ms;
+  const automaticInvocation = () => ({origin: 'startup_comparisons', attempt_limit: Math.min(cap.invocation_attempts, STARTUP_COMPARISON_POLICY.invocation_attempts), duration_ms: Math.min(cap.duration_ms, STARTUP_COMPARISON_POLICY.duration_ms)});
+  async function startupIdentityMatches(job, revision = Number.MAX_SAFE_INTEGER) {
+    if (!job.startup_comparisons) return true;
+    const records = repository.analyticsWalletRecords ? await repository.analyticsWalletRecords() : await repository.records(revision);
+    return configuredAnalyticsWallet(records) === job.startup_comparisons.wallet
+      && JSON.stringify(job.startup_comparisons.identity ?? null) === JSON.stringify(startupIdentity);
+  }
   const budget = state => {
-    const used = effectiveMarketAttempts(state, now());
-    return {max_attempts: cap.invocation_attempts, rolling_24h_attempts: cap.daily_attempts, run_seconds: cap.duration_ms / 1000, requests_per_second: 1000 / cap.interval_ms, used_24h: used.length, remaining_24h: Math.max(0, cap.daily_attempts - used.length), resets_at: used.length ? iso(used[0] + 86400000) : null};
+    const at = now(), used = effectiveMarketAttempts(state, at).sort((a, b) => a - b);
+    const availableAt = marketBudgetAvailableAt(state, at, cap.daily_attempts);
+    return {max_attempts: cap.invocation_attempts, rolling_24h_attempts: cap.daily_attempts, run_seconds: cap.duration_ms / 1000, requests_per_second: 1000 / cap.interval_ms, used_24h: used.length, remaining_24h: Math.max(0, cap.daily_attempts - used.length), resets_at: used.length ? iso(used[0] + 86400000) : null, available_at: availableAt === null ? null : iso(availableAt)};
   };
-  const project = (job, state, readonly = false) => ({
-    id: job.id, kind: job.kind, state: job.state, created_at: job.created_at, updated_at: job.updated_at,
-    reason: messages[job.reason] || job.reason || null, run_id: job.id, stop_requested: job.reason === 'stopped_by_you', collection_window: job.collection_window,
-    progress: {
-      provider: 'marketapp', pages: job.pages, observations: job.observations, streams_complete: job.streams.filter(s => s.complete).length, streams_total: job.streams.length,
-      scopes: job.scopes.length, unresolved_collections: job.unresolved_collections, warnings: job.warnings,
-      history_refresh: historyRefreshProgress(job.streams),
-      market_cache: marketCacheProgress(job.streams, now()),
-      efficiency: collectionEfficiency(job),
-      sync: cloudSyncProgress(job),
-      next_allowed_at: Math.max(state.next_allowed_at, job.lease_until || 0), server_time: now(),
-      lease_until: job.lease_until || 0,
-      requires_resume: readonly && isActive(job) && (job.lease_until || 0) <= now(),
-      marketapp_budget: {invocation_used: job.invocation_used, invocation_limit: cap.invocation_attempts, rolling_24h_used: budget(state).used_24h, rolling_24h_limit: cap.daily_attempts, resets_at: budget(state).resets_at, run_seconds: cap.duration_ms / 1000},
-    },
-  });
-  async function mutate(change) {
+  const project = (job, state, readonly = false) => {
+    const at = now();
+    const lease = collectionLeaseDeadline(job);
+    const requiresResume = readonly && isActive(job) && lease !== null && lease <= at;
+    // A function can end after reserving a request but before committing its
+    // result. Reads must not leave that bounded invocation looking active
+    // forever. Keep the durable checkpoint and any live request fence intact;
+    // only the returned status becomes resumable once both bounds have ended.
+    if (requiresResume && expiredCollectionInvocation(job, at)) {
+      job = {...job, state: 'partial', reason: 'duration_limit'};
+    }
+    const marketBudget = budget(state);
+    return {
+      id: job.id, kind: job.kind, state: job.state, created_at: job.created_at, updated_at: job.updated_at,
+      reason: job.reason === 'invocation_limit' ? `The ${invocationAttempts(job)}-request invocation limit was reached. Resume when ready.` : job.reason === 'duration_limit' ? `The ${invocationDuration(job) / 1000}-second collection allowance ended. Resume when ready.` : messages[job.reason] || job.reason || null, run_id: job.id, stop_requested: job.reason === 'stopped_by_you', collection_window: job.collection_window,
+      progress: {
+        provider: 'marketapp', pages: job.pages, observations: job.observations, streams_complete: job.streams.filter(s => s.complete).length, streams_total: job.streams.length,
+        scopes: job.scopes.length, unresolved_collections: job.unresolved_collections, warnings: job.warnings,
+        history_refresh: historyRefreshProgress(job.streams),
+        market_cache: marketCacheProgress(job.streams, now()),
+        efficiency: collectionEfficiency(job),
+        sync: cloudSyncProgress(job),
+        next_allowed_at: Math.max(state.next_allowed_at, job.lease_until || 0), server_time: now(),
+        lease_until: job.lease_until || 0,
+        requires_resume: requiresResume,
+        marketapp_budget: {invocation_used: job.invocation_used, invocation_limit: invocationAttempts(job), rolling_24h_used: marketBudget.used_24h, rolling_24h_limit: cap.daily_attempts, resets_at: marketBudget.resets_at, available_at: marketBudget.available_at, run_seconds: invocationDuration(job) / 1000},
+      },
+    };
+  };
+  async function mutate(change, storageToken = null) {
     for (let attempt = 0; attempt < 16; attempt++) {
       const {revision, state: saved} = await repository.read(), state = copy(saved);
       await refreshClock();
       cleanAttempts(state);
-      const event = await change(state);
+      const event = await change(state, revision);
       if (event?.skip) return {state: saved, value: event.value};
-      const payload = {key: event?.key || `event:${revision + 1}`, state, job: event?.job === false ? null : state.job, records: event?.records || [], raw_body: event?.raw_body ?? null, observed_at: iso(now())};
+      const payload = {key: event?.key || `event:${revision + 1}`, state, job: event?.job === false ? null : state.job, records: event?.records || [], raw_body: event?.raw_body ?? null, observed_at: iso(now()),storage_token:storageToken};
       if (await repository.append(revision, payload)) return {state, value: event?.value};
     }
     throw new CloudRequestError('Another request updated the saved state. Refresh and try again.');
@@ -163,26 +208,174 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
   const finish = (job, status, reason = null) => {job.state = status; job.reason = reason; job.lease = null; job.lease_until = 0; job.updated_at = iso(now());};
   const pauseBudget = (state, job) => {
     if (!isActive(job)) return false;
-    const reason = effectiveMarketAttempts(state, now()).length >= cap.daily_attempts ? 'daily_limit' : job.invocation_used >= cap.invocation_attempts ? 'invocation_limit' : now() >= job.invocation_deadline || state.next_allowed_at >= job.invocation_deadline ? 'duration_limit' : null;
+    const reason = effectiveMarketAttempts(state, now()).length >= cap.daily_attempts ? 'daily_limit' : job.invocation_used >= invocationAttempts(job) ? 'invocation_limit' : now() >= job.invocation_deadline || state.next_allowed_at >= job.invocation_deadline ? 'duration_limit' : null;
     if (reason) {finish(job, 'partial', reason); return true;}
     return false;
   };
+  async function dashboardRevision() {
+    const revision = repository.dashboardRevision ? await repository.dashboardRevision() : {state_revision: (await repository.read()).revision, records_revision: null, analytics_count: 0, analytics_updated: ''};
+    const bucket = Math.floor(now() / 60000);
+    return {...revision, bucket, token: `d1:${revision.state_revision}:${revision.records_revision}:${revision.analytics_count}:${revision.analytics_updated}:${bucket}`};
+  }
+  async function getDashboardRevision(ctx, input = {}) {
+    authorize(ctx);
+    if (!object(input) || Object.keys(input).length) throw new CloudRequestError('The dashboard revision request must be empty.');
+    await refreshClock();
+    return {token: (await dashboardRevision()).token};
+  }
   async function getDashboard(ctx, input = {}) {
     authorize(ctx);
     await refreshClock();
-    try {resolveCloudWindow(input, now());} catch (error) {throw new CloudRequestError(error.message);}
-    const {state} = await repository.read(), records = await repository.records();
+    let window;
+    try {window = resolveCloudWindow(input, now());} catch (error) {throw new CloudRequestError(error.message);}
+    const source = input.pricing_source ?? input.source ?? 'listings', backdrop = input.pricing_backdrop ?? input.backdrop ?? null;
+    if (!['listings', 'rentals'].includes(source)) throw new CloudRequestError('Unknown pricing source');
+    if (backdrop !== null && backdrop !== 'Black') throw new CloudRequestError('Pricing backdrop must be Black or omitted');
+    // Capture before the projection read: any concurrent append is visible to
+    // the next probe rather than incorrectly being marked already consumed.
+    const revision = await dashboardRevision(), snapshotTime = now();
+    // Keep the source checkpoint paired with the revision selected for this
+    // projection. A page committed while reconstructing a large dashboard
+    // belongs to the next read; it must neither certify these earlier figures
+    // nor erase completion evidence already captured for them.
+    const {state, revision: observedStateRevision} = await repository.read();
+    const comparisonState = observedStateRevision === revision.state_revision ? state : {};
+    const key = JSON.stringify(['projection-v7-verified-rental-start', source, window.timeframe, window.date_from, window.date_to, backdrop]);
+    const cacheEnabled = Boolean(repository.dashboardSnapshot && repository.saveDashboardSnapshot && Number.isSafeInteger(revision.records_revision));
+    let snapshot = null;
+    if (cacheEnabled) {
+      try {snapshot = await repository.dashboardSnapshot(key, revision.records_revision, revision.bucket);} catch { /* A derived cache can be rebuilt from source events. */ }
+      if (!object(snapshot?.dashboard) || typeof snapshot.wallet_configured !== 'boolean' || !(snapshot.analytics_wallet === null || typeof snapshot.analytics_wallet === 'string')) snapshot = null;
+    }
+    if (!snapshot) {
+      const until = revision.records_revision ?? revision.state_revision;
+      if (dashboard === buildCloudDashboard && repository.dashboardSeedRecords && repository.visitRecords) {
+        // Keep only the small portfolio/settings prepass and one bounded page
+        // of source envelopes alive. The builder retains the necessary parsed
+        // evidence, rather than a second copy of the complete event history.
+        // Both reads use the same ceiling so a concurrent import cannot change
+        // membership or wallet selection halfway through this projection.
+        const seeds = await repository.dashboardSeedRecords(until);
+        const builder = createCloudDashboardBuilder(seeds, input, {now: snapshotTime});
+        await repository.visitRecords(until, page => builder.add(page));
+        snapshot = {dashboard: builder.finish(), analytics_wallet: configuredAnalyticsWallet(seeds), wallet_configured: seeds.some(r => r.kind === 'settings' && r.record.wallet)};
+      } else {
+        const records = await repository.records(until);
+        snapshot = {dashboard: dashboard(records, input, {now: snapshotTime}), analytics_wallet: configuredAnalyticsWallet(records), wallet_configured: records.some(r => r.kind === 'settings' && r.record.wallet)};
+      }
+      if (cacheEnabled) {try {await repository.saveDashboardSnapshot(key, revision.records_revision, revision.bucket, snapshot);} catch { /* Cache quota/failure must not hide a valid projection. */ }}
+    }
     await refreshClock();
-    const result = dashboard(records, input, {now: now(), capabilities: {mode: 'serverless', network_enabled: true, marketapp_configured: Boolean(secret.trim()), ton_configured: false, owned_price_refresh: ownedPriceRefresh, marketapp_login_test: true, marketapp_analytics_refresh: true, wallet_configured: records.some(r => r.kind === 'settings' && r.record.wallet), csrf_token: '', marketapp_limits: budget(state), supported_jobs: ['prices', 'rental_prices', 'collect']}, jobs: (await repository.jobs()).map(j => project(j, state, true))});
-    const wallet = configuredAnalyticsWallet(records);
+    const result = snapshot.dashboard;
+    // A concurrent page commit may be newer than the records shown in this
+    // projection. Never certify those older figures with its newer proof.
+    // The captured revision token already makes the next read load that commit.
+    result.data_freshness = comparisonFreshness(comparisonState, result.gifts, result.pricing || window, now(), {
+      // A final empty page adds no records and can follow this minute's cached
+      // period end. The exact records-revision cache already includes every
+      // nonempty page; a matched source checkpoint can date its later EOF.
+      // Fixed historical windows keep their strict observation boundaries.
+      allowRelativeListingCompletionBeyondWindow: cacheEnabled && comparisonState === state,
+    });
+    result.capabilities = {mode: 'serverless', network_enabled: true, startup_comparison_refresh: true, marketapp_configured: Boolean(secret.trim()), ton_configured: false, owned_price_refresh: ownedPriceRefresh, owned_price_refresh_single: ownedPriceRefresh, owned_status_refresh: ownedPriceRefresh, personal_gift_refresh: ownedPriceRefresh, marketapp_login_test: true, marketapp_analytics_refresh: true, wallet_configured: snapshot.wallet_configured, csrf_token: '', marketapp_limits: budget(state), supported_jobs: ['prices', 'rental_prices', 'collect']};
+    const wallet = snapshot.analytics_wallet;
     result.personal_analytics = wallet && repository.latestPersonalAnalytics ? await repository.latestPersonalAnalytics(wallet) : null;
     result.personal_analytics_snapshots = wallet && repository.personalAnalyticsSnapshots ? await repository.personalAnalyticsSnapshots(wallet) : [];
+    result.update_token = revision.token;
     return result;
   }
   async function getJobs(ctx) {
     authorize(ctx); const {state} = await repository.read();
     await refreshClock();
     return {jobs: (await repository.jobs()).map(j => project(j, state, true))};
+  }
+  function newJob(state, input, window, scopes, unresolved, automatic = false, wallet = null) {
+    const kinds = input.kind === 'prices' ? ['listing'] : input.kind === 'rental_prices' ? ['history'] : ['listing', 'history'];
+    state.market_cache = pruneMarketCache(state.market_cache, now());
+    const job = {id: state.next_job_id++, kind: input.kind, state: 'running', created_at: iso(now()), updated_at: iso(now()), reason: null,
+      collection_window: window, scopes, unresolved_collections: unresolved, page_size: cap.page_size, market_cache_version: MARKET_CACHE_POLICY.version, force_refresh: input.force_refresh === true,
+      streams: [{kind: 'collection', scope: null}, ...scopes.flatMap(scope => kinds.map(kind => ({kind, scope})))].map(s => ({...s, cursor: null, started: false, complete: false, cursors: [], retry: 0, pages: 0, last_timestamp: null, ordered: true, scope_verified: true,
+        ...(s.kind === 'history' ? {history_plan: planHistoryRefresh(state.history_coverage?.[stableKey(s.scope)], Math.floor(Date.parse(window.window_from) / 1000), Math.floor(now() / 1000))} : {}),
+      })), pages: 0, observations: 0, market_observations: 0, scope_names: {}, warnings: [], invocation_used: 0,
+      invocation_deadline: now() + (automatic ? Math.min(cap.duration_ms, STARTUP_COMPARISON_POLICY.duration_ms) : cap.duration_ms), invocation: 1, lease: null, lease_until: 0,
+      ...(automatic ? {startup_comparisons: {version: STARTUP_COMPARISON_POLICY.version, wallet, identity: startupIdentity}, invocation_policy: automaticInvocation()} : {})};
+    job.schedule = newCollectionSchedule(job.streams);
+    for (const stream of job.streams) if (stream.kind !== 'collection' && !job.force_refresh) {
+      const cached = cachedMarketStream(state.market_cache, stream, job.page_size, now());
+      if (cached) {stream.complete = true; stream.completion_reason = 'shared_market_cache'; stream.cache_source = cached;}
+    }
+    return job;
+  }
+  async function comparisonScopeRecords(revision) {
+    // A comparison plan needs portfolio membership and wallet settings only.
+    // Both hosted repositories provide a bounded seed traversal; keep the
+    // revision ceiling paired with the checkpoint whose CAS will save the plan.
+    return repository.dashboardSeedRecords
+      ? await repository.dashboardSeedRecords(revision) : await repository.records(revision);
+  }
+  async function refreshStartupComparisons(ctx, input = {}) {
+    authorize(ctx);
+    if (!object(input) || Object.keys(input).some(key => !['kind', 'timeframe', 'date_from', 'date_to'].includes(key))
+      || !['prices', 'rental_prices'].includes(input.kind)) throw new CloudRequestError('Invalid startup comparison selection.');
+    await refreshClock();
+    let window;
+    try {window = resolveCloudWindow(input, now());} catch (error) {throw new CloudRequestError(error.message);}
+    if (input.kind === 'rental_prices') {
+      try {resolveCloudWindow(input, now(), {collectHistory: true});} catch {return {state: 'unavailable', reason: 'failed'};}
+    }
+    if (!secret.trim()) return {state: 'unavailable', reason: 'key_missing'};
+    const result = await mutate(async (state, revision) => {
+      const skip = (status, reason, retryAt = null) => ({skip: true, value: {state: status, ...(reason ? {reason} : {}), ...(retryAt !== null ? {retry_at: iso(retryAt)} : {})}});
+      const prior = state.job;
+      const owned = state.owned_prices?.run;
+      if ((owned?.lease_until || 0) > now() || owned?.state === 'running' && owned.deadline > now()) return skip('busy', 'active_job', Math.max(owned.lease_until || 0, owned.deadline || 0));
+      if ((prior?.lease_until || 0) > now()) return skip('busy', 'active_job', prior.lease_until);
+      if (prior?.reason === 'stopped_by_you') return skip('unavailable', 'stopped');
+      const auto = prior?.startup_comparisons?.version === STARTUP_COMPARISON_POLICY.version && !prior.startup_comparisons.manual_control;
+      if (prior && ['partial', 'running', 'queued'].includes(prior.state) && !auto) return skip('busy', 'active_job');
+      const records = await comparisonScopeRecords(revision), wallet = configuredAnalyticsWallet(records);
+      if (!wallet) return skip('unavailable', 'wallet_missing');
+      const {scopes, unresolved} = scopedCollections(records);
+      if (!scopes.length) return skip('unavailable', 'portfolio_missing');
+      const same = auto && prior.kind === input.kind && prior.startup_comparisons.wallet === wallet && JSON.stringify(prior.startup_comparisons.identity ?? null) === JSON.stringify(startupIdentity) && prior.page_size === cap.page_size
+        && JSON.stringify(prior.scopes?.map(stableKey)) === JSON.stringify(scopes.map(stableKey))
+        && prior.collection_window?.timeframe === window.timeframe && prior.collection_window?.date_from === window.date_from && prior.collection_window?.date_to === window.date_to;
+      if (prior?.state === 'failed' && same) return skip('unavailable', 'failed');
+      // A full compatible cache skips even the catalog request and activity
+      // allocation. Probe against the requested plan before reserving an hour.
+      const probeState = {...state, next_job_id: state.next_job_id};
+      const probe = newJob(probeState, input, window, scopes, unresolved, true, wallet);
+      if (probe.streams.filter(stream => stream.kind !== 'collection').every(stream => stream.complete)) return skip('fresh');
+      const ledger = state.startup_comparisons;
+      if (ledger !== undefined && (!object(ledger) || ledger.version !== STARTUP_COMPARISON_POLICY.version
+        || !Number.isSafeInteger(ledger.attempted_at) || ledger.attempted_at <= 0 || ledger.attempted_at > 8640000000000000 - STARTUP_COMPARISON_POLICY.cooldown_ms)) return skip('unavailable', 'failed');
+      if (ledger && ledger.attempted_at + STARTUP_COMPARISON_POLICY.cooldown_ms > now()) return skip('limited', 'cooldown', ledger.attempted_at + STARTUP_COMPARISON_POLICY.cooldown_ms);
+      const allowance = marketBudgetAvailableAt(state, now(), cap.daily_attempts);
+      if (allowance !== null) return skip('limited', 'daily_limit', allowance);
+      if (state.next_allowed_at > now()) return skip('busy', 'provider_wait', state.next_allowed_at);
+      if (providerStatus) {
+        const shared = await providerStatus();
+        if (shared?.remaining_24h === 0) return skip('limited', 'provider_limit', Number.isFinite(Date.parse(shared.available_at)) ? Date.parse(shared.available_at) : null);
+        if (Number.isFinite(Date.parse(shared?.available_at)) && Date.parse(shared.available_at) > now()) return skip('busy', 'provider_wait', Date.parse(shared.available_at));
+      }
+      let job;
+      if (same && ['partial', 'running', 'queued'].includes(prior.state)) {
+        try {validateSavedCloudWindow(prior.collection_window);} catch {return skip('unavailable', 'failed');}
+        if (!validCollectionSchedule(prior) || prior.streams.some(stream => Object.hasOwn(stream, 'history_plan')
+          && !validHistoryPlan(stream.history_plan, Math.floor(Date.parse(prior.collection_window.window_from) / 1000), Math.floor(Date.parse(prior.created_at) / 1000)))) return skip('unavailable', 'failed');
+        job = prior;
+        job.state = 'running'; job.reason = null; job.updated_at = iso(now()); job.invocation++; job.invocation_used = 0;
+        job.invocation_policy = automaticInvocation(); job.invocation_deadline = now() + invocationDuration(job); job.lease = null; job.lease_until = 0;
+      } else {
+        job = probe; state.next_job_id = probeState.next_job_id; state.market_cache = probeState.market_cache;
+      }
+      state.job = job;
+      // This reservation and the selected job/cursors share one CAS commit.
+      // It survives errors, crashes, source switches and credential replacement.
+      state.startup_comparisons = {version: STARTUP_COMPARISON_POLICY.version, attempted_at: now(), job_id: job.id};
+      return {value: {state: 'started'}};
+    });
+    return result.value.state === 'started' ? {...result.value, job: project(result.state.job, result.state)} : result.value;
   }
   async function startJob(ctx, input = {}) {
     authorize(ctx);
@@ -192,23 +385,11 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
     if (Object.hasOwn(input, 'force_refresh') && typeof input.force_refresh !== 'boolean') throw new CloudRequestError('force_refresh must be a boolean.');
     let window;
     try {window = resolveCloudWindow(input, now(), {collectHistory: input.kind !== 'prices'});} catch (error) {throw new CloudRequestError(error.message);}
-    const {scopes, unresolved} = scopedCollections(await repository.records());
-    if (!scopes.length) throw new CloudRequestError('Import your verified portfolio with collection addresses before collecting.');
-    const result = await mutate(state => {
-      if (isActive(state.job) || (state.job?.lease_until || 0) > now()) throw new CloudRequestError('Stop or complete the current collection before starting another.');
-      const kinds = input.kind === 'prices' ? ['listing'] : input.kind === 'rental_prices' ? ['history'] : ['listing', 'history'];
-      state.market_cache = pruneMarketCache(state.market_cache, now());
-      state.job = {id: state.next_job_id++, kind: input.kind, state: 'running', created_at: iso(now()), updated_at: iso(now()), reason: null,
-        collection_window: window, scopes, unresolved_collections: unresolved, page_size: cap.page_size, market_cache_version: MARKET_CACHE_POLICY.version, force_refresh: input.force_refresh === true,
-        streams: [{kind: 'collection', scope: null}, ...scopes.flatMap(scope => kinds.map(kind => ({kind, scope})))].map(s => ({...s, cursor: null, started: false, complete: false, cursors: [], retry: 0, pages: 0, last_timestamp: null, ordered: true, scope_verified: true,
-          ...(s.kind === 'history' ? {history_plan: planHistoryRefresh(state.history_coverage?.[stableKey(s.scope)], Math.floor(Date.parse(window.window_from) / 1000), Math.floor(now() / 1000))} : {}),
-        })),
-        pages: 0, observations: 0, market_observations: 0, scope_names: {}, warnings: [], invocation_used: 0, invocation_deadline: now() + cap.duration_ms, invocation: 1, lease: null, lease_until: 0};
-      state.job.schedule = newCollectionSchedule(state.job.streams);
-      for (const stream of state.job.streams) if (stream.kind !== 'collection' && !state.job.force_refresh) {
-        const cached = cachedMarketStream(state.market_cache, stream, state.job.page_size, now());
-        if (cached) {stream.complete = true; stream.completion_reason = 'shared_market_cache'; stream.cache_source = cached;}
-      }
+    const result = await mutate(async (state, revision) => {
+      if (collectionBlocksSwitch(state.job, now())) throw new CloudRequestError('Stop or complete the current collection before starting another.');
+      const {scopes, unresolved} = scopedCollections(await comparisonScopeRecords(revision));
+      if (!scopes.length) throw new CloudRequestError('Import your verified portfolio with collection addresses before collecting.');
+      state.job = newJob(state, input, window, scopes, unresolved);
       pauseBudget(state, state.job);
     });
     return {job: project(result.state.job, result.state)};
@@ -226,8 +407,9 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
   async function resumeJob(ctx, input = {}) {
     authorize(ctx); const id = identify(input);
     const result = await mutate(async state => {
-      if (state.job?.id !== id && isActive(state.job)) throw new CloudRequestError('Stop the active collection before resuming another.');
-      if ((state.job?.lease_until || 0) > now()) throw new CloudRequestError('A request is still in flight. Wait for its saved lease to expire.');
+      if (state.job?.id !== id && collectionBlocksSwitch(state.job, now())) throw new CloudRequestError('Stop the active collection before resuming another.');
+      const lease = collectionLeaseDeadline(state.job);
+      if (lease === null || lease > now()) throw new CloudRequestError('A request is still in flight. Wait for its saved lease to expire.');
       // Load a non-current job inside each CAS attempt. A concurrent resume or
       // completion can change it between retries; never restore a stale cursor.
       const job = state.job?.id === id ? state.job : await repository.job(id);
@@ -237,6 +419,8 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       if (job.streams.some(stream => Object.hasOwn(stream, 'history_plan') && !validHistoryPlan(stream.history_plan, Math.floor(Date.parse(job.collection_window.window_from) / 1000), Math.floor(Date.parse(job.created_at) / 1000)))) throw new CloudRequestError(messages.incompatible_history_plan);
       // The stored window and stream parameters are immutable on Resume.
       for (const field of ['kind', 'timeframe', 'date_from', 'date_to', 'page_size', 'force_refresh', 'schedule', 'scheduling']) if (Object.hasOwn(input, field)) throw new CloudRequestError('Resume uses the saved collection parameters.');
+      delete job.invocation_policy;
+      if (job.startup_comparisons) job.startup_comparisons.manual_control = true;
       job.state = 'running'; job.reason = null; job.updated_at = iso(now()); job.invocation++; job.invocation_used = 0; job.invocation_deadline = now() + cap.duration_ms; job.lease = null; job.lease_until = 0; state.job = job;
       pauseBudget(state, job);
     });
@@ -251,13 +435,19 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
     return Number.isSafeInteger(deadline) && deadline <= 8640000000000000 ? deadline : null;
   }
   async function stepJob(ctx, input = {}) {
+    authorize(ctx);identify(input);
+    return await withStorageReservation(repository,{kind:'comparison',responseBytes:cap.response_bytes},token=>stepJobAdmitted(ctx,input,token));
+  }
+  async function stepJobAdmitted(ctx, input, storageToken) {
+    const admitted=change=>mutate(change,storageToken);
     authorize(ctx); const id = identify(input);
     await refreshClock();
     if (!secret.trim()) throw new CloudRequestError('Configure the private Marketapp token before collecting.');
     const lease = `${now()}:${Math.floor(random() * Number.MAX_SAFE_INTEGER)}`;
-    const reserved = await mutate(state => {
+    const reserved = await admitted(async (state, revision) => {
       const job = find(state, id);
       if (!isActive(job) || job.lease_until > now()) return {skip: true};
+      if (!await startupIdentityMatches(job, revision)) {finish(job, 'failed', 'startup_identity_changed'); return {};}
       if (pauseBudget(state, job)) return {};
       if (state.next_allowed_at > now()) return {skip: true};
       if (!validCollectionSchedule(job)) {finish(job, 'failed', 'incompatible_schedule'); return {};}
@@ -272,8 +462,12 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
     if (!reserved.value) return {job: project(reserved.state.job, reserved.state)};
     const {job: requestJob, stream, streamIndex} = reserved.value;
     await refreshClock();
+    if (!await startupIdentityMatches(requestJob)) {
+      const changed = await admitted(state => {if (state.job?.id === id && state.job.lease === lease) finish(state.job, 'failed', 'startup_identity_changed');});
+      return {job: project(changed.state.job, changed.state)};
+    }
     if (now() >= requestJob.invocation_deadline || now() >= requestJob.lease_until) {
-      const stopped = await mutate(state => {
+      const stopped = await admitted(state => {
         if (state.job?.id === id && state.job.lease === lease) finish(state.job, 'partial', 'duration_limit');
       });
       return {job: project(stopped.state.job, stopped.state)};
@@ -285,19 +479,26 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       if (stream.started && stream.cursor !== null) query.push(`cursor=${encodeURIComponent(stream.cursor)}`);
     }
     const url = `${BASE}${ROUTES[stream.kind]}${query.length ? `?${query.join('&')}` : ''}`;
-    let response = null, body = '', failure = null, parsed = null;
+    let response = null, body = '', failure = null, parsed = null, bodyTruncated = false, providerWait = null;
+    const began = now(), timeoutMs = Math.min(cap.timeout_ms, requestJob.invocation_deadline - began, requestJob.lease_until - began);
     try {
-      response = await request(url, {method: 'GET', headers: {Authorization: secret, Accept: 'application/json'}, redirect: 'error'});
-      body = redact(await response.text());
-      if (response.url && response.url !== url) failure = 'unexpected_redirect';
+      const received = await fetchBoundedResponse(request, url, {method: 'GET', headers: {Authorization: secret, Accept: 'application/json'}, redirect: 'error'}, {maxBytes: cap.response_bytes, timeoutMs, deadlineAt: began + timeoutMs, clock: async () => {await refreshClock(); return now();}});
+      response = received.response; body = redact(received.body);
+      if (response.url && response.url !== url || response.redirected === true) failure = 'unexpected_redirect';
       else if (size(body) > cap.response_bytes) failure = 'response_too_large';
+      else if (!Number.isInteger(response.status)) failure = 'invalid_response';
       else if ([401, 403].includes(response.status)) failure = 'authentication_failed';
       else if (response.status === 429 || [500, 502, 503, 504].includes(response.status)) failure = 'transient_http';
       else if (response.status < 200 || response.status >= 300) failure = response.status === 400 && stream.started ? 'cursor_rejected' : 'http_error';
-    } catch {failure = 'network_error';}
+    } catch (error) {
+      if (error?.code === 'PUBLIC_PROVIDER_WAIT') {providerWait = error; failure = 'provider_wait';}
+      else if (error instanceof BoundedResponseError) {failure = error.code; response = error.response; body = redact(error.body); bodyTruncated = error.truncated;}
+      else failure = 'network_error';
+    }
     // Retry-After starts when the response was received, never at the request's
     // frozen V8 timestamp. Fresh SQL wall time also fences an expired lease.
     await refreshClock();
+    if (now() - began >= timeoutMs) failure = 'request_timeout';
     const providerObservedAt = iso(now());
     if (!failure) {try {
       parsed = parseCloudPage(stream.kind, body, stream.scope, providerObservedAt, `${id}:${streamIndex}:${stream.pages}`);
@@ -305,18 +506,32 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       // otherwise legal raw response exceed a safe host serialization size.
       if (size(JSON.stringify(parsed.records)) > cap.response_bytes) failure = 'response_too_large';
     } catch {failure = 'invalid_response';}}
-    let retryable = ['network_error', 'transient_http'].includes(failure), deadline = retryable ? retryDeadline(response, stream.retry) : null;
+    let retryable = ['network_error', 'request_timeout', 'transient_http'].includes(failure), deadline = retryable ? retryDeadline(response, stream.retry) : null;
     if (retryable && deadline === null) {failure = 'invalid_retry_after'; retryable = false;}
-    const outcome = await mutate(state => {
+    const outcome = await admitted(async (state, revision) => {
       const job = state.job;
       if (deadline !== null) state.next_allowed_at = Math.max(state.next_allowed_at, deadline);
-      const raw = {status: response?.status ?? null, endpoint: ROUTES[stream.kind], request_cursor: stream.cursor, request_cursor_present: stream.started, observed_at: iso(now()), failure, body: body.slice(0, cap.response_bytes), truncated: body.length > cap.response_bytes};
-      const event = {raw_body: JSON.stringify(raw)};
+      const raw = {status: response?.status ?? null, endpoint: ROUTES[stream.kind], request_cursor: stream.cursor, request_cursor_present: stream.started, observed_at: iso(now()), failure, body, truncated: bodyTruncated};
+      // Repositories retain validated records and checkpoints, not this body.
+      // Keep a bounded provider-result marker for admission classification;
+      // JSON escaping of discarded evidence must not reject a valid page.
+      const event = {raw_body: boundedRawEvidence(raw, cap.response_bytes)};
       if (!job || job.id !== id || !isActive(job) || job.lease !== lease || job.lease_until <= now()) {
         if (job?.lease === lease) {job.lease = null; job.lease_until = 0;}
         return event;
       }
+      if (!await startupIdentityMatches(job, revision)) {finish(job, 'failed', 'startup_identity_changed'); return event;}
       const current = job.streams[streamIndex];
+      if (providerWait) {
+        // The shared gate denied the request before HTTP. Do not charge the
+        // account's invocation or retry ledger for that denied request.
+        const index = state.attempts.lastIndexOf(Date.parse(requestJob.updated_at));
+        if (index >= 0) state.attempts.splice(index, 1);
+        job.invocation_used--; current.retry--;
+        state.next_allowed_at = Math.max(state.next_allowed_at, providerWait.readyAt);
+        finish(job, providerWait.reason === 'provider_wait' && state.next_allowed_at < job.invocation_deadline ? 'running' : 'partial', 'provider_wait');
+        return {raw_body: null};
+      }
       if (failure) {
         finish(job, retryable && current.retry < cap.retry_attempts ? 'running' : 'failed', retryable ? current.retry < cap.retry_attempts ? 'retry_wait' : 'retry_exhausted' : failure);
         pauseBudget(state, job); return event;
@@ -352,6 +567,7 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
         }
       }
       const cached = completedMarketStream(job, streamIndex, now());
+      recordComparisonCompletion(state, job, streamIndex, now());
       if (cached) {
         state.market_cache = pruneMarketCache({...state.market_cache, [marketCacheKey(current, job.page_size)]: cached}, now());
       }
@@ -401,5 +617,5 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
     await repository.importPersonalAnalytics(snapshot, input.snapshot, iso(now()));
     return {personal_analytics: snapshot};
   }
-  return {getDashboard, getJobs, startJob, stepJob, stopJob, resumeJob, importChunk, importPersonalAnalytics};
+  return {getDashboard, getDashboardRevision, getJobs, startJob, stepJob, stopJob, resumeJob, refreshStartupComparisons, importChunk, importPersonalAnalytics};
 }

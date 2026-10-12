@@ -192,16 +192,17 @@ def test_freshness_boundary_future_and_naive_timestamps(store):
     assert summary["excluded_counts"] == {"future_listing": 1, "invalid_observation_time": 1, "stale_listing": 1}
 
 
-def test_stale_subject_traits_remain_visible_for_refresh_but_suppress_specific_recommendation(store):
+@pytest.mark.parametrize("backdrop", [None, "Black"])
+def test_old_subject_traits_keep_specific_recommendations_and_observation_warnings(store, backdrop):
     ton_traits(store, when=OLD)
     listings(store, [listing(i) for i in range(10, 22)])
-    subject, _ = price(store)
+    subject, _ = price(store, backdrop=backdrop)
     assert (subject["model"], subject["backdrop"]) == ("Ruby", "Black")
     assert subject["traits_observed_at"] == OLD
     assert any("older" in warning for warning in subject["trait_uncertainties"])
     assert subject["pricing"]["model_black"]["mean"] == "1"
-    assert subject["pricing"]["basis"] == "collection" and subject["pricing"]["confidence"] == "low"
-    assert "stale" in subject["pricing"]["reason"]
+    assert subject["pricing"]["basis"] == "model_black" and subject["pricing"]["confidence"] == "medium"
+    assert subject["pricing"]["recommended_price_per_day"] == "1"
 
 
 def test_newer_ton_traits_are_not_hidden_by_older_listing_traits(store):
@@ -239,14 +240,17 @@ def test_missing_peer_traits_can_contribute_only_to_collection(store):
     assert subject["pricing"]["basis"] == "collection"
 
 
-def test_stale_peer_metadata_does_not_create_model_or_black_membership(store):
+@pytest.mark.parametrize("backdrop", [None, "Black"])
+def test_old_peer_metadata_keeps_model_and_black_membership_for_fresh_prices(store, backdrop):
     ton_traits(store)
     for number in range(10, 13):
         ton_traits(store, addr(number), when=OLD)
     listings(store, [listing(i, model=None, backdrop=None) for i in range(10, 13)])
-    subject, _ = price(store)
+    subject, _ = price(store, backdrop=backdrop)
     assert subject["pricing"]["collection"]["sample_count"] == 3
-    assert subject["pricing"]["model_black"]["sample_count"] == 0
+    assert subject["pricing"]["model_black"]["sample_count"] == 3
+    assert subject["pricing"]["basis"] == "model_black"
+    assert subject["pricing"]["recommended_price_per_day"] == "1"
 
 
 def test_exact_decimal_rounding_and_even_median_do_not_use_float(store):

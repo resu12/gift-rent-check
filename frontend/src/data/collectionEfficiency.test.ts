@@ -6,7 +6,7 @@ import type { Job } from './types.ts';
 const job = (overrides: Partial<Job> = {}): Job => ({id: 1, kind: 'rental_prices', state: 'partial', created_at: '', updated_at: '', reason: null, run_id: 1, stop_requested: false,
   progress: {server_time: 1000, lease_until: 0, efficiency: {page_size: 10, recommended_page_size: 100, scheduling: 'sequential', collections_started: 1, collections_total: 45}}, collection_window: {timeframe: '30d', window_from: '2026-09-01T00:00:00Z', window_to: '2026-10-01T00:00:00Z'}, ...overrides});
 
-test('new scans replace same-kind paused banners while Activity history stays intact', () => {
+test('new scans replace same-kind paused banners while Status history stays intact', () => {
   const older = job(), newer = job({id: 2, state: 'running'}), unrelated = job({id: 3, kind: 'prices'});
   const jobs = [older, newer, unrelated];
   assert.deepEqual(visibleDashboardJobs(jobs).map(item => item.id), [2, 3]);

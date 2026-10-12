@@ -15,6 +15,7 @@ import { useProgressiveList } from './useProgressiveList';
 import { ListFooter } from './ListFooter';
 import { RentalCount } from './RentalCount';
 import { comparisonMatch, sampleSize } from './data/pricingEvidence';
+import { QuickPriceActions, RecommendedPrice } from './QuickPriceActions';
 
 
 
@@ -145,20 +146,20 @@ function RecommendationEvidence({ gift, selection, compact = false }: { gift: Gi
 }
 
 
-function Recommendation({ gift, selection }: { gift: Gift; selection: PricingSelection }) {
+function Recommendation({ gift, selection, quickActions = false }: { gift: Gift; selection: PricingSelection; quickActions?: boolean }) {
 
   if (gift.pricing?.daily_comparable === false) return <div className="recommendation-missing"><span>Daily rate unverified</span><small>Record amounts cannot establish a daily price</small></div>;
 
   if (!hasRecommendation(gift)) return <div className="recommendation-missing"><span>No daily suggestion</span><small>No suitable comparison yet</small></div>;
 
   const difference = priceDifference(gift);
-  return <div className="recommendation-ready"><PriceValue value={gift.pricing!.recommended_price_per_day} compact /><RecommendationEvidence gift={gift} selection={selection} /><small className="price-difference">{difference == null ? 'Difference unavailable' : <>Change: <strong>{formatPriceDifference(difference)}</strong> GRAM/day</>}</small></div>;
+  return <div className="recommendation-ready"><RecommendedPrice gift={gift} enabled={quickActions}><PriceValue value={gift.pricing!.recommended_price_per_day} compact /></RecommendedPrice><RecommendationEvidence gift={gift} selection={selection} compact /><small className="price-difference">{difference == null ? 'Difference unavailable' : <>Difference: <strong>{formatPriceDifference(difference)}</strong> GRAM/day</>}</small></div>;
 
 }
 
 
 
-export function PricingDetails({ gift, selection }: { gift: Gift; selection: PricingSelection }) {
+export function PricingDetails({ gift, selection, quickActions = false }: { gift: Gift; selection: PricingSelection; quickActions?: boolean }) {
   const pricing = gift.pricing;
   const cohorts = cohortsFor(selection);
   const blackOnly = selection.backdrop === 'Black';
@@ -168,13 +169,13 @@ export function PricingDetails({ gift, selection }: { gift: Gift; selection: Pri
   const evidence = sampleSize(pricing?.basis ? pricing[pricing.basis] : undefined, selection.source);
   const match = comparisonMatch(pricing?.basis, selection.backdrop);
 
-  return <section className="detail-section pricing-detail"><div className="pricing-detail-heading"><h3><Icon name="pricing" size={17} />Price comparison</h3><span>{gift.price_per_day != null && askingPriceUnit(gift) !== 'GRAM/day' ? 'Suggested: GRAM / day' : 'GRAM / day'}</span></div><p className="pricing-detail-selection">{rentals ? 'Actual rentals' : 'Listing prices'} · {timeframeLabel(selection)}{blackOnly ? ' · Exact Black only' : ''}</p>
+  return <section className="detail-section pricing-detail"><div className="pricing-detail-heading"><h3><Icon name="pricing" size={17} />Price comparison</h3><span>{gift.price_per_day != null && askingPriceUnit(gift) !== 'GRAM/day' ? 'Recommended: GRAM / day' : 'GRAM / day'}</span></div><p className="pricing-detail-selection">{rentals ? 'Actual rentals' : 'Listing prices'} · {timeframeLabel(selection)}{blackOnly ? ' · Exact Black only' : ''}</p>
     <div className="detail-price-comparison">
       <div className="detail-current-price"><span>{gift.price_is_historical ? 'Saved asking price' : 'Current asking price'}</span><PriceValue value={gift.price_per_day} compact unit={askingPriceUnit(gift)} />{gift.price_per_day == null ? <small>Not observed</small> : gift.price_is_historical && <small className="saved-price-cue">Saved {relativeTime(gift.price_observed_at)}</small>}</div>
-      <div className={`detail-suggested-price ${hasRecommendation(gift) ? 'ready' : 'missing'}`}><span>Suggested price</span><Recommendation gift={gift} selection={selection} /></div>
+      <div className={`detail-suggested-price ${hasRecommendation(gift) ? 'ready' : 'missing'}`}><span>Recommended price</span><Recommendation gift={gift} selection={selection} quickActions={quickActions} /></div>
     </div>
     <div className="trait-pair compact-traits"><div><span>Model</span><strong>{gift.model || 'Not established'}</strong></div><div><span>Backdrop</span><strong>{isExactBlack(gift) && <i className="black-swatch" />}{gift.backdrop || 'Not established'}</strong></div></div>
-    <div className="cohort-list-heading"><h4>Comparison averages</h4><span>{unit}</span></div>
+    <details className="comparison-averages"><summary>Comparison averages <span>{unit}</span></summary>
     <div className="cohort-detail-list">{cohorts.map(({ key, label }) => {
       const cohort = pricing?.[key];
       const selected = (pricing?.basis === key || (blackOnly && key === 'model' && pricing?.basis === 'model_black')) && hasRecommendation(gift);
@@ -191,7 +192,7 @@ export function PricingDetails({ gift, selection }: { gift: Gift; selection: Pri
           <div><dt>{rentals ? 'Last rental event' : 'Last observation'}</dt><dd>{dateTime(cohort?.observed_to, true)}</dd></div>
         </dl><p className="sample-explanation">{sampleSize(cohort, selection.source).explanation}</p></details>
       </article>;
-    })}</div>
+    })}</div></details>
     <details className="pricing-evidence"><summary>Sources & limitations{warnings.length > 0 && <span> · {warnings.length}</span>}</summary><div>
       {pricing?.reason && <p>{humanize(pricing.reason)}</p>}
       {hasRecommendation(gift) && <p>{evidence.explanation} {match.explanation}</p>}
@@ -203,7 +204,22 @@ export function PricingDetails({ gift, selection }: { gift: Gift; selection: Pri
 }
 
 
-export function PricingPage({ data, selection, onSelectionChange, filters, onFiltersChange, onSelect, renderImage, collectPrices, disabled, viewMode = 'grid', viewControl }: {
+function PricingCardPrices({ gift, selection, quickActions }: { gift: Gift; selection: PricingSelection; quickActions: boolean }) {
+  return <span className="pricing-gift-card-prices">
+    <span title={gift.price_per_day == null ? 'No current asking price saved' : `${gift.price_is_historical ? 'Saved asking price' : 'Observed asking price'} · ${dateTime(gift.price_observed_at, true)}`}>
+      <span>{gift.price_is_historical ? 'Saved' : 'Current'}</span><strong>{formatAmount(gift.price_per_day)}</strong>
+      {gift.price_per_day != null && askingPriceUnit(gift) !== 'GRAM/day' && <small className="grid-price-cue">{askingPriceUnit(gift)}</small>}
+      {gift.price_per_day == null && <small className="grid-price-cue">Not observed</small>}
+      {gift.price_is_historical && gift.price_per_day != null && <small className="grid-price-cue stale">Previous observation</small>}
+    </span>
+    <span className="pricing-gift-card-recommendation" title={hasRecommendation(gift) ? `Recommended daily price · ${comparisonMatch(gift.pricing?.basis, selection.backdrop).label}` : 'No daily recommendation available'}>
+      <span>Recommended</span><RecommendedPrice gift={gift} enabled={quickActions}><strong>{formatAmount(hasRecommendation(gift) ? gift.pricing?.recommended_price_per_day : null)}</strong></RecommendedPrice>
+      {!hasRecommendation(gift) && <small className="grid-price-cue">{gift.pricing?.daily_comparable === false ? 'Daily rate unverified' : 'No estimate'}</small>}
+    </span>
+  </span>;
+}
+
+export function PricingPage({ data, selection, onSelectionChange, filters, onFiltersChange, onSelect, renderImage, collectPrices, disabled, viewMode = 'grid', viewControl, quickActions = false }: {
 
   data: Dashboard; selection: PricingSelection; onSelectionChange: (selection: PricingSelection) => void;
   filters: PricingFilters; onFiltersChange: (filters: PricingFilters) => void; onSelect: (gift: Gift) => void; renderImage: (gift: Gift) => ReactNode;
@@ -211,6 +227,7 @@ export function PricingPage({ data, selection, onSelectionChange, filters, onFil
   collectPrices: () => void; disabled: boolean;
   viewMode?: PricingViewMode;
   viewControl?: ReactNode;
+  quickActions?: boolean;
 
 }) {
 
@@ -231,6 +248,8 @@ export function PricingPage({ data, selection, onSelectionChange, filters, onFil
   const setSearch = (search: string) => onFiltersChange({ ...filters, search });
   const setCollection = (collection: string) => onFiltersChange({ ...filters, collection });
   const setSort = (sort: PricingSort) => onFiltersChange({ ...filters, sort });
+  const activeFilterCount = Number(Boolean(collection)) + Number(sort !== 'increase') + Number(filter === 'ready' || filter === 'missing');
+  const resetFilters = () => { onFiltersChange({ ...filters, collection: '', filter: 'all', sort: 'increase' }); if (selection.backdrop) onSelectionChange({ ...selection, backdrop: undefined }); };
   const setFilter = (filter: PricingFilter) => {
     onFiltersChange({ ...filters, filter });
     const backdrop = filter === 'black' ? 'Black' : undefined;
@@ -282,7 +301,7 @@ export function PricingPage({ data, selection, onSelectionChange, filters, onFil
 
 
 
-    {portfolio.length > 0 && peerDataCount === 0 && <div className="pricing-empty-banner"><Icon name="layers" size={22} /><div><strong>No comparison samples in this timeframe</strong><p>{rentals ? 'Collect rental history or choose a wider timeframe. Recorded rental amounts are normalized per day for comparison.' : 'Collect current market listings or choose a wider timeframe. Missing samples remain empty.'}</p></div><button className="button primary" disabled={disabled} onClick={collectPrices}>{rentals ? 'Collect actual rentals' : 'Collect market prices'}<Icon name="arrow" size={15} /></button></div>}
+    {portfolio.length > 0 && peerDataCount === 0 && <div className="pricing-empty-banner"><Icon name="layers" size={22} /><div><strong>No comparison samples in this timeframe</strong><p>Update comparisons or choose a longer period.</p></div><button className="button primary" disabled={disabled} onClick={collectPrices}>Update comparisons<Icon name="arrow" size={15} /></button></div>}
 
     {rentals && !dailyComparable && <div className="notice info"><Icon name="shield" size={18} /><div><strong>Rental amounts and daily asking prices use different units</strong><p>Rental record averages remain useful for comparison. Until the API's price and duration units are verified, they are shown as GRAM per rental record and do not generate daily recommendations.</p></div></div>}
 
@@ -303,22 +322,21 @@ export function PricingPage({ data, selection, onSelectionChange, filters, onFil
 
 
 
-      <div className="pricing-grid-filters"><div className="pricing-grid-quick-filters" role="group" aria-label="Gift backdrop"><button type="button" className={filter === 'all' ? 'active' : ''} aria-pressed={filter === 'all'} onClick={() => setFilter('all')}>All gifts</button><button type="button" className={blackOnly ? 'active' : ''} aria-pressed={blackOnly} onClick={() => setFilter(blackOnly ? 'all' : 'black')}><i className="black-swatch" />Black</button></div><details className="pricing-grid-advanced"><summary>Filters{(collection || sort !== 'default' || filter === 'ready' || filter === 'missing') && <span className="pricing-filter-active" aria-label="Additional filters active" />}</summary><div><label><span>Collection</span><select aria-label="Filter pricing by collection" value={collection} onChange={event => setCollection(event.target.value)}><option value="">All collections</option>{collections.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>Sort by</span><select aria-label="Sort pricing gifts" value={sort} onChange={event => setSort(event.target.value as PricingSort)}><option value="default">Default order</option><option value="gap">Largest price gap</option><option value="increase">Biggest increase first</option><option value="decrease">Biggest decrease first</option></select></label><label><span>Show</span><select aria-label="Filter pricing by recommendation" value={filter} onChange={event => setFilter(event.target.value as PricingFilter)}>{FILTERS.map(option => <option key={option.key} value={option.key}>{option.label}</option>)}</select></label></div></details></div>
+      <div className="pricing-grid-filters"><div className="pricing-grid-quick-filters" role="group" aria-label="Gift backdrop"><button type="button" className={filter === 'all' ? 'active' : ''} aria-pressed={filter === 'all'} onClick={() => setFilter('all')}>All gifts</button><button type="button" className={blackOnly ? 'active' : ''} aria-pressed={blackOnly} onClick={() => setFilter(blackOnly ? 'all' : 'black')}><i className="black-swatch" />Black</button></div><details className="pricing-grid-advanced"><summary>Filters{activeFilterCount > 0 && <span className="filter-count" aria-label="Active filters">{activeFilterCount}</span>}</summary><div><label><span>Collection</span><select aria-label="Filter pricing by collection" value={collection} onChange={event => setCollection(event.target.value)}><option value="">All collections</option>{collections.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>Sort by</span><select aria-label="Sort pricing gifts" value={sort} onChange={event => setSort(event.target.value as PricingSort)}><option value="default">Default order</option><option value="gap">Largest price gap</option><option value="increase">Biggest increase first</option><option value="decrease">Biggest decrease first</option></select></label><label><span>Gift group</span><select aria-label="Filter pricing by recommendation" value={filter} onChange={event => setFilter(event.target.value as PricingFilter)}>{FILTERS.map(option => <option key={option.key} value={option.key}>{option.label}</option>)}</select></label>{(activeFilterCount > 0 || blackOnly) && <button type="button" className="text-button filter-reset" onClick={resetFilters}>Reset filters</button>}</div></details></div>
 
-      {filtered.length ? grid ? <div className="pricing-gift-grid">{filtered.slice(0, list.visibleCount).map(gift => <button type="button" className="pricing-gift-card" key={gift.id} onClick={() => onSelect(gift)} aria-label={`View pricing details for ${gift.name || 'gift'}`}>
+      {filtered.length ? grid ? <div className="pricing-gift-grid">{filtered.slice(0, list.visibleCount).map(gift => <article className={`pricing-gift-card${quickActions ? ' quick-actions' : ''}`} key={gift.id}><button type="button" className="pricing-gift-card-main" onClick={() => onSelect(gift)} aria-label={`View pricing details for ${gift.name || 'gift'}`}>
         {renderImage(gift)}
         <strong className="pricing-gift-card-name">{gift.name || 'Unnamed gift'}</strong>
-        <span className="pricing-gift-card-prices"><span title={gift.price_per_day == null ? 'No current asking price saved' : `${gift.price_is_historical ? 'Saved asking price' : 'Observed asking price'} · ${dateTime(gift.price_observed_at, true)}`}><span>{gift.price_is_historical ? 'Saved' : 'Current'}</span><strong>{formatAmount(gift.price_per_day)}</strong>{gift.price_per_day != null && askingPriceUnit(gift) !== 'GRAM/day' && <small className="grid-price-cue">{askingPriceUnit(gift)}</small>}{gift.price_per_day == null && <small className="grid-price-cue">Not observed</small>}{gift.price_is_historical && gift.price_per_day != null && <small className="grid-price-cue stale">Previous observation</small>}</span><span className="pricing-gift-card-recommendation" title={hasRecommendation(gift) ? `Recommended daily price · ${comparisonMatch(gift.pricing?.basis, selection.backdrop).label}` : 'No daily recommendation available'}><span>Recommended</span><strong>{formatAmount(hasRecommendation(gift) ? gift.pricing?.recommended_price_per_day : null)}</strong>{!hasRecommendation(gift) && <small className="grid-price-cue">{gift.pricing?.daily_comparable === false ? 'Daily rate unverified' : 'No estimate'}</small>}</span></span>
-        {hasRecommendation(gift) && <RecommendationEvidence gift={gift} selection={selection} compact />}
-      </button>)}</div> : <div className="table-scroll"><table className={`pricing-table ${blackOnly ? 'black-scope' : ''}`}><thead><tr><th>Gift & traits</th><th>Current price<small>{mixedAskingUnits ? 'Units shown per gift' : 'GRAM / day'}</small></th><th className="suggested-heading">Suggested price<small>GRAM / day</small></th>{cohorts.map(cohort => <th key={cohort.key}>{cohort.shortLabel}<small>{rentals ? 'Rental average' : 'Listing average'}</small></th>)}<th><span className="sr-only">Details</span></th></tr></thead><tbody>{filtered.slice(0, list.visibleCount).map(gift => <tr key={gift.id}><td className="pricing-identity"><button className="gift-name-button" onClick={() => onSelect(gift)}>{renderImage(gift)}<span className="pricing-gift-copy"><strong>{gift.name || 'Unnamed gift'}</strong><small>{gift.collection_name || shorten(gift.collection_address)}</small><span className="pricing-row-traits"><span>{gift.model || 'Model unknown'}</span><span>{isExactBlack(gift) && <i className="black-swatch" />}{gift.backdrop || 'Backdrop unknown'}</span></span></span><RentalCount gift={gift} /></button></td>
+        {!quickActions && <><PricingCardPrices gift={gift} selection={selection} quickActions={false} />{hasRecommendation(gift) && <RecommendationEvidence gift={gift} selection={selection} compact />}</>}
+      </button>{quickActions && <><PricingCardPrices gift={gift} selection={selection} quickActions />{hasRecommendation(gift) && <RecommendationEvidence gift={gift} selection={selection} compact />}</>}<QuickPriceActions gift={gift} enabled={quickActions} /></article>)}</div> : <div className="table-scroll"><table className={`pricing-table ${blackOnly ? 'black-scope' : ''}`}><thead><tr><th>Gift & traits</th><th>Current price<small>{mixedAskingUnits ? 'Units shown per gift' : 'GRAM / day'}</small></th><th className="suggested-heading">Recommended price<small>GRAM / day</small></th>{cohorts.map(cohort => <th key={cohort.key}>{cohort.shortLabel}<small>{rentals ? 'Rental average' : 'Listing average'}</small></th>)}<th><span className="sr-only">Details</span></th></tr></thead><tbody>{filtered.slice(0, list.visibleCount).map(gift => <tr key={gift.id}><td className="pricing-identity"><button className="gift-name-button" onClick={() => onSelect(gift)}>{renderImage(gift)}<span className="pricing-gift-copy"><strong>{gift.name || 'Unnamed gift'}</strong><small>{gift.collection_name || shorten(gift.collection_address)}</small><span className="pricing-row-traits"><span>{gift.model || 'Model unknown'}</span><span>{isExactBlack(gift) && <i className="black-swatch" />}{gift.backdrop || 'Backdrop unknown'}</span></span></span><RentalCount gift={gift} /></button></td>
 
         <td className="own-price" data-label={gift.price_is_historical ? 'Saved asking price' : 'Current price'}><PriceValue value={gift.price_per_day} compact unit={askingPriceUnit(gift)} />{gift.price_per_day == null ? <small className="price-observation-note">Not observed</small> : <small className={`price-observation-note${gift.price_is_historical ? ' saved-price-cue' : ''}`} title={dateTime(gift.price_observed_at)}>{gift.price_is_historical ? 'Saved · ' : 'Observed '}{relativeTime(gift.price_observed_at)}</small>}</td>
 
-        <td className="suggested-cell" data-label="Suggested daily price"><Recommendation gift={gift} selection={selection} /></td>
+        <td className="suggested-cell" data-label="Recommended daily price"><Recommendation gift={gift} selection={selection} quickActions={quickActions} /></td>
 
         {cohorts.map(({ key, label }) => <td className={`pricing-cohort cohort-${key}`} key={key} data-label={label}><CohortAverage cohort={gift.pricing?.[key]} rentals={rentals} unit={gift.pricing?.unit || unit} />{key === 'model_black' && !isExactBlack(gift) && (gift.pricing?.model_black.sample_count || 0) > 0 && <span className="comparison-only">Comparison only</span>}</td>)}
 
-        <td className="pricing-detail-cell"><button className="icon-button" aria-label={`View pricing details for ${gift.name || 'gift'}`} onClick={() => onSelect(gift)}><Icon name="chevron" size={17} /></button></td></tr>)}</tbody></table></div>
+        <td className="pricing-detail-cell"><div className={quickActions ? 'pricing-row-actions' : undefined}><QuickPriceActions gift={gift} enabled={quickActions} /><button className="icon-button" aria-label={`View pricing details for ${gift.name || 'gift'}`} onClick={() => onSelect(gift)}><Icon name="chevron" size={17} /></button></div></td></tr>)}</tbody></table></div>
 
         : <div className="empty-state"><span className="empty-icon"><Icon name={portfolio.length ? 'search' : 'gift'} size={29} /></span><h3>{portfolio.length ? 'No gifts match this pricing view' : 'Add gifts to start comparing prices'}</h3><p>{portfolio.length ? 'Try another search or collection, or switch back to all portfolio gifts.' : data.capabilities.hosting === 'serverless' ? 'Your portfolio has not been imported yet. Import your saved wallet evidence to compare these gifts.' : 'Discover your wallet or import a portfolio. Comparison prices will be calculated for your gifts.'}</p></div>}
 

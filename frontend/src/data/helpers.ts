@@ -1,8 +1,8 @@
 import type { Gift, Job, PricingBasis } from './types.ts';
 
-export type GiftFilter = 'all' | 'for_rent' | 'rented' | 'direct' | 'idle' | 'sale' | 'review';
+export type GiftFilter = 'all' | 'available' | 'for_rent' | 'rented' | 'direct' | 'idle' | 'sale' | 'review';
 
-export function giftGroup(gift: Gift): Exclude<GiftFilter, 'all'> {
+export function giftGroup(gift: Gift): Exclude<GiftFilter, 'all' | 'available'> {
   const state = `${gift.ui_state} ${gift.state}`.toLowerCase();
   if (gift.category === 'unresolved' || /unresolved|conflict|expired/.test(state)) return 'review';
   if (/sale|auction/.test(state)) return 'sale';
@@ -15,12 +15,25 @@ export function giftGroup(gift: Gift): Exclude<GiftFilter, 'all'> {
   return 'review';
 }
 
+/** Availability combines saved listings with verified idle contracts; it does not establish listing visibility. */
+export function isAvailableForRent(gift: Gift): boolean {
+  if (!gift.is_portfolio || gift.category === 'unresolved' || gift.collection_conflict || gift.status_is_historical === true) return false;
+  const state = `${gift.ui_state ?? ''} ${gift.state}`.toLowerCase();
+  if (/rented|active_rental|expired|sale|auction|direct|wallet|conflict|unresolved|uncertain|review/.test(state)) return false;
+  const group = giftGroup(gift);
+  return gift.ui_state === 'for_rent' || (group === 'idle' && gift.state === 'idle_rental_contract' && gift.status_is_historical === false);
+}
+
+export function matchesGiftFilter(gift: Gift, filter: GiftFilter): boolean {
+  return filter === 'all' || (filter === 'available' ? isAvailableForRent(gift) : giftGroup(gift) === filter);
+}
+
 export function filterGifts(gifts: Gift[], search: string, state: GiftFilter, collection: string): Gift[] {
   const needle = search.trim().toLocaleLowerCase();
   return gifts.filter(gift => {
     const matchesSearch = !needle || [gift.name, gift.nft_address, gift.collection_name, gift.collection_address, gift.model, gift.backdrop]
       .some(value => value?.toLocaleLowerCase().includes(needle));
-    return matchesSearch && (state === 'all' || giftGroup(gift) === state) &&
+    return matchesSearch && matchesGiftFilter(gift, state) &&
       (!collection || gift.collection_address === collection || (!gift.collection_address && gift.collection_name === collection));
   });
 }
@@ -108,17 +121,18 @@ export function shorten(value: string | null | undefined, width = 6): string {
   return value.length > width * 2 + 3 ? `${value.slice(0, width)}…${value.slice(-width)}` : value;
 }
 
-export function formatAmount(value: string | null | undefined): string {
+export function formatAmount(value: string | null | undefined, places: 1 | 3 = 3): string {
   if (value == null || value === '') return '—';
-  // Round the display half up to three places without a lossy Number conversion.
+  // Round only the display, preserving decimal text and the default price precision.
   if (!/^-?\d+(\.\d+)?$/.test(value)) return value;
   const negative = value.startsWith('-');
   const [whole, fraction = ''] = (negative ? value.slice(1) : value).split('.');
-  let thousandths = BigInt(whole) * 1000n + BigInt(fraction.padEnd(3, '0').slice(0, 3));
-  if (fraction.length > 3 && fraction[3] >= '5') thousandths += 1n;
-  const integer = (thousandths / 1000n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  const decimal = (thousandths % 1000n).toString().padStart(3, '0');
-  return `${negative && thousandths !== 0n ? '-' : ''}${integer}.${decimal}`;
+  const scale = 10n ** BigInt(places);
+  let units = BigInt(whole) * scale + BigInt(fraction.padEnd(places, '0').slice(0, places));
+  if (fraction.length > places && fraction[places] >= '5') units += 1n;
+  const integer = (units / scale).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const decimal = (units % scale).toString().padStart(places, '0');
+  return `${negative && units !== 0n ? '-' : ''}${integer}.${decimal}`;
 }
 
 export function dateTime(value: string | number | null | undefined, compact = false): string {

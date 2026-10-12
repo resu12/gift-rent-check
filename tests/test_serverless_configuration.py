@@ -9,6 +9,13 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 
+@pytest.fixture(autouse=True)
+def release_example(tmp_path):
+    target = tmp_path / "serverless/public-release-config.example.js"
+    target.parent.mkdir(parents=True)
+    target.write_bytes((Path(__file__).parents[1] / "serverless/public-release-config.example.js").read_bytes())
+
+
 def test_serverless_environment_precedence_and_server_only_destination(tmp_path, monkeypatch, capsys):
     (tmp_path / ".env").write_text("MARKETAPP_API_TOKEN=file-token\nTELEGRAM_OWNER_USER_ID=987\n", encoding="utf-8")
     monkeypatch.setenv("MARKETAPP_API_TOKEN", "environment-token")
@@ -21,6 +28,18 @@ def test_serverless_environment_precedence_and_server_only_destination(tmp_path,
     assert "file-token" not in content
     assert capsys.readouterr().out == ""
     assert not list(tmp_path.rglob(".private-config-*"))
+    assert path.with_name("public-release-config.js").read_bytes() == (tmp_path / "serverless/public-release-config.example.js").read_bytes()
+
+
+def test_serverless_setup_preserves_existing_release_configuration(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARKETAPP_API_TOKEN", "test-token")
+    path = module.configure(tmp_path, "123")
+    release = path.with_name("public-release-config.js")
+    configured = b"export const publicReleaseConfig = {enabled:true, invitedUserIds:['456']};\n"
+    release.write_bytes(configured)
+    module.configure(tmp_path, "789")
+    assert release.read_bytes() == configured
+    assert "ownerTelegramId = 789" in path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("owner", [None, "", "123:bot-secret", "-1", "0", "9007199254740992", "１２３"])
