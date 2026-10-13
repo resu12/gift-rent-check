@@ -1,9 +1,9 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Icon } from '../Icons';
 import type { DashboardAdapter, Job } from '../data/types';
 import type { PublicAccountAdapter, PublicAccountStatus } from './publicAccount';
-import { publicAccountError, publicAccountStep, validPublicApiKey, selectPublicDiscovery } from './publicAccount';
+import { createPublicAccountReader, publicAccountError, publicAccountStep, validPublicApiKey, selectPublicDiscovery } from './publicAccount';
 import { PublicWalletProof } from './PublicWalletProof';
 import { shortWalletAddress } from './walletIdentity';
 import './publicAccount.css';
@@ -13,6 +13,7 @@ type Action = 'save' | 'remove' | 'test' | 'disconnect' | 'delete' | 'reactivate
 export function PublicAccountSetup(props: {
   enabled: boolean;
   adapter: PublicAccountAdapter;
+  accountScope?: string;
   dashboardAdapter?: DashboardAdapter;
   jobs?: Job[];
   portfolioCount?: number;
@@ -22,7 +23,11 @@ export function PublicAccountSetup(props: {
   onExport?(): void;
   onClose?(): void;
 }) {
-  return props.enabled ? <AccountSetup {...props} /> : null;
+  // A transient dashboard reload has no new scope. Keep the current editor until
+  // a confirmed account change, then discard its old account and credentials.
+  const scope = useRef(props.accountScope);
+  if (props.accountScope !== undefined) scope.current = props.accountScope;
+  return props.enabled ? <AccountSetup key={scope.current} {...props} /> : null;
 }
 
 function AccountSetup({ adapter, dashboardAdapter, jobs = [], portfolioCount = 0, variant = 'setup', marketappConnection, onChanged, onExport, onClose }: Parameters<typeof PublicAccountSetup>[0]) {
@@ -37,6 +42,8 @@ function AccountSetup({ adapter, dashboardAdapter, jobs = [], portfolioCount = 0
   const [startingAgain, setStartingAgain] = useState(false);
   const [discovery, setDiscovery] = useState<Job | null>(null);
   const mounted = useRef(true), acting = useRef(false), requestGeneration = useRef(0);
+  const reader = useMemo(() => createPublicAccountReader(adapter,
+    value => { setAccount(value); setError(null); }, problem => setError(publicAccountError(problem))), [adapter]);
   const keyInput = useRef<HTMLInputElement>(null);
   const keyId = useId(), keyHelpId = useId(), deleteId = useId();
   const clearKey = () => { setKey(''); if (keyInput.current) keyInput.current.value = ''; };
@@ -45,32 +52,29 @@ function AccountSetup({ adapter, dashboardAdapter, jobs = [], portfolioCount = 0
   const busy = pending !== null || Boolean(liveDiscovery);
 
   useEffect(() => {
-    mounted.current = true; const abort = new AbortController();
-    clearKey(); setKeyEditorOpen(false);
-    void adapter.get(abort.signal).then(value => { if (!abort.signal.aborted) setAccount(value); })
-      .catch(problem => { if (!abort.signal.aborted) setError(publicAccountError(problem)); });
-    return () => { mounted.current = false; requestGeneration.current++; abort.abort(); if (keyInput.current) keyInput.current.value = ''; };
-  }, [adapter]);
+    mounted.current = true; acting.current = false;
+    setAccount(null); setPending(null); setError(null); setNotice(null);
+    clearKey(); setKeyEditorOpen(false); void reader.reload();
+    return () => { mounted.current = false; requestGeneration.current++; reader.invalidate(); if (keyInput.current) keyInput.current.value = ''; };
+  }, [reader]);
   useEffect(() => { clearKey(); setKeyEditorOpen(false); }, [account?.account_generation, account?.wallet?.address, account?.deleted]);
   useEffect(() => {
     setDiscovery(current => selectPublicDiscovery(account, jobs, current));
   }, [jobs, account]);
   useEffect(() => dashboardAdapter?.subscribe?.(event => {
     if (event.job?.kind === 'discover' && event.job.account_generation === account?.account_generation) setDiscovery(event.job);
-    if (event.savedDataChanged) void adapter.get().then(value => { if (mounted.current) setAccount(value); }).catch(() => undefined);
-  }), [adapter, dashboardAdapter, account?.account_generation]);
+    if (event.savedDataChanged && !acting.current) void reader.reload();
+  }), [reader, dashboardAdapter, account?.account_generation]);
 
   async function reload() {
-    setError(null);
-    try { const value = await adapter.get(); if (mounted.current) setAccount(value); }
-    catch (problem) { if (mounted.current) setError(publicAccountError(problem)); }
+    setError(null); await reader.reload();
   }
   async function act(action: Action) {
     if (!account || acting.current || (busy && action !== 'delete' && action !== 'remove')) return;
     if (action === 'save' && !validPublicApiKey(key)) { clearKey(); setError('Paste your Marketapp API key without spaces.'); return; }
     if (action === 'delete' && deleteText !== 'DELETE') return;
     if (action === 'reactivate' && (!startingAgain || account.pending_cleanup)) return;
-    const suppliedKey = key; clearKey(); acting.current = true;
+    const suppliedKey = key; clearKey(); acting.current = true; reader.invalidate();
     const generation = ++requestGeneration.current; setPending(action); setError(null); setNotice(null);
     const current = () => mounted.current && generation === requestGeneration.current;
     try {
@@ -104,7 +108,7 @@ function AccountSetup({ adapter, dashboardAdapter, jobs = [], portfolioCount = 0
         try { const next = await adapter.get(); if (current()) setAccount(next); } catch { /* Explicit read retry remains available. */ }
         onChanged();
       }
-    } finally { acting.current = false; if (current()) { clearKey(); setPending(null); } }
+    } finally { if (current()) { acting.current = false; clearKey(); setPending(null); } }
   }
 
   const sync = discovery?.progress.sync;
@@ -127,14 +131,14 @@ function AccountSetup({ adapter, dashboardAdapter, jobs = [], portfolioCount = 0
     {account && !account.deleted && <>
       <div className="public-account-step"><div className="public-account-step-heading"><Icon name={account.wallet ? 'check' : 'wallet'} size={20} /><h3>Wallet</h3>
         <span>{account.wallet ? 'Verified' : 'Not connected'}</span></div>
-        <p className="public-account-note">{variant === 'connections' ? 'Your verified gift portfolio.' : 'The wallet used to find and verify your gifts.'}</p>
+        <p className="public-account-note">Verify the wallet that holds your gifts. Marketapp login is a separate approval below.</p>
         {account.wallet ? <div className="public-account-wallet"><code>{shortWalletAddress(account.wallet.address)}</code>
           <button type="button" className="button secondary small" disabled={busy} onClick={() => { void act('disconnect'); }}>{pending === 'disconnect' ? 'Disconnecting…' : 'Disconnect wallet'}</button></div>
-          : <PublicWalletProof adapter={adapter} disabled={busy} onVerified={next => { setAccount(next); setError(null); setNotice('Wallet verified.'); onChanged(); }} />}
+          : <PublicWalletProof adapter={adapter} disabled={busy} onVerified={next => { if (!mounted.current) return; reader.invalidate(); setAccount(next); setError(null); setNotice('Wallet verified.'); onChanged(); }} />}
       </div>
-      {variant === 'connections' && marketappConnection}
+      {marketappConnection}
       <div className="public-account-step"><div className="public-account-step-heading"><Icon name={account.marketapp_key.configured ? 'check' : 'shield'} size={20} /><h3>Marketapp API key</h3><span>{account.marketapp_key.configured ? 'Saved securely' : 'Not added'}</span></div>
-        <p className="public-account-note">{variant === 'connections' ? 'Market comparisons & rental history.' : 'Used for market comparison prices and rental history.'}</p>
+        <p className="public-account-note">Your own API key is used for market comparisons and rental history. It does not sign in to your personal Marketapp account.</p>
         <div className="public-account-actions">
           <button type="button" className="button secondary small" disabled={busy || (!account.wallet && !account.marketapp_key.configured)} aria-expanded={keyEditorOpen} aria-controls={`${keyId}-editor`} onClick={() => { clearKey(); setKeyEditorOpen(true); }}>
             {account.marketapp_key.configured ? 'Change API key' : 'Add API key'}</button>
@@ -161,11 +165,11 @@ function AccountSetup({ adapter, dashboardAdapter, jobs = [], portfolioCount = 0
           {pending === 'discover' || pending === 'resume' ? 'Starting…' : liveDiscovery ? 'Checking gifts…' : mayResume ? 'Continue discovery' : portfolioCount ? 'Discover new gifts' : 'Discover my gifts'}</button>
       </div></details>}
       <details className="public-account-privacy"><summary>Data & privacy</summary>
-        <p className="public-account-note">Your API key and personal records belong to this Telegram account. Removing a key prevents further Marketapp collection. Deleting account data removes saved records and cancels pending work.</p>
+        <p className="public-account-note">Your API key, remembered Marketapp login and personal records belong to this Telegram account. Clearing the API key stops API-based collection. Disconnect Marketapp separately to stop personal-page refreshes. Deleting account data removes saved records and cancels pending work.</p>
         <div className="public-account-actions">{onExport && <button type="button" className="button secondary small" disabled={busy || !portfolioCount} onClick={onExport}><Icon name="download" size={16} />Export saved gifts</button>}
           <button type="button" className="text-button public-account-delete" disabled={pending !== null} onClick={() => setDeleting(true)}>Delete my data</button></div>
         {deleting && <div className="public-account-delete-confirm" role="group" aria-labelledby={`${deleteId}-title`}><strong id={`${deleteId}-title`}>Delete this account’s saved data?</strong>
-          <p>This removes your key, wallet link, portfolio, analytics, and saved progress. It does not affect your wallet or NFTs.</p>
+          <p>This removes your key, remembered Marketapp login, wallet link, portfolio, analytics, and saved progress. It does not affect your wallet or NFTs.</p>
           <label htmlFor={deleteId}>Type DELETE to confirm</label><input id={deleteId} value={deleteText} onChange={event => setDeleteText(event.target.value)} autoComplete="off" spellCheck={false} disabled={pending !== null} />
           <div className="public-account-actions"><button type="button" className="button secondary" disabled={pending !== null || deleteText !== 'DELETE'} onClick={() => { void act('delete'); }}>{pending === 'delete' ? 'Deleting…' : 'Delete my data'}</button>
             <button type="button" className="text-button" disabled={pending !== null} onClick={() => { setDeleting(false); setDeleteText(''); }}>Cancel</button></div></div>}

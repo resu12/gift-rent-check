@@ -229,6 +229,9 @@ test('safe backend errors preserve previous analytics and never reflect provider
     ['MARKETAPP_REFRESH_INVALID_INPUT', 'invalid_input'], ['MARKETAPP_REFRESH_PRIVATE_ACCESS_DENIED', 'access_denied'],
     ['MARKETAPP_REFRESH_WALLET_REQUIRED', 'wallet_required'], ['MARKETAPP_REFRESH_AUTH_REJECTED', 'auth_rejected'], ['MARKETAPP_REFRESH_PAGE_CHANGED', 'page_changed'],
     ['STORAGE_CAPACITY_PAUSED', 'storage_capacity'], ['STORAGE_FULL', 'storage_capacity'],
+    ['PUBLIC_ACCESS_DENIED', 'access_denied'], ['PUBLIC_ACCOUNT_DELETED', 'account_changed'], ['PUBLIC_ACCOUNT_CHANGED', 'account_changed'],
+    ['PUBLIC_WALLET_CHANGED', 'account_changed'], ['PUBLIC_WALLET_REQUIRED', 'wallet_required'],
+    ['PUBLIC_ANALYTICS_DISABLED', 'not_enabled'], ['PUBLIC_STORAGE_LIMIT', 'storage_capacity'],
   ] as const;
   for (const [code, reason] of failures) {
     const h = setup({ finish: async () => { throw { code, message: 'Private cookies nonce signature state-init' }; } });

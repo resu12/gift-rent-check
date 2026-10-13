@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {extractMarketappAnalyticsPage, MarketappAnalyticsPageError, MARKETAPP_ANALYTICS_PAGE_MAX_BYTES} from '../tgcloud/lib/marketapp-analytics-page.js';
 import {normalizePersonalAnalytics} from '../tgcloud/lib/personal-analytics.js';
-import {syntheticAnalyticsPage, syntheticFriendly, syntheticWallet, htmlAttribute} from './fixtures/marketapp-analytics-page-fixture.mjs';
+import {syntheticAnalyticsPage, syntheticFriendly, syntheticWallet, htmlAttribute, syntheticTopItems, syntheticTopItemsTable} from './fixtures/marketapp-analytics-page-fixture.mjs';
 
 const extract = source => extractMarketappAnalyticsPage(source.html, source.options);
 function rejects(source, reason) {
@@ -18,6 +18,66 @@ function editChart(source, key, edit) {
   source.html = source.html.replace(htmlAttribute(row.spec_raw), htmlAttribute(changed));
   return source;
 }
+
+test('Top items uses the observed heading, five columns and stable NFT links without deriving figures', () => {
+  const source = syntheticAnalyticsPage({topItems: syntheticTopItems(), combinedActivity: true});
+  const result = extract(source);
+  assert.deepEqual(result.top_items, source.snapshot.top_items);
+  assert.equal(result.top_items.items[0].volume, '1.50');
+  assert.equal(result.top_items.items[0].price_per_day, '0.125');
+  assert.equal(JSON.stringify(result).includes('Displayed Marketapp definition'), false);
+  const normalized = normalizePersonalAnalytics(JSON.stringify(result), syntheticWallet);
+  assert.equal(normalized.top_items.items.length, 1);
+});
+
+test('missing Top items is unknown while an explicitly empty verified table is available', () => {
+  assert.deepEqual(extract(syntheticAnalyticsPage()).top_items, {status: 'missing', items: []});
+  assert.deepEqual(extract(syntheticAnalyticsPage({topItems: []})).top_items, {status: 'available', items: []});
+  const source = syntheticAnalyticsPage({topItems: syntheticTopItems()}), table = syntheticTopItemsTable();
+  const noTable = table.replace(/<table[\s\S]*<\/table>/, 'No statistics available');
+  assert.deepEqual(extract({...source, html: source.html.replace(table, noTable)}).top_items, {status: 'missing', items: []});
+  const emptyState = table.replace(/<tbody>[\s\S]*<\/tbody>/, '<tbody><tr><td colspan="5">No rental data available</td></tr></tbody>');
+  assert.deepEqual(extract({...source, html: source.html.replace(table, emptyState)}).top_items, {status: 'missing', items: []});
+  rejects({...source, html: source.html.replace(table, emptyState.replace('No rental data available', '12'))}, 'analytics_shape');
+});
+
+test('Top items cannot be supplied by other sections, comments, templates or raw executable markup', () => {
+  const source = syntheticAnalyticsPage();
+  const fake = syntheticTopItemsTable();
+  for (const wrapper of [`<!--${fake}-->`, `<template>${fake}</template>`, `<script>const fake=${JSON.stringify(fake)};</script>`,
+    `<style>.example { content: ${JSON.stringify(fake)}; }</style>`, fake.replace('>Top items<', '>Other section<')]) {
+    assert.deepEqual(extract({...source, html: source.html.replace('</main>', wrapper + '</main>')}).top_items, {status: 'missing', items: []});
+  }
+});
+
+test('ambiguous Top items tables, headers, rows and identity links are rejected', () => {
+  const source = syntheticAnalyticsPage({topItems: syntheticTopItems()}), table = syntheticTopItemsTable();
+  for (const edit of [html => html.replace(table, table + table), html => html.replace('>Rentals<span class="ma-an-info" data-bs-title="Displayed', '>Something else<span class="ma-an-info" data-bs-title="Displayed'),
+    html => html.replace('<table class="table tm-table">', '<table class="table">'),
+    html => html.replace('<thead>', '<tbody>').replace('</thead>', '</tbody>'),
+    html => html.replace('<td><a class="table-cell"', '<td colspan="2"><a class="table-cell"'),
+    html => html.replace('href="/nft/', 'href="https://attacker.invalid/nft/'),
+    html => html.replace('/" class="table-cell"', '/?unexpected=true" class="table-cell"'),
+    html => html.replace('Synthetic Gift #123</div></a>', 'Synthetic Gift #123</div></a> altered'),
+    html => html.replace('Synthetic Gift #123</div></a>', 'Synthetic Gift #123<script>ignored()</script></div></a>'),
+    html => html.replace('Synthetic Gift #123</div></a>', 'Synthetic Gift #123<textarea>extra</textarea></div></a>'),
+    html => html.replace('</tbody></table>', '<tr><td>missing fields</td></tr></tbody></table>')]) {
+    const changed = edit(source.html);
+    if (changed !== source.html) rejects({...source, html: changed});
+  }
+  const duplicate = syntheticTopItems(); duplicate.push({...duplicate[0]});
+  rejects(syntheticAnalyticsPage({topItems: duplicate}), 'analytics_shape');
+  rejects(syntheticAnalyticsPage({topItems: Array.from({length: 101}, () => syntheticTopItems()[0])}), 'analytics_shape');
+});
+
+test('Top item money stays exact and invalid numeric or control text fails the import', () => {
+  const items = syntheticTopItems(); items[0].volume = '9007199254740993.0001';
+  assert.equal(extract(syntheticAnalyticsPage({topItems: items})).top_items.items[0].volume, '9007199254740993.0001');
+  for (const [key, value] of [['rentals', '2.5'], ['volume', '-1'], ['rented_days', 'NaN'], ['price_per_day', '0.00001'], ['name', 'Bad\u0000name']]) {
+    const invalid = syntheticTopItems(); invalid[0][key] = value;
+    rejects(syntheticAnalyticsPage({topItems: invalid}), 'analytics_shape');
+  }
+});
 
 for (const periodDays of [30, 365]) test(`signed-in ${periodDays}-day evidence extracts into the existing exact normalizer`, () => {
   const source = syntheticAnalyticsPage({periodDays, optionalCharts: periodDays === 30});

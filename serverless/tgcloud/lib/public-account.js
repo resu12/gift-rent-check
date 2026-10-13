@@ -20,10 +20,11 @@ export function createPublicAccountEngine({repository,box,fetch:providerFetch,cl
       marketapp_key:{configured:Boolean(key?.ciphertext),updated_at:key?.updated_at?new Date(key.updated_at).toISOString():null},onboarding_complete:verified&&Boolean(key?.ciphertext)};
   }
   async function available() {const row=await repository.publicAccount();if(row&&row.status!=='active')error('PUBLIC_ACCOUNT_DELETED');await repository.ensureAccount();return await repository.accountGeneration();}
-  async function idle() {const {state}=await repository.read(),at=await clock();if(active(state.job,at)||active(state.owned_prices?.run,at))error('PUBLIC_ACCOUNT_BUSY');return state;}
+  const updating=(state,at)=>active(state.job,at)||active(state.owned_prices?.run,at)||active(state.gift_refresh?.run,at);
+  async function idle() {const {state}=await repository.read(),at=await clock();if(updating(state,at))error('PUBLIC_ACCOUNT_BUSY');return state;}
   async function clearComparisons() {
     for(let i=0;i<16;i++) {
-      const {revision,state}=await repository.read(),at=await clock();if(active(state.job,at)||active(state.owned_prices?.run,at))error('PUBLIC_ACCOUNT_BUSY');
+      const {revision,state}=await repository.read(),at=await clock();if(updating(state,at))error('PUBLIC_ACCOUNT_BUSY');
       state.market_cache={};state.history_coverage={};
       if(state.job&&state.job.state==='partial'){state.job.state='failed';state.job.reason='credential_changed';state.job.lease=null;state.job.lease_until=0;}
       const job=state.job??null;state.job=null;

@@ -24,6 +24,13 @@ const CHARTS = new Set(['profile.rent.income', 'profile.rent.rentals', 'profile.
 // categories describe rental lengths, not dates; it is never financial input
 // for our saved daily statistics. Recognize this observed key explicitly.
 const SUPPLEMENTARY_CHARTS = new Set(['profile.rent.durations']);
+const TOP_ITEM_HEADERS = ['Item', 'Rentals', 'Rented days', 'Volume', 'Price per day'];
+const COLLECTION_HEADERS = ['Collection', 'Rentals', 'Volume', 'Price per day'];
+const COLLECTION_EXTENDED_HEADERS = ['', 'Collection', 'Rentals', 'Volume', 'Price per day', 'Average duration', 'Share of volume'];
+const collectionHref = value => typeof value==='string'&&value.length<=2048&&!/[\\\u0000-\u0020\u007f]/.test(value)
+  &&/^(?:https:\/\/marketapp\.org)?\/(?!\/)/.test(value)?value.replace(/^https:\/\/marketapp\.org/,''):null;
+const analyticsTable = block => block?.headings.includes('Top items') ? 'gifts' : block?.headings.includes('By collection') ? 'collections' : null;
+const visibleText = value => value.trim().replace(/\s+/g, ' ');
 const ENTITIES = Object.freeze({amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', nbsp: '\u00a0',
   ndash: '\u2013', mdash: '\u2014', hellip: '\u2026', thinsp: '\u2009', ensp: '\u2002', emsp: '\u2003',
   copy: '\u00a9', reg: '\u00ae', times: '\u00d7', le: '\u2264', ge: '\u2265'});
@@ -125,15 +132,23 @@ function walletInitializers(script) {
 
 function readPage(html) {
   let at = 0, tokens = 0;
-  const stack = [], summary = [], charts = [], identities = [];
+  const blockCounts={gifts:0,collections:0},stack = [], summary = [], charts = [], identities = [], topTables = [],collectionTables=[];
   const labels = new Set(), chartKeys = new Set();
   const inactive = () => stack.some(entry => entry.tag === 'template');
   const activeTile = () => stack.findLast(entry => entry.tile)?.tile;
   const activeField = () => stack.findLast(entry => entry.field)?.field;
+  const activeBlock = () => stack.findLast(entry => entry.tableBlock)?.tableBlock;
+  const activeTable = () => stack.findLast(entry => entry.itemsTable)?.itemsTable;
+  const activeRow = () => stack.findLast(entry => entry.itemsRow)?.itemsRow;
+  const activeCell = () => stack.findLast(entry => entry.itemsCell)?.itemsCell;
   function text(content) {
     const field = activeField();
     if (!inactive() && field) {
       field.text += decode(content); if (field.text.length > 4096) fail();
+    }
+    if (!inactive()) for (const target of [stack.findLast(entry => entry.tableHeading)?.tableHeading,
+      activeCell(), stack.findLast(entry => entry.itemsLink)?.itemsLink]) {
+      if (target) {target.text += decode(content); if (target.text.length > 4096) fail('analytics_shape');}
     }
   }
   function finish(entry) {
@@ -143,6 +158,59 @@ function readPage(html) {
       if (typeof row.label !== 'string' || typeof row.value !== 'string' || !LABELS.has(row.label) || labels.has(row.label)) fail('analytics_shape');
       labels.add(row.label); summary.push({label: row.label, value: row.value, foot: row.foot ?? '', definition: row.definition ?? ''});
       if (summary.length > 6) fail('analytics_shape');
+    }
+    if (entry.tableHeading) {
+      entry.tableHeading.block.headings.push(visibleText(entry.tableHeading.text));
+      if (entry.tableHeading.block.headings.length > 4) fail('analytics_shape');
+    }
+    if (entry.itemsLink) entry.itemsLink.cell.links.push({url: entry.itemsLink.url, label: visibleText(entry.itemsLink.text)});
+    if (entry.itemsCell) entry.itemsCell.row.cells.push({tag: entry.tag, text: visibleText(entry.itemsCell.text), links: entry.itemsCell.links, images:entry.itemsCell.images, colspan: entry.itemsCell.colspan});
+    if (entry.itemsRow) {
+      const table=entry.itemsRow.table;
+      if(table.kind==='collections'&&table.rows.length===0&&entry.itemsRow.section==='thead'&&[4,7].includes(entry.itemsRow.cells.length))table.columns=entry.itemsRow.cells.length;
+      const count=table.kind==='collections'?table.columns:5;
+      if (entry.itemsRow.cells.length !== count && !(entry.itemsRow.cells.length === 1 && entry.itemsRow.cells[0].colspan === String(count))) fail('analytics_shape');
+      entry.itemsRow.table.rows.push(entry.itemsRow);
+      if (entry.itemsRow.table.rows.length > (entry.itemsRow.table.kind==='collections'?201:101)) fail('analytics_shape');
+    }
+    if (entry.itemsTable) entry.itemsTable.block.tables.push(entry.itemsTable);
+    if (entry.tableBlock && analyticsTable(entry.tableBlock)) {
+      const block = entry.tableBlock,kind=analyticsTable(block);
+      if (++blockCounts[kind] > 1 || block.headings.length !== 1 || block.tables.length > 1) fail('analytics_shape');
+      // A changed or empty-state layout does not prove zero rentals. Preserve
+      // valid summary/charts while explicitly marking this optional table absent.
+      if (!block.tables.length) return;
+      const [head, ...rows] = block.tables[0].rows;
+      const extended=kind==='collections'&&head?.cells.length===7,headers=kind==='collections'?(extended?COLLECTION_EXTENDED_HEADERS:COLLECTION_HEADERS):TOP_ITEM_HEADERS;
+      if (!head || head.section !== 'thead' || head.cells.length!==headers.length || head.cells.some((cell, index) => cell.tag !== 'th' || cell.text !== headers[index] || cell.links.length || cell.images)) fail('analytics_shape');
+      if (rows.length === 1 && rows[0].section === 'tbody' && rows[0].cells.length === 1 && rows[0].cells[0].colspan === String(headers.length) &&
+        !rows[0].cells[0].links.length && !/\d/.test(rows[0].cells[0].text)) return;
+      const items = rows.map(row => {
+        if (row.section !== 'tbody' || row.cells.length !== headers.length || row.cells.some(cell => cell.tag !== 'td' || cell.colspan !== null)) fail('analytics_shape');
+        if(kind==='collections') {
+          const [name,rentals,volume,price]=extended?row.cells.slice(1):row.cells;
+          if(!name.text||name.images||name.links.length>1||row.cells.slice(extended?2:1).some(cell=>cell.links.length||cell.images))fail('analytics_shape');
+          if(name.links.length) {
+            const href=name.links[0].url;
+            if(name.links[0].label!==name.text||!collectionHref(href))fail('analytics_shape');
+          }
+          if(extended) {
+            const thumb=row.cells[0];
+            if(thumb.text||thumb.images!==1||thumb.links.length!==1||thumb.links[0].label||name.links.length!==1
+              ||!collectionHref(thumb.links[0].url)||collectionHref(thumb.links[0].url)!==collectionHref(name.links[0].url)
+              ||row.cells.slice(5).some(cell=>cell.text.length>200||/[\u0000-\u001f\u007f]/.test(cell.text)))fail('analytics_shape');
+          }
+          return {name:name.text,rentals:rentals.text,volume:volume.text,price_per_day:price.text};
+        }
+        const [item, rentals, days, volume, price] = row.cells;
+        if (item.links.length !== 1 || !item.text || item.text !== item.links[0].label || row.cells.slice(1).some(cell => cell.links.length)) fail('analytics_shape');
+        const href = item.links[0].url, match = /^(?:https:\/\/marketapp\.org)?\/nft\/([A-Za-z0-9_-]{48})\/$/.exec(href);
+        if (!match) fail('analytics_shape');
+        try {canonicalAddress(match[1]);} catch {fail('analytics_shape');}
+        return {name: item.text, item_url: 'https://marketapp.org/nft/' + match[1] + '/', rentals: rentals.text,
+          rented_days: days.text, volume: volume.text, price_per_day: price.text};
+      });
+      (kind==='collections'?collectionTables:topTables).push({status: 'available', items});
     }
   }
   while (at < html.length) {
@@ -181,9 +249,37 @@ function readPage(html) {
     }
     if (selfClosing && !VOID.has(tag) && !['svg', 'math'].includes(tag) && !stack.some(entry => ['svg', 'math'].includes(entry.tag))) fail();
     const entry = {tag};
-    if (!inactive()) {
+    if (!inactive() && tag !== 'template') {
       const classes = new Set((attributes.class ? decode(attributes.class) : '').split(/\s+/));
       const tile = activeTile();
+      const block = activeBlock(), table = activeTable(), row = activeRow(), cell = activeCell();
+      if (classes.has('ma-an-tblock')) {
+        if (analyticsTable(block)) fail('analytics_shape');
+        entry.tableBlock = {headings: [], tables: []};
+      }
+      if (tag === 'h2' && classes.has('tm-section-header-text') && block) {
+        if (stack.some(parent => parent.tableHeading) || table) fail('analytics_shape');
+        entry.tableHeading = {block, text: ''};
+      }
+      if (tag === 'table' && analyticsTable(block)) {
+        if (table || !classes.has('tm-table') || block.tables.length) fail('analytics_shape');
+        entry.itemsTable = {block,kind:analyticsTable(block),columns:null, rows: []};
+      }
+      if (table && tag === 'tr') {
+        if (row || !['thead', 'tbody'].includes(stack.at(-1)?.tag)) fail('analytics_shape');
+        entry.itemsRow = {table, section: stack.at(-1).tag, cells: []};
+      }
+      if (table && ['th', 'td'].includes(tag)) {
+        const colspan = Object.hasOwn(attributes, 'colspan') ? decode(attributes.colspan) : null,count=table.kind==='collections'?(table.columns??7):5;
+        if (!row || cell || stack.at(-1)?.tag !== 'tr' || row.cells.length >= count || Object.hasOwn(attributes, 'rowspan') ||
+          colspan !== null && (colspan !== String(count) || tag !== 'td' || row.section !== 'tbody')) fail('analytics_shape');
+        entry.itemsCell = {row, text: '', links: [],images:0, colspan};
+      }
+      if(cell&&tag==='img') {cell.images++;if(cell.images>1)fail('analytics_shape');}
+      if (cell && tag === 'a') {
+        if (cell.links.length || stack.some(parent => parent.itemsLink)) fail('analytics_shape');
+        entry.itemsLink = {cell, text: '', url: decode(attributes.href ?? '')};
+      }
       if (classes.has('ma-an-tile')) {if (tile || activeField()) fail(); entry.tile = {seen: new Set()};}
       const fields = ['label', 'value', 'foot'].filter(name => classes.has('ma-an-tile-' + name));
       if (fields.length) {
@@ -206,7 +302,8 @@ function readPage(html) {
       const endPattern = new RegExp('</' + tag + '\\s*>', 'ig'); endPattern.lastIndex = at;
       const closingRaw = endPattern.exec(html); if (!closingRaw) fail();
       const raw = html.slice(at, closingRaw.index);
-      if (entry.field || entry.tile || entry.chart || activeField() && !['textarea', 'title'].includes(tag)) fail();
+      if (entry.field || entry.tile || entry.chart || activeField() && !['textarea', 'title'].includes(tag) ||
+        !inactive() && (activeCell() || stack.some(parent => parent.tableHeading))) fail();
       if (tag === 'script' && !inactive() && !Object.hasOwn(attributes, 'src') &&
         ['', 'text/javascript', 'application/javascript', 'module'].includes(decode(attributes.type ?? '').trim().toLowerCase())) {
         identities.push(...walletInitializers(raw)); if (identities.length > 1) fail('wallet_identity');
@@ -222,7 +319,8 @@ function readPage(html) {
   if (stack.length) fail();
   if (identities.length === 1 && identities[0]?.address === false) fail('wallet_identity', true);
   if (identities.length !== 1 || !identities[0] || typeof identities[0].address !== 'string') fail('wallet_identity');
-  return {summary, charts, address: identities[0].address};
+  return {summary, charts, address: identities[0].address, top_items: topTables[0] ?? {status: 'missing', items: []},
+    by_collection:collectionTables[0]??{status:'missing',items:[]}};
 }
 
 function checkOptions(options) {
@@ -258,11 +356,11 @@ export function extractMarketappAnalyticsPage(html, options) {
   const expected = checkOptions(options);
   if (typeof html !== 'string' || html.length > MARKETAPP_ANALYTICS_PAGE_MAX_BYTES) fail('page_structure');
   try {if (utf8Bytes(html).length > MARKETAPP_ANALYTICS_PAGE_MAX_BYTES) fail('page_structure');} catch {fail('page_structure');}
-  const {summary, charts, address} = readPage(html);
+  const {summary, charts, address, top_items,by_collection} = readPage(html);
   let observed; try {observed = canonicalAddress(address);} catch {fail('wallet_identity');}
   if (observed !== expected) fail('wallet_identity', true);
   const snapshot = {version: 1, source: 'marketapp_personal_rent_page', source_url: options.sourceUrl,
-    wallet: expected, captured_at: options.capturedAt, summary, charts};
+    wallet: expected, captured_at: options.capturedAt, summary, charts, top_items,by_collection};
   let normalized;
   try {normalized = normalizePersonalAnalytics(JSON.stringify(snapshot), expected);} catch {fail('analytics_shape');}
   if (normalized.daily.length !== options.periodDays || normalized.period_end !== normalized.captured_at.slice(0, 10)) fail('period_span');

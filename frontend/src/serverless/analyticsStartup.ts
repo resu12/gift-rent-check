@@ -15,6 +15,8 @@ export interface AnalyticsStartupSnapshot {
   capturedAt?: string;
   retryAt?: string;
   reloadFailed?: boolean;
+  /** Set only after a successful full saved-dashboard read, never a fresh/cache result alone. */
+  reloadedAt?: string;
   outcomeAt?: string;
   storagePaused?: boolean;
 }
@@ -81,11 +83,14 @@ export function createAnalyticsStartupGate(options: {
         if (!current()) return;
         const result = readAnalyticsStartupResult(response, savedContext.periodDays, now());
         clearDeadline();
-        publish({ phase: result.state, busy: true, periodDays: result.period_days, outcomeAt: result.captured_at ?? new Date(now()).toISOString(), ...(result.reason ? { reason: result.reason } : {}),
+        publish({ phase: result.state, busy: true, periodDays: result.period_days, outcomeAt: new Date(now()).toISOString(), ...(result.reason ? { reason: result.reason } : {}),
           ...(result.captured_at ? { capturedAt: result.captured_at } : {}), ...(result.retry_at ? { retryAt: result.retry_at } : {}) });
         // A different page may have saved fresher analytics while this page opened.
         if (result.state === 'saved' || (result.state === 'fresh' && result.captured_at !== savedContext.capturedAt)) {
-          try { await options.onSavedDataChanged(); }
+          try {
+            await options.onSavedDataChanged();
+            if (current()) publish({ ...snapshot, reloadedAt: new Date(now()).toISOString() });
+          }
           catch { if (current()) publish({ ...snapshot, reloadFailed: true }); }
         }
       } catch (error) {

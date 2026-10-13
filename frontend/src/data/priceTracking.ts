@@ -1,5 +1,5 @@
 import { formatAmount } from './helpers.ts';
-import type { Gift, ObservedPriceChange, PriceTrackingComparison } from './types.ts';
+import type { Gift, GiftPriceTrackingData, ObservedPriceChange, PriceTrackingComparison, PriceTrackingPeriod } from './types.ts';
 
 export type TrackingPeriod = 7 | 14 | 30;
 export const TRACKING_PERIODS: readonly TrackingPeriod[] = [7, 14, 30];
@@ -12,6 +12,21 @@ export function trackingAmount(value: string | null | undefined, places: 1 | 3 =
 
 export function trackingCount(value: number | null | undefined): string {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString() : '—';
+}
+
+/** The server deduplicates verified starts against history. Never add the counts again in the view. */
+export function trackingObservedRentals(period: PriceTrackingPeriod): string {
+  return trackingCount(period.observed_rentals === undefined ? period.recorded_rentals : period.observed_rentals);
+}
+
+export function trackingPaymentHistoryPending(period: PriceTrackingPeriod): boolean {
+  const count = period.verified_rentals_without_history;
+  return typeof count === 'number' && Number.isSafeInteger(count) && count > 0;
+}
+
+/** An observed start with no payment record cannot be presented as a zero payment. */
+export function trackingPaymentAmount(period: PriceTrackingPeriod, value: string | null, places: 1 | 3 = 3): string {
+  return trackingPaymentHistoryPending(period) && period.recorded_rentals === 0 ? '—' : trackingAmount(value, places);
 }
 
 /** Comparison boundaries are UTC even when an observation is shown in local time. */
@@ -28,6 +43,14 @@ export function trackingDateRange(from: string | null | undefined, to: string | 
 }
 
 export interface GiftPriceChange { gift: Gift; change: ObservedPriceChange }
+
+/** Older responses used one source for every change. New responses retain each independent timeline. */
+export function trackingEvidence(tracking: GiftPriceTrackingData, change?: ObservedPriceChange) {
+  return {
+    source: change?.source ?? tracking.source,
+    lastObservedAt: change?.source_last_observed_at ?? tracking.last_observed_at,
+  };
+}
 
 /** Five recently changed gifts; opening a row then matches its latest change. */
 export function latestPriceChanges(gifts: Gift[], limit = 5): GiftPriceChange[] {

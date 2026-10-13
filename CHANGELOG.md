@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- Bound Telegram All time analytics reads for private and invited accounts to nine indexed archive queries per dashboard request. Large histories load recent records with explicit partial-preview notices; all saved history remains stored. Additive capture indexes support bounded reads without sorting the full archive.
+- Preserve explicitly empty Marketapp gift and collection tables in All time analytics, including after snapshot cleanup. Additive archive triggers and bounded backfill retain empty-table availability without inventing rental figures.
+
+## 0.5.0 — 2026-10-13
+
+Development / invitation-only beta. See [release notes and upgrade steps](docs/releases/v0.5.0.md).
+
+- Administrative setup, backup and readiness tools load only required modules so they work with a full deployed application. They retain the deployment's private configuration instead of replacing it with local credentials.
+- Simplified Pricing, My gifts, Overview and Status: removed repeated captions and completed-list footers, condensed analytics and storage summaries, and moved secondary dates, counts and methodology into expandable details. Freshness, missing-data warnings, errors, connection controls and price-copy actions remain visible or directly accessible.
+- Startup waits for the Telegram SDK without blocking the app entry or its retry timeout. Completed gift checks reload final prices and statuses without waiting for an unrelated sync-status request.
+- Faster startup displays a dated saved dashboard before recalculating the current view, while preserving account isolation and rental expiry. Secondary screens load on demand; wallet setup and storage checks defer until needed or idle, and gift-refresh reloads are coalesced. An optional lossless inline-record index reduces database scans without deleting saved evidence.
+- Overview opens with All time selected. Manual report selections survive refreshes, and Status links still open the requested analytics period.
+- Overview's gift and collection rental statistics show saved thumbnails: exact NFT pictures for gifts and representative gifts for collections, with lazy loading and fallback icons.
+- Overview adds Marketapp's By collection rental statistics for the selected analytics period, with saved non-overlapping collection history for All time. Collection figures remain independent of the ranked Top items subset; unavailable combined daily rates stay unknown.
+- Gift and collection analytics tolerate small device clock differences and revalidate while visible or on returning to the app, avoiding false missing figures after a successful refresh.
+- Each gift's details now show All time rentals from saved Marketapp analytics, including rented days, volume, daily rate, capture dates, and report coverage. Missing figures remain unknown; opening a gift makes no provider request.
+- Per-gift analytics now use the connected wallet's Marketapp Top items and follow the selected analytics period. Compact saved per-gift reports survive snapshot cleanup; All time combines non-overlapping periods with explicit partial coverage. Public collection-history estimates remain separately labelled in gift details.
+- Status reconciles comparison buttons with polled progress, shows analytics failures and All time history coverage, and refreshes public connection details after account, wallet or API-key availability changes.
+- Added **All time · saved history** analytics with exact daily totals, overlapping-report deduplication, visible date coverage and gaps. Telegram retains compact daily history across snapshot cleanup; refreshing All time updates the supported one-year Marketapp report.
+- All-time analytics retain the reload action after failed historical imports and explain automatic refresh failures, pauses and connection requirements. Analytics acknowledge successful dashboard reads explicitly. Older storage installations can apply the additive accounting upgrades in either order without resetting counters.
+- Invited accounts can connect their own Marketapp login, remember it encrypted for up to seven days, refresh 30-day/yearly analytics, and refresh known gifts from their signed-in page with TON fallback. Account, wallet and session changes fence delayed results; API keys remain separate.
+- Added encrypted administrative backups with isolated recovery verification, concurrent account/storage drills, and explicit public-registration capacity checks. Invitation access remains enabled while hosting capacity is unverified.
+- Telegram price-change history keeps independently observed changes from each price source when a refresh introduces a new preferred source. Details identify the source of each change; comparisons never infer edits between different sources.
+- Price-change performance includes verified contract rental starts while payment history is pending. Repeated checks and matching history count one rental; recorded payment totals remain based only on saved rental history.
+- Gift-refresh preparation reads compact market evidence in bounded pages before filtering for owned gifts, avoiding hosted database query limits as rental history grows. Saved observations and account isolation are preserved.
+- Gift refreshes no longer reject unchanged portfolios while comparison data arrives. Sparse portfolio reads also page through stored markers before filtering; concurrent gift checks show Waiting instead of a false Check failed, and supplemental TON work retains its exclusive refresh session.
+
 ## 0.4.0 — 2026-10-12
 
 Development / invitation-only beta. See [release notes and upgrade steps](docs/releases/v0.4.0.md).

@@ -6,7 +6,7 @@ export const publicReleaseConfig = Object.freeze({
   preservePrivateOwner: true,
   invitedUserIds: [],
   openRegistration: false,
-  maxAccounts: 25,
+  maxAccounts: 5,
   origin: '',
   globalMarketDailyAttempts: 500,
   globalTonDailyAttempts: 1000,
@@ -19,4 +19,8 @@ export const publicReleaseConfig = Object.freeze({
   storageEncryptionConfirmed: false,
   providerUseApproved: false,
   experimentalPersonalAnalytics: false,
+  // Shared website guard remains 100/day, separate from Marketapp API keys.
+  websiteDailyAttempts: 20,
+  // Fill with measured/verified evidence before opening registration.
+  releaseReadiness: null,
 });

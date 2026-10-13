@@ -58,7 +58,7 @@ export function createGiftRefreshEngine({repository,fetch:request,tonFetch=reque
   }
   function finish(state,run,result,reason=null) {
     run.state=result; run.reason=reason; run.completed_at=iso(at); run.inflight=null; counts(run);
-    if (result==='complete') state.gift_refresh.last_complete={...summary(run),provider:run.provider,scope_signature:run.scope_signature,captured_at:at};
+    if (result==='complete') state.gift_refresh.last_complete={...summary(run),provider:run.provider,scope_signature:run.scope_signature,wallet_fence:run.wallet_fence,captured_at:at};
   }
   function bounded(state,run) {
     if (running(run)&&at>=run.deadline) {finish(state,run,'partial','duration_limit');return true;}
@@ -130,7 +130,14 @@ export function createGiftRefreshEngine({repository,fetch:request,tonFetch=reque
     let sourceRevision=await scopeRevision();
     let scope=await readOwnedGiftScope(repository,sourceRevision);
     const afterScope=await scopeRevision();
-    if (afterScope!==sourceRevision) {sourceRevision=afterScope;scope=await readOwnedGiftScope(repository,sourceRevision);if(await scopeRevision()!==sourceRevision)fail('The gift portfolio is changing. Try again.','OWNED_PRICE_BUSY');}
+    if (afterScope!==sourceRevision) {
+      const refreshed=await readOwnedGiftScope(repository,afterScope);
+      // A stable second read adopts legitimate portfolio changes. Comparison
+      // scans may keep appending without changing the eligible gifts; accept
+      // those too, while refusing an actual scope change during ongoing churn.
+      if(await scopeRevision()!==afterScope&&signature(refreshed)!==signature(scope))fail('The gift portfolio is changing. Try again.','OWNED_PRICE_BUSY');
+      sourceRevision=afterScope;scope=refreshed;
+    }
     await tick();
     let stored=null; const hadSession=scope.wallet?await repository.marketappSession(owner):null;
     if (scope.wallet) stored=await website.read(owner,scope.wallet);
@@ -154,7 +161,7 @@ export function createGiftRefreshEngine({repository,fetch:request,tonFetch=reque
       if (ton?.state==='running'&&ton.deadline>at||ton?.lease_until>at) fail('A gift check is already running.','OWNED_PRICE_BUSY');
       oldLease=existing;
       const cached=gifts.last_complete;
-      const cacheHit=input.automatic===true&&cached&&cached.scope_signature===scopeSignature&&at-cached.captured_at>=0&&at-cached.captured_at<cap.cache_ms&&
+      const cacheHit=input.automatic===true&&cached&&cached.wallet_fence===walletFence&&cached.scope_signature===scopeSignature&&at-cached.captured_at>=0&&at-cached.captured_at<cap.cache_ms&&
         (cached.provider!=='marketapp_website'||stored!==null);
       const run=gifts.run={id:gifts.next_run_id++,scope:'portfolio',session_id:input.session_id,wallet:scope.wallet,targets:scope.targets,scope_signature:scopeSignature,
         state:'running',total:scope.targets.length,checked:0,updated:0,unresolved:0,status_updated:0,status_unresolved:0,results:{},reason:null,wallet_fence:walletFence,scope_revision:sourceRevision,
@@ -173,10 +180,13 @@ export function createGiftRefreshEngine({repository,fetch:request,tonFetch=reque
     await release(oldLease);
     return project(outcome.state,await find(outcome.state,outcome.value),input.session_id);
   }
-  async function scopeCurrent(run) {
+  async function scopeCurrent(run,checkedScopes) {
     if ((await repository.marketappSessionFence(owner)).wallet_revision!==run.wallet_fence) fail('The saved wallet changed. Start a new check.','OWNED_PRICE_SCOPE_CHANGED');
     const revision=await scopeRevision();if(revision===run.scope_revision)return;
-    const current=await readOwnedGiftScope(repository,revision);
+    // Keep this cache inside one Step invocation. Always check the durable
+    // revision first; only the expensive read for that exact revision repeats.
+    let current=checkedScopes?.get(revision);
+    if(!current){current=await readOwnedGiftScope(repository,revision);checkedScopes?.set(revision,current);}
     if (current.wallet!==run.wallet||run.targets.some(target=>!current.targets.some(row=>row.nft_address===target.nft_address&&row.collection_address===target.collection_address))) fail('The saved wallet or gift scope changed. Start a new check.','OWNED_PRICE_SCOPE_CHANGED');
   }
   async function fallback(id,reason,storageToken=null) {
@@ -209,13 +219,13 @@ export function createGiftRefreshEngine({repository,fetch:request,tonFetch=reque
   }
   // The existing TON engine retains its ledger, holder recheck and decoder.
   // Its evidence and the wrapper checkpoint are committed in the same event.
-  function tonEngine(run) {
+  function tonEngine(run,checkedScopes) {
     const remaining=Math.max(1,cap.attempts-run.attempts),duration=Math.max(1,run.deadline-at);
     const proxy={...repository,append:async(expected,event)=>{
       const wrapper=event.state.gift_refresh?.run,inner=event.state.owned_prices?.run;
       if (wrapper?.id!==run.id||wrapper.stage!=='ton'||!running(wrapper)||inner?.session_id!==run.ton_session_id) return false;
       if (inner.wallet!==wrapper.wallet) fail('The saved wallet changed. Start a new check.','OWNED_PRICE_SCOPE_CHANGED');
-      await scopeCurrent(wrapper);
+      await scopeCurrent(wrapper,checkedScopes);
       if ((await repository.marketappSessionFence(owner)).wallet_revision!==wrapper.wallet_fence) fail('The saved wallet changed. Start a new check.','OWNED_PRICE_SCOPE_CHANGED');
       // Scope loading during inner Start must not extend the original refresh
       // deadline. Both stages share the same bounded provider-request window.
@@ -255,12 +265,12 @@ export function createGiftRefreshEngine({repository,fetch:request,tonFetch=reque
     return createOwnedPriceEngine({repository:proxy,fetch:tonFetch,ownerTelegramId,clock,decodeContract,targetAddresses:run.ton_targets,
       limits:{invocation_attempts:remaining,duration_ms:Math.min(120000,duration)}});
   }
-  async function tonStep(ctx,run,input) {
+  async function tonStep(ctx,run,input,checkedScopes) {
     await tick();if (at>=run.deadline||run.attempts>=cap.attempts) {
       const ended=await mutate((gifts,state)=>{if(gifts.run?.id===run.id&&running(gifts.run))finish(state,gifts.run,'partial',at>=run.deadline?'duration_limit':'invocation_limit');});
       return project(ended.state,await find(ended.state,run.id),input.session_id);
     }
-    const engine=tonEngine(run);
+    const engine=tonEngine(run,checkedScopes);
     if (!run.ton_run_id) await engine.start(ctx,{session_id:run.ton_session_id});
     else await engine.step(ctx,{run_id:run.ton_run_id});
     const saved=await repository.read();await tick();return project(saved.state,await find(saved.state,run.id),input.session_id);
@@ -270,13 +280,14 @@ export function createGiftRefreshEngine({repository,fetch:request,tonFetch=reque
     const saved=await repository.read();await tick();let run=await find(saved.state,id);
     if (!run) fail('Unknown personal gift refresh');
     if (!running(run)) return project(saved.state,run,input.session_id);
-    await scopeCurrent(run);await tick();
+    const checkedScopes=new Map();
+    await scopeCurrent(run,checkedScopes);await tick();
     if (at>=run.deadline||run.stage==='website'&&run.deadline-at<1000) {const ended=await mutate((gifts,state)=>{if(gifts.run?.id===id)finish(state,gifts.run,'partial','duration_limit');});await release(run);return project(ended.state,await find(ended.state,id),input.session_id);}
-    if (run.stage==='ton') return tonStep(ctx,run,input);
+    if (run.stage==='ton') return tonStep(ctx,run,input,checkedScopes);
     if (run.inflight?.until>at||run.next_allowed_at>at) return project(saved.state,run,input.session_id);
-    return await withStorageReservation(repository,{kind:'website_gifts'},token=>websiteStep(input,id,saved,run,token));
+    return await withStorageReservation(repository,{kind:'website_gifts'},token=>websiteStep(input,id,saved,run,token,checkedScopes));
   }
-  async function websiteStep(input,id,saved,run,storageToken) {
+  async function websiteStep(input,id,saved,run,storageToken,checkedScopes) {
     const admitted=change=>mutate(change,null,storageToken);
     let stored=await website.read(owner,run.wallet);
     if (!stored||stored.fence.generation!==run.session_fence?.generation||stored.fence.wallet_revision!==run.session_fence?.wallet_revision) {
@@ -340,7 +351,7 @@ export function createGiftRefreshEngine({repository,fetch:request,tonFetch=reque
     await tick();
     if(failure==='transient') {retryAt??=at+1000*2**snapshot.page_attempts;await website.defer(owner,lease,retryAt);}
     if(page&&(page.cursor!==null&&(page.cursor===snapshot.cursor||snapshot.seen_cursors.includes(page.cursor)))) {page=null;failure='unsupported_response';}
-    if(page) await scopeCurrent(snapshot);
+    if(page) await scopeCurrent(snapshot,checkedScopes);
     const observed=iso(at),targets=new Map(snapshot.targets.map(row=>[row.nft_address,row]));
     const result=await admitted((gifts,state)=>{
       const current=gifts.run;

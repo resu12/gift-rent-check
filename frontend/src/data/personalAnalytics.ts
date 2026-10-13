@@ -1,4 +1,4 @@
-import type { PersonalRentalAnalytics } from './types.ts';
+import type { PersonalRentalAnalytics, PersonalRentalAnalyticsAllTime, PersonalRentalAnalyticsReport } from './types.ts';
 import { canonicalMainnetAddress, friendlyMainnetAddress } from '../serverless/walletIdentity.ts';
 
 export type AnalyticsGrouping = 'day' | 'week' | 'month' | 'year';
@@ -6,11 +6,13 @@ export interface AnalyticsBucket {
   key: string;
   start: string;
   end: string;
-  volume: string;
-  newRentals: number;
-  extensions: number;
-  rentals: number;
+  volume: string | null;
+  newRentals: number | null;
+  extensions: number | null;
+  rentals: number | null;
   partial: boolean;
+  gap?: boolean;
+  coverage?: { observedDays: number; missingDays: number; partialDays: number };
 }
 
 const DAY = 86_400_000;
@@ -38,7 +40,8 @@ export function selectPersonalAnalyticsSnapshot(latest: PersonalRentalAnalytics 
     || available[0] || null;
 }
 
-export function analyticsReportingPeriod(snapshot: PersonalRentalAnalytics): string {
+export function analyticsReportingPeriod(snapshot: PersonalRentalAnalyticsReport): string {
+  if ('report_kind' in snapshot && snapshot.report_kind === 'all_time') return 'All time · saved history';
   const days = snapshot.daily.length;
   if (days === 365 || days === 366) return 'Last 1 year';
   if ([7, 14, 30, 60, 90, 180].includes(days)) return `Last ${days} days`;
@@ -71,8 +74,9 @@ function decimal(value: bigint): string {
   return `${text.slice(0, -4)}.${text.slice(-4)}`.replace(/\.?0+$/, '');
 }
 
-export function groupPersonalAnalytics(snapshot: PersonalRentalAnalytics, grouping: AnalyticsGrouping): AnalyticsBucket[] {
-  const buckets = new Map<string, AnalyticsBucket & { units: bigint; nominalStart: string; nominalEnd: string }>();
+export function groupPersonalAnalytics(snapshot: PersonalRentalAnalyticsReport, grouping: AnalyticsGrouping): AnalyticsBucket[] {
+  if ('report_kind' in snapshot && snapshot.report_kind === 'all_time') return groupSavedAnalyticsHistory(snapshot, grouping);
+  const buckets = new Map<string, Omit<AnalyticsBucket, 'newRentals' | 'extensions' | 'rentals'> & { newRentals: number; extensions: number; rentals: number; units: bigint; nominalStart: string; nominalEnd: string }>();
   const captureDay = snapshot.captured_at.slice(0, 10);
   for (const point of [...snapshot.daily].sort((a, b) => a.date.localeCompare(b.date))) {
     const date = utcDate(point.date);
@@ -103,14 +107,77 @@ export function groupPersonalAnalytics(snapshot: PersonalRentalAnalytics, groupi
     volume: decimal(units), partial: bucket.start > nominalStart || bucket.end < nominalEnd || (captureDay >= bucket.start && captureDay <= bucket.end) }));
 }
 
+/** Calendar gaps remain unknown. Totals in partially covered buckets include only saved days. */
+export function groupSavedAnalyticsHistory(snapshot: PersonalRentalAnalyticsAllTime, grouping: AnalyticsGrouping): AnalyticsBucket[] {
+  const first = utcDate(snapshot.period_start).getTime(), last = utcDate(snapshot.period_end).getTime();
+  const buckets = new Map<string, AnalyticsBucket & { units: bigint; newCount: number; extensionCount: number; rentalCount: number; nominalStart: string; nominalEnd: string }>();
+  for (const point of snapshot.daily) {
+    const instant = utcDate(point.date).getTime(); if (instant < first || instant > last) continue;
+    const { start, end } = historyPeriodBounds(instant, grouping);
+    const nominalStart = start.toISOString().slice(0, 10), nominalEnd = end.toISOString().slice(0, 10);
+    const bucket = buckets.get(nominalStart) ?? { key: nominalStart, start: new Date(Math.max(first, start.getTime())).toISOString().slice(0, 10),
+      end: new Date(Math.min(last, end.getTime())).toISOString().slice(0, 10), volume: null, newRentals: null,
+      extensions: null, rentals: null, partial: false, units: 0n, newCount: 0, extensionCount: 0, rentalCount: 0,
+      nominalStart, nominalEnd, coverage: { observedDays: 0, missingDays: 0, partialDays: 0 } };
+    bucket.units += amount(point.rent_volume); bucket.newCount += point.new_rentals;
+    bucket.extensionCount += point.extensions; bucket.rentalCount += point.rentals;
+    bucket.coverage!.observedDays++; if (point.partial) bucket.coverage!.partialDays++;
+    buckets.set(nominalStart, bucket);
+  }
+  const result: AnalyticsBucket[] = [];
+  let next = first;
+  const gap = (from: number, to: number) => {
+    if (to < from) return;
+    const start = new Date(from).toISOString().slice(0, 10), end = new Date(to).toISOString().slice(0, 10);
+    result.push({ key: `gap:${start}`, start, end, volume: null, newRentals: null, extensions: null, rentals: null, gap: true, partial: true,
+      coverage: { observedDays: 0, missingDays: (to - from) / DAY + 1, partialDays: 0 } });
+  };
+  for (const { units, newCount, extensionCount, rentalCount, nominalStart, nominalEnd, ...bucket } of [...buckets.values()].sort((a, b) => a.key.localeCompare(b.key))) {
+    const from = utcDate(bucket.start).getTime(), to = utcDate(bucket.end).getTime();
+    gap(next, from - DAY);
+    bucket.coverage!.missingDays = (to - from) / DAY + 1 - bucket.coverage!.observedDays;
+    result.push({ ...bucket, volume: decimal(units), newRentals: newCount, extensions: extensionCount, rentals: rentalCount, gap: false,
+      partial: bucket.coverage!.missingDays > 0 || bucket.coverage!.partialDays > 0 || bucket.start > nominalStart || bucket.end < nominalEnd });
+    next = to + DAY;
+  }
+  gap(next, last);
+  return result;
+}
+
+function historyPeriodBounds(instant: number, grouping: AnalyticsGrouping): { start: Date; end: Date } {
+  const date = new Date(instant), start = new Date(instant), end = new Date(instant);
+  if (grouping === 'week') {
+    start.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7); end.setTime(start.getTime() + 6 * DAY);
+  } else if (grouping === 'month') {
+    start.setUTCDate(1); end.setUTCMonth(date.getUTCMonth() + 1, 0);
+  } else if (grouping === 'year') {
+    start.setUTCMonth(0, 1); end.setUTCMonth(11, 31);
+  }
+  return { start, end };
+}
+
+/** Keep chart and table rendering bounded by coarsening dense saved histories. Gaps are single intervals. */
+export function analyticsHistoryGrouping(snapshot: PersonalRentalAnalyticsReport | null, requested: AnalyticsGrouping, maximum = 736): AnalyticsGrouping {
+  if (!snapshot || !('report_kind' in snapshot) || snapshot.daily.length <= maximum / 2) return requested;
+  const groups: AnalyticsGrouping[] = ['day', 'week', 'month', 'year'];
+  for (const group of groups.slice(groups.indexOf(requested))) {
+    const keys = new Set(snapshot.daily.map(point => historyPeriodBounds(utcDate(point.date).getTime(), group).start.getTime()));
+    const ordered = [...keys].sort((a, b) => a - b);
+    let count = ordered.length;
+    for (let index = 1; index < ordered.length; index++) if (historyPeriodBounds(ordered[index - 1], group).end.getTime() + DAY < ordered[index]) count++;
+    if (count <= maximum || group === 'year') return group;
+  }
+  return 'year';
+}
+
 // Integer ratios are used only for chart geometry; money remains decimal text.
 export function analyticsBarHeights(buckets: AnalyticsBucket[]): number[] {
-  const values = buckets.map(bucket => amount(bucket.volume));
+  const values = buckets.map(bucket => bucket.volume === null ? 0n : amount(bucket.volume));
   const maximum = values.reduce((max, value) => value > max ? value : max, 0n);
   return values.map(value => maximum ? Number(value * 1000n / maximum) / 10 : 0);
 }
 
-export function personalAnalyticsUrl(wallet: string | null, snapshot?: PersonalRentalAnalytics | null): string {
+export function personalAnalyticsUrl(wallet: string | null, snapshot?: PersonalRentalAnalyticsReport | null): string {
   const query = (period?: string | null) => {
     const params = new URLSearchParams({ tab: 'analytics_rent', group_by: 'day' });
     if (period && /^last(7|14|30|60|90|180|365)days$/.test(period)) params.set('period_by', period);
@@ -127,7 +194,7 @@ export function personalAnalyticsUrl(wallet: string | null, snapshot?: PersonalR
   }
   const friendly = friendlyMainnetAddress(wallet);
   if (!friendly) return 'https://marketapp.org/';
-  return `https://marketapp.org/user/${friendly}/?${query()}`;
+  return `https://marketapp.org/user/${friendly}/?${query(snapshot && 'report_kind' in snapshot ? 'last365days' : undefined)}`;
 }
 
 export function analyticsDate(value: string): string {

@@ -26,6 +26,6 @@ export function useStorageMaintenance(adapter: DashboardAdapter, data: Dashboard
     controller.context(adapter.mode === 'serverless' && adapter.storageMaintenance && data
       ? `${canonicalMainnetAddress(data.wallet) ?? data.wallet ?? ''}:${data.capabilities.public_account === true}:${data.capabilities.account_generation ?? ''}` : null);
   }, [controller, adapter, data?.wallet, data?.capabilities.public_account, data?.capabilities.account_generation, Boolean(data)]);
-  useEffect(() => { controller.providerBusy(providerBusy); }, [controller, providerBusy]);
-  return { snapshot, cleanNow: controller.cleanNow };
+  useEffect(() => { controller.providerBusy(providerBusy || Boolean(data?.startup_preview)); }, [controller, providerBusy, Boolean(data?.startup_preview)]);
+  return { snapshot, cleanNow: controller.cleanNow, checkNow: controller.checkNow };
 }

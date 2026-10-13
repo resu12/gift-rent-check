@@ -1,21 +1,23 @@
 import {createPublicRepository,verifiedTelegramUserId,PublicAccountError,PublicCredentialChangedError} from './public-repository.js';
 import {createPublicCredentialBox,hex,hmacSha256,keyBytes} from './public-credential-box.js';
 import {utf8Bytes} from './personal-analytics.js';
-import {createPublicProviderBudget,createPublicProviderFetch} from './public-provider-budget.js';
+import {createPublicProviderBudget,createPublicProviderFetch,createPublicWebsiteFetch} from './public-provider-budget.js';
 import {createPublicAccountEngine,openPublicMarketappKey,PublicRequestError} from './public-account.js';
 import {createPublicWalletEngine} from './public-wallet.js';
 import {createPublicDiscoveryEngine} from './public-discovery.js';
 import {createCloudEngine,CloudRequestError} from './cloud-engine.js';
 import {CloudStorageFullError} from './cloud-repository.js';
 import {createOwnedPriceEngine,ownedGiftScope,ownedPriceErrorResponse} from './owned-price-engine.js';
-import {createMarketappLoginEngine} from './marketapp-login.js';
-import {createMarketappAnalyticsRefreshEngine} from './marketapp-analytics-refresh.js';
+import {createMarketappAnalyticsRefreshEngine,MarketappRefreshRequestError,marketappRefreshErrorResponse} from './marketapp-analytics-refresh.js';
 import {createMarketappRefreshStatusEngine} from './marketapp-refresh-status.js';
 import {createMarketappSessionBox} from './marketapp-session-box.js';
 import {createMarketappRememberedSessionBox} from './marketapp-remembered-session-box.js';
 import {buildCloudDashboard} from './cloud-pricing.js';
 import {StorageCapacityError} from './storage-admission.js';
 import {cloudReadErrorResponse} from './bounded-response.js';
+import {createGiftRefreshEngine} from './gift-refresh-engine.js';
+import {MARKETAPP_WEBSITE_LIMITS} from './marketapp-website-gate.js';
+import {publicRegistrationReadiness} from './storage-policy.js';
 
 const fail=code=>{throw new PublicRequestError(code);};
 const object=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
@@ -28,7 +30,9 @@ export function validatePublicReleaseConfig(config) {
     !Number.isSafeInteger(config.maxAccounts)||config.maxAccounts<1||config.maxAccounts>100)fail('PUBLIC_CONFIGURATION');
   for(const field of ['globalMarketDailyAttempts','globalTonDailyAttempts','perUserMarketDailyAttempts','perUserTonDailyAttempts'])if(!Number.isSafeInteger(config[field])||config[field]<1||config[field]>5000)fail('PUBLIC_CONFIGURATION');
   if(config.perUserTonDailyAttempts>1000)fail('PUBLIC_CONFIGURATION');
+  if(config.websiteDailyAttempts!==undefined&&(!Number.isSafeInteger(config.websiteDailyAttempts)||config.websiteDailyAttempts<1||config.websiteDailyAttempts>20))fail('PUBLIC_CONFIGURATION');
   if(!Number.isSafeInteger(config.maxWalletGifts)||config.maxWalletGifts<1||config.maxWalletGifts>250||!Number.isSafeInteger(config.maxDiscoveryCandidates)||config.maxDiscoveryCandidates<1||config.maxDiscoveryCandidates>1000)fail('PUBLIC_CONFIGURATION');
+  if(config.openRegistration&&!publicRegistrationReadiness(config).ready)fail('PUBLIC_CONFIGURATION');
   return config;
 }
 export function createPublicRuntime({db,fetch,config,masterKey,clock=null,legacyProviderUsage=null,storageAdmission=null,storageMaintenance=null}) {
@@ -55,6 +59,7 @@ export function createPublicRuntime({db,fetch,config,masterKey,clock=null,legacy
       if(error instanceof CloudStorageFullError)return {error:{code:'STORAGE_FULL'}};
       if(error instanceof PublicCredentialChangedError)return {error:{code:'PUBLIC_KEY_CHANGED'}};
       if(error instanceof PublicAccountError)return {error:{code:'PUBLIC_ACCOUNT_DELETED'}};
+      if(error instanceof MarketappRefreshRequestError)return marketappRefreshErrorResponse(error);
       if(typeof error?.code==='string'&&/^(PUBLIC_[A-Z_]+|STORAGE_FULL|CONFLICT|ACTIVE_JOB|LEASE_ACTIVE)$/.test(error.code))return {error:{code:error.code,
         ...(Number.isSafeInteger(error.readyAt)?{available_at:new Date(error.readyAt).toISOString()}: {})}};
       if(!(error instanceof CloudRequestError)) {
@@ -68,6 +73,15 @@ export function createPublicRuntime({db,fetch,config,masterKey,clock=null,legacy
   function accountInput(e,input) {
     if(!object(input)||!Number.isSafeInteger(input.account_generation)||input.account_generation!==e.account.generation)fail('PUBLIC_ACCOUNT_CHANGED');
     const {account_generation,...value}=input;return value;
+  }
+  function websiteEnvironment(e) {
+    const repository=createPublicRepository(db,e.user,{dashboardCache:true,maxAccounts:config.maxAccounts,
+      accountGenerationFence:e.account.generation,walletFence:{revision:e.account.wallet_revision},
+      storageAdmission:storageAdmission?.forScope(`public:${e.user}`),
+      websiteLimits:{...MARKETAPP_WEBSITE_LIMITS,owner_attempts:config.websiteDailyAttempts??20}});
+    const request=createPublicWebsiteFetch({fetch,repository,userId:e.user,wallet:e.account.wallet,
+      accountGeneration:e.account.generation,walletRevision:e.account.wallet_revision});
+    return {repository,request};
   }
   function fenced(e, bindWallet = false) {
     if(!e.row?.ciphertext)fail('PUBLIC_KEY_REQUIRED');
@@ -95,7 +109,7 @@ export function createPublicRuntime({db,fetch,config,masterKey,clock=null,legacy
     return result;
   }
   const accountPolicies=async(e,result)=>result?.account?{...result,account:{...result.account,account_generation:(await e.repo.publicAccount()).generation,privacy_policy_url:config.privacyPolicyUrl,terms_url:config.termsUrl}}:result;
-  async function invokeAccount(name,input,ctx) {return safe(async()=>{const e=await environment(ctx);if(typeof e.accountEngine[name]!=='function')fail('PUBLIC_INVALID_INPUT');return accountPolicies(e,await e.accountEngine[name](ctx,input));});}
+  async function invokeAccount(name,input,ctx) {return safe(async()=>{const e=await environment(ctx);if(!['getPublicAccount','saveMarketappApiKey','removeMarketappApiKey','testMarketappApiKey','disconnectPublicWallet','deletePublicAccount','reactivatePublicAccount'].includes(name))fail('PUBLIC_INVALID_INPUT');return accountPolicies(e,await e.accountEngine[name](ctx,input));});}
   async function invokeWallet(name,input,ctx) {return safe(async()=>{const e=await environment(ctx);activeRequired(e);
     const engine=createPublicWalletEngine({repository:e.repo,ownerTelegramId:e.user,enabled:true,challengeKey:masterKey,domain:config.origin.slice(8),manifestUrl:`${config.origin}/tonconnect-manifest.json`,clock:e.clock});
     if(!['startWalletVerification','finishWalletVerification'].includes(name))fail('PUBLIC_INVALID_INPUT');
@@ -111,11 +125,11 @@ export function createPublicRuntime({db,fetch,config,masterKey,clock=null,legacy
     if(name==='importChunk')fail('PUBLIC_ACCESS_DENIED'); // Browser callers cannot forge verified portfolio evidence.
     if(name==='getDashboard') {
       const result=await cloud(e).getDashboard(ctx,input),limits=await e.budget.status('marketapp',e.user,e.row?.credential_fingerprint??null);
-      result.update_token=`public:${e.account.generation}:${result.update_token}`;
+      if(result.update_token)result.update_token=`public:${e.account.generation}:${result.update_token}`;
       const ownedRefresh=Boolean(e.account.wallet&&result.gifts?.some(gift=>gift.is_portfolio===true));
       result.capabilities={...result.capabilities,...{public_account:true,account_generation:e.account.generation,public_onboarding:!(e.account.wallet_verified_at&&e.row?.ciphertext),wallet_configured:Boolean(e.account.wallet_verified_at),
         owned_price_refresh:ownedRefresh,owned_price_refresh_single:ownedRefresh,owned_status_refresh:ownedRefresh,personal_gift_refresh:ownedRefresh,
-        marketapp_login_test:config.experimentalPersonalAnalytics===true,marketapp_analytics_refresh:config.experimentalPersonalAnalytics===true,
+        marketapp_login_test:false,marketapp_analytics_refresh:config.experimentalPersonalAnalytics===true&&Boolean(e.account.wallet_verified_at),
         supported_jobs:['discover','prices','rental_prices','collect'],marketapp_limits:{...result.capabilities.marketapp_limits,...limits,provider_allowance_blocked:limits.remaining_24h===0}}};
       result.coverage.note='Wallet discovery and provider checks are bounded, dated observations. Historical transfers are candidates until current ownership is verified. Rental-contract availability does not prove Marketapp listing visibility.';
       return result;
@@ -126,7 +140,7 @@ export function createPublicRuntime({db,fetch,config,masterKey,clock=null,legacy
       const jobs=[...(await market.getJobs(ctx)).jobs,...(await discovery(e).getJobs(ctx)).jobs].sort((a,b)=>b.id-a.id);
       for(const job of jobs)await providerProgress(e,{job});return {jobs};
     }
-    if(name==='importPersonalAnalytics'){walletRequired(e);return cloud(e).importPersonalAnalytics(ctx,input);}
+    if(name==='importPersonalAnalytics'){walletRequired(e);input=accountInput(e,input);const {repository}=websiteEnvironment(e);return cloud(e,repository).importPersonalAnalytics(ctx,input);}
     if(!['startJob','stepJob','resumeJob','stopJob','refreshStartupComparisons'].includes(name))fail('PUBLIC_INVALID_INPUT');
     input=accountInput(e,input);
     walletRequired(e);
@@ -178,8 +192,8 @@ export function createPublicRuntime({db,fetch,config,masterKey,clock=null,legacy
     }
     fail('CONFLICT');
   }
-  // Personal website gift refresh is initially disabled for invited accounts.
-  // They retain the same bounded TON-only fallback and scoped controls.
+  // The guarded website path shares the private engine while all evidence,
+  // sessions and archives use the authenticated public account repository.
   async function invokeGiftRefresh(name,input={},ctx) {return safe(async()=>{
     if(!object(input)||!['getStatus','start','step','stop'].includes(name))fail('PUBLIC_INVALID_INPUT');
     const {automatic,...forwarded}=input;
@@ -187,6 +201,18 @@ export function createPublicRuntime({db,fetch,config,masterKey,clock=null,legacy
     const session=input.session_id;
     if(session!==undefined&&(typeof session!=='string'||!/^[A-Za-z0-9._:-]{16,160}$/.test(session)))fail('PUBLIC_INVALID_INPUT');
     const e=await environment(ctx);activeRequired(e);
+    if(config.experimentalPersonalAnalytics===true) {
+      if(!e.account.wallet)fail('PUBLIC_WALLET_REQUIRED');
+      const value=name==='getStatus'?input:accountInput(e,input),{repository,request}=websiteEnvironment(e);
+      if(name==='start'||name==='step') {
+        const saved=await repository.read(),run=saved.state.gift_refresh?.run;
+        if(run?.state==='running'&&run.public_wallet_revision!==undefined&&run.public_wallet_revision!==e.account.wallet_revision)fail('PUBLIC_WALLET_CHANGED');
+      }
+      const engine=createGiftRefreshEngine({repository,fetch:request,
+        tonFetch:createPublicProviderFetch({fetch,budget:e.budget,repository,userId:e.user}),
+        ownerTelegramId:e.user,clock:e.clock,rememberedSessionBox:createMarketappRememberedSessionBox(sessionKey)});
+      const result=await engine[name](ctx,value);if(result.run)result.run.account_generation=e.account.generation;return result;
+    }
     if(name==='step'||name==='stop') {
       accountInput(e,input);
       if(!session||!Number.isSafeInteger(input.run_id)||input.run_id<1)fail('PUBLIC_INVALID_INPUT');
@@ -203,13 +229,18 @@ export function createPublicRuntime({db,fetch,config,masterKey,clock=null,legacy
   });}
   async function invokeAnalytics(group,name,input,ctx) {return safe(async()=>{const e=await environment(ctx);activeRequired(e);walletRequired(e);
     if(config.experimentalPersonalAnalytics!==true)fail('PUBLIC_ANALYTICS_DISABLED');
+    if(group==='login')fail('PUBLIC_ANALYTICS_DISABLED');
+    const allowed=group==='status'?['','getMarketappAnalyticsRefreshStatus']:group==='analytics'?[
+      'startMarketappAnalyticsRefresh','finishMarketappAnalyticsRefresh','cancelMarketappAnalyticsRefresh',
+      'refreshSavedMarketappAnalytics','refreshStartupMarketappAnalytics','disconnectMarketappAnalyticsSession','getMarketappAnalyticsSessionStatus']:[];
+    if(!allowed.includes(name))fail('PUBLIC_INVALID_INPUT');
+    input=accountInput(e,input);const {repository,request}=websiteEnvironment(e);
     // Website login has a separate purpose key and account-scoped nonce/fence;
     // Marketapp API keys never authenticate the website session.
-    const analytics=createMarketappAnalyticsRefreshEngine({repository:e.repo,fetch,ownerTelegramId:e.user,clock:e.clock,
+    const analytics=createMarketappAnalyticsRefreshEngine({repository,fetch:request,ownerTelegramId:e.user,clock:e.clock,
       sessionBox:createMarketappSessionBox(sessionKey),rememberedSessionBox:createMarketappRememberedSessionBox(sessionKey)});
-    if(group==='status')return createMarketappRefreshStatusEngine({repository:e.repo,ownerTelegramId:e.user,clock:e.clock,sessionStatus:context=>analytics.getMarketappAnalyticsSessionStatus(context)}).getMarketappAnalyticsRefreshStatus(ctx,input);
-    const engine=group==='login'?createMarketappLoginEngine({repository:e.repo,fetch,ownerTelegramId:e.user,clock:e.clock}):analytics;
-    if(typeof engine[name]!=='function')fail('PUBLIC_INVALID_INPUT');return engine[name](ctx,input);
+    if(group==='status')return createMarketappRefreshStatusEngine({repository,ownerTelegramId:e.user,clock:e.clock,sessionStatus:context=>analytics.getMarketappAnalyticsSessionStatus(context)}).getMarketappAnalyticsRefreshStatus(ctx,input);
+    return analytics[name](ctx,input);
   });}
   async function invokeStorage(name,input={},ctx) {return safe(async()=>{
     validatePublicReleaseConfig(config);

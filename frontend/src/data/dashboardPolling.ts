@@ -97,6 +97,9 @@ export function createDashboardPoller(
   let dashboardError: string | null = null;
   let jobsError: string | null = null;
   let loadedToken: string | null = null;
+  let disposed = false, dashboardReads = 0, fullReadSucceeded = false;
+  let startupRead = true;
+  const pendingChecks = new Set<() => void>();
   const message = (problem: unknown) => problem instanceof Error ? problem.message : 'The local service could not be reached.';
   const reportError = () => callbacks.error(dashboardError || jobsError);
   const progressInterval = () => active ? 2500 : 15000;
@@ -109,18 +112,33 @@ export function createDashboardPoller(
         if (token === loadedToken) return null;
       }
       callbacks.loading(true);
-      try { return await adapter.getDashboard(selection, signal); }
+      try {
+        if (startupRead && adapter.getStartupDashboard) {
+          startupRead = false;
+          const saved = await adapter.getStartupDashboard(selection, signal);
+          if (signal.aborted) return null;
+          if (!saved.startup_preview) return saved;
+          // Paint saved data before the expensive rebuild, without consuming
+          // its token or acknowledging a mutation with a preview response.
+          callbacks.dashboard(saved);
+        }
+        startupRead = false;
+        const current = await adapter.getDashboard(selection, signal);
+        if (current.startup_preview) throw new Error('The current view could not be confirmed. Your saved view is kept. Try again.');
+        return current;
+      }
       finally { if (!signal.aborted) callbacks.loading(false); }
     },
     success(data) {
       dashboardError = null;
       if (data) {
+        dashboardReads++; fullReadSucceeded = true;
         loadedToken = typeof data.update_token === 'string' && data.update_token ? data.update_token : null;
         callbacks.dashboard(data);
       }
       reportError();
     },
-    failure(problem) { dashboardError = message(problem); reportError(); },
+    failure(problem) { fullReadSucceeded = false; dashboardError = message(problem); reportError(); },
     // Rebuilding comparisons is more expensive than reading saved progress.
     // Manual reloads and the final collection commit still request immediately.
     interval: () => 15000,
@@ -144,6 +162,29 @@ export function createDashboardPoller(
   });
   return {
     async reload() { await Promise.all([dashboard.request(true), jobs.request()]); },
-    dispose() { dashboard.dispose(); jobs.dispose(); },
+    /** Gift commits must not wait for the independent collection-progress read. */
+    reloadDashboard() { return dashboard.request(true); },
+    /** Mutations need confirmation that their full saved-data read actually succeeded. */
+    async reloadDashboardChecked() {
+      if (disposed) throw new Error('The dashboard changed before saved data could reload.');
+      const before = dashboardReads;
+      let cancel!: () => void;
+      const interrupted = new Promise<never>((_resolve, reject) => {
+        cancel = () => reject(new Error('The dashboard changed before saved data could reload.'));
+        pendingChecks.add(cancel);
+      });
+      try {
+        await Promise.race([Promise.all([dashboard.request(true), jobs.request()]), interrupted]);
+        // A successful jobs request, revision-only probe, or earlier response in
+        // a coalesced request must not acknowledge a failed final full read.
+        if (disposed || !fullReadSucceeded || dashboardError !== null || dashboardReads === before)
+          throw new Error('Could not reload saved dashboard data.');
+      } finally { pendingChecks.delete(cancel); }
+    },
+    dispose() {
+      disposed = true; dashboard.dispose(); jobs.dispose();
+      for (const cancel of pendingChecks) cancel();
+      pendingChecks.clear();
+    },
   };
 }

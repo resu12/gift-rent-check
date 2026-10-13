@@ -8,6 +8,7 @@ import {installCompactOperationalStorage} from '../tools/compact-operational-sto
 import {installStorageAccounting} from '../tools/storage-accounting.mjs';
 import {STORAGE_TABLES,storageTableByteExpression} from '../tgcloud/lib/storage-policy.js';
 import {createStorageAdmission,StorageCapacityError} from '../tgcloud/lib/storage-admission.js';
+import {readOwnedGiftScope} from '../tgcloud/lib/owned-price-engine.js';
 
 const at='2026-10-12T12:00:00.000Z';
 const state=(floor=0)=>({version:2,next_job_id:1,job:null,attempts:[],next_allowed_at:0,operational_storage_version:1,record_storage_floor:floor});
@@ -131,6 +132,55 @@ test('owned-scope reads exclude unrelated normalized records while preserving so
     row('history','source-only',{source_json:JSON.stringify({address:wanted})}),row('owned_status','irrelevant',{identity:wanted})];
   await repo.append(0,event('scope',records));const result=[];await repo.visitOwnedScopeRecords(1,[wanted],page=>result.push(...page));
   assert.deepEqual(result,records.filter(value=>['wanted','conflict','source-only'].includes(value.key)));
+});
+
+test('raw compact paging preserves marker property semantics and imported unknown fields',async t=>{
+  const f=await fixture(t),repo=createCloudRepository(f.db);
+  await repo.append(0,event('legacy-inline',[row('settings','wallet',{wallet:'saved-wallet'})]));
+  const retained=[{kind:'metadata',record:null,__normalized_record_v1:null},{kind:'unknown',__normalized_record_v1:null},
+    {kind:'metadata',other:'retained'}];
+  f.database.prepare('UPDATE cloud_events SET records_json=? WHERE sequence=1').run(JSON.stringify([
+    {kind:'metadata',__normalized_record_v1:null},...retained,
+  ]));
+  assert.deepEqual(await repo.records(1),retained,'marker presence is checked without discarding protected record fields or unknown kinds');
+});
+
+for(const publicMode of [false,true])test(`${publicMode?'public':'private'} sparse compact scope pages advance through unrelated history before a matching tail`,async t=>{
+  const f=await fixture(t),calls=[],inlineCalls=[],db={...f.db,async all(sql,parameters){
+    if(sql.includes('WITH candidates'))assert.ok(!sql.includes('scope_ids'),'selective owned scope SQL must not scan unbounded candidates before LIMIT');
+    const rows=await f.db.all(sql,parameters);
+    if(sql.includes('WITH candidates')&&sql.includes('service_record_occurrences')) {
+      assert.ok(rows.length<=800);
+      assert.ok(rows.reduce((sum,value)=>sum+value.bytes,0)<=1048576);
+      calls.push({rows:rows.length,after:parameters[':record_after'],ordinal:parameters[':record_ordinal']});
+    }
+    if(sql.includes('WITH candidates')&&sql.includes('json_each(e.records_json)')) {
+      assert.ok(rows.length<=800);
+      assert.ok(rows.reduce((sum,value)=>sum+value.bytes,0)<=1048576);
+      inlineCalls.push({rows:rows.length,after:parameters[':record_after'],ordinal:parameters[':record_ordinal']});
+    }
+    return rows;
+  }},repo=publicMode?createPublicRepository(db,'101',{maxAccountBytes:32*1048576}):createCloudRepository(db);
+  const wanted='0:'+'11'.repeat(32),other='0:'+'22'.repeat(32),wallet='0:'+'33'.repeat(32),collection='0:'+'44'.repeat(32);
+  await repo.append(0,event('seeds',[row('settings','wallet',{wallet}),row('portfolio','gift',{nft_address:wanted,collection_address:collection,is_portfolio:true})]));
+  // All these pages are irrelevant to the owned scope. The hosted failure
+  // occurred because SQL inspected them all inside one selective query.
+  for(let page=0;page<17;page++)await repo.append(page+1,event('unrelated:'+page,Array.from({length:1000},(_,index)=>
+    row('history',`other:${page}:${index}`,{identity:other,collection_address:collection,source_json:{sequence:page*1000+index}}))));
+  const frozen=18,tail=[row('metadata','tail',{identity:wanted,collection_address:collection}),
+    row('history','source-conflict',{source_json:JSON.stringify({address:wanted,collection_address:other})})];
+  await repo.append(frozen,event('tail',tail));
+  assert.deepEqual((await repo.dashboardSeedRecords(frozen+1)).map(value=>value.kind),['settings','portfolio']);
+  assert.ok(inlineCalls.filter(call=>call.rows).length>=22,'sparse seed traversal bounds the raw marker scan, including its nonmatching tail');
+  assert.equal(inlineCalls.reduce((sum,call)=>sum+call.rows,0),17004,'every raw cursor advances once even when only two seeds match');
+  inlineCalls.length=0;
+  const scopeRows=[];await repo.visitOwnedScopeRecords(frozen+1,[wanted],page=>scopeRows.push(...page));
+  assert.deepEqual(scopeRows,tail);
+  assert.ok(calls.length>=23,'unrelated raw pages advance without premature EOF');
+  const nonempty=calls.filter(call=>call.rows);assert.equal(nonempty.reduce((sum,call)=>sum+call.rows,0),17002);
+  assert.ok(nonempty.every((call,index)=>index===0||call.after>nonempty[index-1].after||call.after===nonempty[index-1].after&&call.ordinal>nonempty[index-1].ordinal));
+  assert.equal((await readOwnedGiftScope(repo,frozen)).targets.length,1,'frozen scope excludes a later conflict');
+  assert.equal((await readOwnedGiftScope(repo,frozen+1)).targets.length,0,'source-only tail conflict still excludes the owned gift');
 });
 
 test('atomic accounting matches physical normalized bytes and admission covers record and archive amplification',async t=>{

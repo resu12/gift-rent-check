@@ -5,14 +5,15 @@ import {createPublicRepository,PublicAccountError,PublicStorageLimitError} from 
 import {createStorageAdmission,StorageCapacityError} from '../tgcloud/lib/storage-admission.js';
 import {storageAccountingTriggers} from '../tools/storage-accounting.mjs';
 import {STORAGE_TABLES,storageTableByteExpression} from '../tgcloud/lib/storage-policy.js';
+import {personalAnalyticsDailyTriggers,personalAnalyticsDailyReserve} from '../tgcloud/lib/personal-analytics.js';
 
-const now=Date.now(),hour=3600000,wallet='same-wallet',owner='101';
+const now=Date.now(),hour=3600000,wallet=`0:${'11'.repeat(32)}`,owner='101';
 const at=offset=>new Date(now+offset).toISOString();
 const fingerprint=index=>index.toString(16).padStart(64,'0');
 const snapshot=(index,span=30,offset=index*1000,address=wallet)=>({version:1,source:'marketapp_personal_rent_page',currency:'GRAM',
-  timezone:'UTC',volume_basis:'gross_before_fees',summary:{rent_volume:'1.2'},period_start:'day-0',period_end:`day-${span-1}`,
-  fingerprint:fingerprint(index),wallet:address,captured_at:at(offset),
-  daily:Array.from({length:span},(_,day)=>({date:`day-${day}`,rent_volume:'1.2',rentals:1}))});
+  timezone:'UTC',volume_basis:'gross_before_fees',summary:{rent_volume:'1.2'},period_start:'2025-01-01',period_end:new Date(Date.UTC(2025,0,span)).toISOString().slice(0,10),
+  fingerprint:fingerprint(index),wallet:address,captured_at:at(offset),top_items:{status:'missing',scope:'marketapp_top_items',items:[]},by_collection:{status:'missing',scope:'marketapp_by_collection',items:[]},
+  daily:Array.from({length:span},(_,day)=>({date:new Date(Date.UTC(2025,0,day+1)).toISOString().slice(0,10),rent_volume:'1.2',new_rentals:1,extensions:0,rentals:1}))});
 const raw=value=>JSON.stringify({capture:value.fingerprint,padding:'🦋'.repeat(100)});
 function seed(f,value,{tenant=owner,body=raw(value),normalized=JSON.stringify(value)}={}) {
   f.database.prepare(`INSERT INTO public_personal_rental_analytics
@@ -30,7 +31,8 @@ function attempt(f,value,{id=`attempt-${value.fingerprint}`,created=now-2*hour,e
 }
 const rows=f=>f.database.prepare('SELECT * FROM public_personal_rental_analytics WHERE user_id=? ORDER BY fingerprint').all(owner);
 const ids=f=>rows(f).map(row=>row.fingerprint);
-async function fixture(t) {const f=createPublicDatabase(t);f.repo=f.repository(owner);await f.repo.ensureAccount();return f;}
+async function fixture(t) {const f=createPublicDatabase(t);for(const trigger of personalAnalyticsDailyTriggers({publicScope:true}))f.database.exec(trigger.sql);
+  f.repo=f.repository(owner);await f.repo.ensureAccount();return f;}
 
 test('repeated invited refreshes retain the newest capture per wallet/span instead of a lifetime count limit',async t=>{
   const f=await fixture(t);
@@ -130,13 +132,14 @@ test('near-cap replacement credits exact UTF-8 retained bytes in both account qu
   for(const trigger of storageAccountingTriggers())f.database.exec(trigger.sql);
   const old=snapshot(1),fresh=snapshot(2),oldRaw=raw(old),freshRaw=raw(fresh)+'🦋';seed(f,old,{body:oldRaw});
   const used=f.database.prepare('SELECT total_bytes FROM service_storage_scope_usage WHERE scope=?').get('public:101').total_bytes,
-    maxBytes=used+32,admission=createStorageAdmission(f.db).forScope('public:101',{maxBytes}),
+    maxBytes=used+personalAnalyticsDailyReserve(fresh,owner)+32,admission=createStorageAdmission(f.db).forScope('public:101',{maxBytes}),
     repo=f.repository(owner,{maxAccountBytes:maxBytes,maxServiceBytes:1048576,storageAdmission:admission});
   await assert.rejects(admission.assertAdmitted(used),StorageCapacityError);
   assert.equal(await repo.importPersonalAnalytics(fresh,freshRaw,fresh.captured_at),true);
   assert.deepEqual(ids(f),[fresh.fingerprint]);
-  const measured=f.database.prepare(`SELECT SUM(${storageTableByteExpression(STORAGE_TABLES.find(table=>table.name==='public_personal_rental_analytics'))}) AS bytes
-    FROM public_personal_rental_analytics WHERE user_id=?`).get(owner).bytes;
+  const measured=f.database.prepare(`SELECT (SELECT SUM(${storageTableByteExpression(STORAGE_TABLES.find(table=>table.name==='public_personal_rental_analytics'))})
+    FROM public_personal_rental_analytics WHERE user_id=?)+(SELECT SUM(${storageTableByteExpression(STORAGE_TABLES.find(table=>table.name==='public_personal_analytics_daily'))})
+    FROM public_personal_analytics_daily WHERE user_id=?) AS bytes`).get(owner,owner).bytes;
   assert.equal(f.database.prepare('SELECT total_bytes FROM service_storage_scope_usage WHERE scope=?').get('public:101').total_bytes,measured);
   assert.equal(measured,used+4);
 });

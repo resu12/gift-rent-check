@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { Icon } from './Icons';
-import type { Dashboard, DashboardAdapter, DataRecord, Gift, Job, JobKind, JobStartOptions, PricingSelection } from './data/types';
+import type { Dashboard, DashboardAdapter, DataRecord, Gift, Job, JobKind, JobStartOptions, PersonalRentalAnalyticsAllTime, PricingSelection } from './data/types';
 import { dateTime, formatAmount, giftGroup, humanize, isActiveJob, relativeTime, safeExternalUrl, shorten } from './data/helpers';
 import { filterInventoryGifts, latestEvidenceAt } from './data/inventory';
 import { sortInventoryGifts, type InventorySort } from './data/inventorySort';
@@ -18,9 +18,10 @@ import { useOwnedPriceRefresh } from './useOwnedPriceRefresh';
 import { useAnalyticsStartupRefresh } from './useAnalyticsStartupRefresh';
 import { useComparisonStartupRefresh } from './useComparisonStartupRefresh';
 import type { AnalyticsStartupSnapshot } from './serverless/analyticsStartup';
+import type { AnalyticsReportSelection } from './data/analyticsReports';
+import { publicAccountSettingsScope } from './serverless/publicAccount';
 import { OwnedPriceStatus } from './OwnedPriceStatus';
 import { GiftPriceRefreshButton } from './GiftPriceRefreshButton';
-import { InventoryGrid } from './InventoryGrid';
 import { GiftImage } from './GiftImage';
 import { QuickPriceActions } from './QuickPriceActions';
 import { GiftPriceCheck } from './GiftPriceCheck';
@@ -28,8 +29,7 @@ import { savedGiftRefreshEnabled, type OwnedPriceRefreshDriver, type OwnedPriceS
 import { giftSelectionContext, selectedDashboardGift } from './data/giftSelection';
 import type { GiftSelection } from './data/giftSelection';
 import { MarketappSettings } from './MarketappSettings';
-import { PersonalAnalytics } from './PersonalAnalytics';
-import { GiftPriceTracking, PriceChangeOverview } from './PriceTracking';
+import { deferredView } from './DeferredView';
 import { localCollectionBlocker } from './data/marketappSettings';
 import { canCollectComparisons, publicComparisonBlocker } from './data/comparisonAccess';
 import type { ComparisonCollectionBlocker as CollectionBlocker } from './data/comparisonAccess';
@@ -39,9 +39,7 @@ import { efficientRefreshSelection, presentCollectionEfficiency, presentResumeSu
 import { activityJobGroups } from './data/activityHistory';
 import { activityFreshnessRows, type ActivityFreshnessRow } from './data/activityFreshness';
 import { activityComparisonActionLabel, activityComparisonRequestBlocker, activityComparisonResumeAvailability, resumableActivityComparisonJob } from './data/activityFreshnessActions';
-import { comparisonActionFeedback, comparisonAllowanceFeedback, type ComparisonActionFeedback } from './data/activityComparisonFeedback';
-import { ActivityDataStatus } from './ActivityDataStatus';
-import { StorageStatusCard } from './StorageStatus';
+import { comparisonActionFeedback, comparisonAllowanceFeedback, currentComparisonActionFeedback, type ComparisonActionState } from './data/activityComparisonFeedback';
 import { useStorageMaintenance } from './useStorageMaintenance';
 import { PullToRefresh } from './PullToRefresh';
 import './interface.css';
@@ -74,6 +72,13 @@ const JOB_LABEL: Record<JobKind, string> = { refresh: 'Refresh gift status', dis
 const PAGE_SIZE = 20;
 const PublicAccountSetup = lazy(() => import('./serverless/PublicAccountSetup').then(module => ({default:module.PublicAccountSetup})));
 const MarketappConnection = lazy(() => import('./serverless/MarketappAnalyticsRefresh'));
+const PersonalAnalytics = deferredView(() => import('./PersonalAnalytics').then(module => ({ default: module.PersonalAnalytics })), 'analytics');
+const GiftAllTimeAnalytics = deferredView(() => import('./GiftAllTimeAnalytics').then(module => ({ default: module.GiftAllTimeAnalytics })), 'rental statistics');
+const GiftPriceTracking = deferredView(() => import('./PriceTracking').then(module => ({ default: module.GiftPriceTracking })), 'price history');
+const PriceChangeOverview = deferredView(() => import('./PriceTracking').then(module => ({ default: module.PriceChangeOverview })), 'price changes');
+const InventoryGrid = deferredView(() => import('./InventoryGrid').then(module => ({ default: module.InventoryGrid })), 'gifts');
+const ActivityDataStatus = deferredView(() => import('./ActivityDataStatus').then(module => ({ default: module.ActivityDataStatus })), 'data status');
+const StorageStatusCard = deferredView(() => import('./StorageStatus').then(module => ({ default: module.StorageStatusCard })), 'storage status');
 
 function GiftDisplayControl({ view, onChange, label }: {
   view: 'grid' | 'detailed'; onChange: (view: 'grid' | 'detailed') => void; label: string;
@@ -96,6 +101,9 @@ function useDashboard(adapter: DashboardAdapter, selection: PricingSelection) {
   const readError = useRef<string | null>(null);
   const getReadError = useCallback(() => readError.current, []);
   const [loadedAt, setLoadedAt] = useState<string | null>(null);
+  const [analyticsRead, setAnalyticsRead] = useState<{ query: string; scope: string | null; startedAt: string } | null>(null);
+  const dashboardScope = useRef<string | null>(null);
+  if (data) dashboardScope.current = giftSelectionContext(data);
   const session = useRef<{ query: string; poller: ReturnType<typeof createDashboardPoller> } | null>(null);
   // Query identity, rather than a newly allocated selection object, owns the
   // session. Jobs can finish after a selection change: their old callback is inert.
@@ -103,6 +111,19 @@ function useDashboard(adapter: DashboardAdapter, selection: PricingSelection) {
   requestedSelection.current = selection;
   const reload = useCallback(async () => {
     if (activeQuery.current === query && session.current?.query === query) await session.current.poller.reload();
+  }, [query]);
+  const reloadGiftData = useCallback(async () => {
+    if (activeQuery.current === query && session.current?.query === query) await session.current.poller.reloadDashboard();
+  }, [query]);
+  const reloadAnalytics = useCallback(async () => {
+    const owner = session.current;
+    if (activeQuery.current !== query || !owner || owner.query !== query)
+      throw new Error('The dashboard changed before saved data could reload.');
+    const scope = dashboardScope.current, startedAt = new Date().toISOString();
+    await owner.poller.reloadDashboardChecked();
+    if (activeQuery.current !== query || session.current !== owner || dashboardScope.current !== scope)
+      throw new Error('The dashboard changed before saved data could reload.');
+    setAnalyticsRead({ query, scope, startedAt });
   }, [query]);
   useEffect(() => {
     setLoading(true); setError(null); readError.current = null;
@@ -126,7 +147,9 @@ function useDashboard(adapter: DashboardAdapter, selection: PricingSelection) {
     setJobs(current => current.some(job => job.id === changed.id)
       ? current.map(job => job.id === changed.id ? changed : job) : [...current, changed]);
   }, []);
-  return { data, jobs, loading: loading || (!data && !error), error, loadedAt, reload, getReadError, updateJob };
+  const analyticsReloadedAt = data && analyticsRead?.query === query && analyticsRead.scope === giftSelectionContext(data)
+    ? analyticsRead.startedAt : null;
+  return { data, jobs, loading: loading || (!data && !error), error, loadedAt, analyticsReloadedAt, reload, reloadGiftData, reloadAnalytics, getReadError, updateJob };
 }
 
 function StateBadge({ gift }: { gift: Gift }) {
@@ -239,7 +262,7 @@ function CollectionLimits({ data, selection }: { data: Dashboard; selection: Pri
   </>;
 }
 
-function Overview({ data, adapter, reload, onFilter, onSelect, analyticsStartup, onAnalyticsBusy, initialAnalyticsDays }: { data: Dashboard; adapter: DashboardAdapter; reload: () => Promise<void>; onFilter: (filter: GiftFilter, scope?: InventoryScope) => void; onSelect: (gift: Gift) => void; analyticsStartup: AnalyticsStartupSnapshot; onAnalyticsBusy: (busy: boolean) => void; initialAnalyticsDays?: number }) {
+function Overview({ data, adapter, reload, onFilter, onSelect, analyticsStartup, onAnalyticsBusy, initialAnalyticsDays }: { data: Dashboard; adapter: DashboardAdapter; reload: () => Promise<void>; onFilter: (filter: GiftFilter, scope?: InventoryScope) => void; onSelect: (gift: Gift) => void; analyticsStartup: AnalyticsStartupSnapshot; onAnalyticsBusy: (busy: boolean) => void; initialAnalyticsDays?: AnalyticsReportSelection }) {
   const summary = data.summary;
   const featured = [...data.gifts].filter(gift => gift.is_portfolio).sort((a, b) => (b.observed_at || '').localeCompare(a.observed_at || '')).slice(0, 4);
   const count = (filter: GiftFilter) => filterInventoryGifts(data.gifts, '', filter, '', 'portfolio').length;
@@ -255,7 +278,7 @@ function Overview({ data, adapter, reload, onFilter, onSelect, analyticsStartup,
   const portfolioReview = data.gifts.filter(gift => gift.is_portfolio && giftGroup(gift) === 'review').length;
   const candidateReview = data.gifts.filter(gift => !gift.is_portfolio && giftGroup(gift) === 'review').length;
   return <>
-    <PersonalAnalytics snapshot={data.personal_analytics} snapshots={data.personal_analytics_snapshots} wallet={data.wallet} transport={adapter.personalAnalytics} csrf={data.capabilities.csrf_token} onImported={reload} cloud={adapter.mode === 'serverless'} marketappLoginTest={adapter.mode === 'serverless' && data.capabilities.marketapp_login_test ? adapter.marketappLoginTest : undefined} marketappAnalyticsRefresh={adapter.mode === 'serverless' && data.capabilities.marketapp_analytics_refresh ? adapter.marketappAnalyticsRefresh : undefined} analyticsStartup={analyticsStartup} onAnalyticsBusy={onAnalyticsBusy} initialPeriodDays={initialAnalyticsDays} />
+    <PersonalAnalytics key={`${giftSelectionContext(data)}:${data.capabilities.wallet_configured}`} snapshot={data.personal_analytics} snapshots={data.personal_analytics_snapshots} allTime={data.personal_analytics_all_time} wallet={data.wallet} gifts={data.gifts} transport={adapter.personalAnalytics} csrf={data.capabilities.csrf_token} onImported={reload} cloud={adapter.mode === 'serverless'} marketappLoginTest={adapter.mode === 'serverless' && data.capabilities.marketapp_login_test ? adapter.marketappLoginTest : undefined} marketappAnalyticsRefresh={adapter.mode === 'serverless' && data.capabilities.marketapp_analytics_refresh ? adapter.marketappAnalyticsRefresh : undefined} analyticsStartup={analyticsStartup} onAnalyticsBusy={onAnalyticsBusy} initialPeriodDays={initialAnalyticsDays} />
     <section className="stats-grid" aria-label="Portfolio summary">
       <StatCard label="Your gifts" value={summary.portfolio_count} subtitle="Saved portfolio" icon="gift" tone="neutral" onClick={() => onFilter('all')} />
       <StatCard label="Available" value={count('available')} subtitle="Listings + verified idle contracts" icon="arrow" tone="teal" onClick={() => onFilter('available')} />
@@ -264,7 +287,7 @@ function Overview({ data, adapter, reload, onFilter, onSelect, analyticsStartup,
     </section>
     <PriceChangeOverview gifts={data.gifts} onSelect={onSelect} />
     <details className="portfolio-disclosure"><summary>Portfolio details</summary><div className="overview-columns"><section className="panel inventory-panel"><div className="section-heading"><h2>Recently checked</h2><button className="text-button" onClick={() => onFilter('all')}>View all <Icon name="arrow" size={17} /></button></div>
-      {featured.length ? <div className="featured-grid">{featured.map(gift => <button className="featured-gift" key={gift.id} onClick={() => onSelect(gift)}><GiftImage gift={gift} large /><div className="featured-info"><strong>{gift.name || 'Unnamed gift'}</strong><StateBadge gift={gift} /></div></button>)}</div> : <Empty title="No gifts yet">{data.capabilities.hosting === 'serverless' ? 'Import your saved portfolio to get started.' : 'Import a portfolio or discover your wallet to get started.'}</Empty>}
+      {featured.length ? <div className="featured-grid">{featured.map(gift => <button className="featured-gift" key={gift.id} onClick={() => onSelect(gift)}><GiftImage gift={gift} large /><div className="featured-info"><strong>{gift.name || 'Unnamed gift'}</strong><StateBadge gift={gift} /></div></button>)}</div> : <Empty title="No gifts yet">{data.capabilities.hosting === 'serverless' ? data.capabilities.public_account ? 'Open Status to connect your wallet and find your gifts.' : 'Import a portfolio to add your gifts.' : 'Import a portfolio or discover your wallet to get started.'}</Empty>}
     </section><section className="panel distribution-panel"><div className="section-heading"><h2>Portfolio status</h2><Icon name="layers" size={20} /></div>
       <div className="distribution-bar" aria-label="Observed portfolio status distribution">{groups.map(group => <span className={group.color} key={group.label} style={{ flex: group.value }} title={`${group.label}: ${group.value}`} />)}{total === 0 && <span className="slate" style={{ flex: 1 }} />}</div>
       <div className="mix-legend">{groups.length ? groups.map(group => <button key={group.label} onClick={() => onFilter(group.filter)}><span><i className={group.color} />{group.label}</span><b>{group.value.toLocaleString()}</b></button>) : <p>No classified observations yet.</p>}</div>
@@ -310,8 +333,9 @@ function stringField(record: DataRecord, ...keys: string[]): string | null {
   return null;
 }
 
-function GiftDetails({ gift, selection, close, quickActions = false, driver, onCheck, checkDisabledReason }: {
+function GiftDetails({ gift, selection, close, allTime, wallet, quickActions = false, driver, onCheck, checkDisabledReason }: {
   gift: Gift; selection: PricingSelection; close: () => void; quickActions?: boolean;
+  allTime?: PersonalRentalAnalyticsAllTime | null; wallet: string | null;
   driver?: OwnedPriceRefreshDriver | null; onCheck?: (nft: string) => Promise<void>; checkDisabledReason?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
@@ -336,6 +360,7 @@ function GiftDetails({ gift, selection, close, quickActions = false, driver, onC
         {driver && onCheck && <GiftPriceCheck gift={gift} driver={driver} onCheck={onCheck} disabledReason={checkDisabledReason} />}
         <details className="detail-disclosure"><summary>How to change the price</summary><p>Tap the recommended price to copy it, open Marketapp, paste it into the gift’s price settings and confirm there. Return here and check this gift to read the configured contract price.</p><p>Checking does not confirm Marketapp listing visibility. For a rented gift, a new asking price does not change an existing rental payment.</p></details>
       </section>}
+      <GiftAllTimeAnalytics gift={gift} report={allTime} wallet={wallet} />
       <RentalHistoryDetails gift={gift} />
       <GiftPriceTracking gift={gift} />
       <details className="detail-section detail-disclosure"><summary>Ownership evidence</summary><div className="proof-badges">{gift.proof_badges.length ? gift.proof_badges.map(badge => <span key={badge}><Icon name="shield" size={14} />{humanize(badge)}</span>) : <span><Icon name="layers" size={14} />{gift.is_portfolio ? 'Declared portfolio membership' : 'Unverified candidate'}</span>}</div>
@@ -391,12 +416,12 @@ export default function App({ adapter, walletControl }: {
   };
   const [pricingSelection, setPricingSelection] = useState<PricingSelection>(DEFAULT_PRICING);
   const [pricingFilters, setPricingFilters] = useState<PricingFilters>({ search: '', collection: '', filter: 'all', sort: 'increase' });
-  const { data, jobs, loading, error, loadedAt, reload, getReadError, updateJob } = useDashboard(adapter, pricingSelection);
-  const { driver: ownedPriceRefresh, refresh: refreshGiftPrices, refreshGift: refreshOneGift } = useOwnedPriceRefresh(adapter, data, reload);
+  const { data, jobs, loading, error, loadedAt, analyticsReloadedAt, reload, reloadGiftData, reloadAnalytics, getReadError, updateJob } = useDashboard(adapter, pricingSelection);
+  const { driver: ownedPriceRefresh, refresh: refreshGiftPrices, refreshGift: refreshOneGift } = useOwnedPriceRefresh(adapter, data, reloadGiftData);
   const giftRefreshStatus = useSyncExternalStore(ownedPriceRefresh?.subscribe ?? noGiftRefreshSubscription,
     ownedPriceRefresh?.getSnapshot ?? noGiftRefreshSnapshot, noGiftRefreshSnapshot);
   const [analyticsManualBusy, setAnalyticsManualBusy] = useState(false);
-  const analyticsStartup = useAnalyticsStartupRefresh(adapter, data, ownedPriceRefresh, reload, analyticsManualBusy);
+  const analyticsStartup = useAnalyticsStartupRefresh(adapter, data?.startup_preview ? null : data, ownedPriceRefresh, reloadAnalytics, analyticsManualBusy);
   const [page, setPage] = useState<Page>('pricing');
   const [activityNow, setActivityNow] = useState(Date.now);
   useEffect(() => {
@@ -417,7 +442,7 @@ export default function App({ adapter, walletControl }: {
   const [inventoryScope, setInventoryScope] = useState<InventoryScope>('portfolio');
   const [selected, setSelected] = useState<GiftSelection | null>(null);
   const selectionContext = giftSelectionContext(data);
-  const [analyticsTarget, setAnalyticsTarget] = useState<{ context: string; days: number } | null>(null);
+  const [analyticsTarget, setAnalyticsTarget] = useState<{ context: string; days: AnalyticsReportSelection } | null>(null);
   const selectGift = (gift: Gift) => setSelected({ id: gift.id, context: selectionContext });
   const selectedGift = selectedDashboardGift(data, selected);
   const [search, setSearch] = useState('');
@@ -427,7 +452,7 @@ export default function App({ adapter, walletControl }: {
   const [stoppingJobs, setStoppingJobs] = useState<Set<number>>(() => new Set());
   const stopRequests = useRef(new Set<number>());
   const [jobError, setJobError] = useState<string | null>(null);
-  const [comparisonAction, setComparisonAction] = useState<{ context: string; rowId: string; jobId?: number; feedback: ComparisonActionFeedback } | null>(null);
+  const [comparisonAction, setComparisonAction] = useState<ComparisonActionState | null>(null);
   const actionLaunching = useRef(false);
   const [syncMenu, setSyncMenu] = useState(false);
   const [refreshOpen, setRefreshOpen] = useState(false);
@@ -444,7 +469,7 @@ export default function App({ adapter, walletControl }: {
     : localCollectionBlocker(data?.capabilities) || (error ? { message: 'Reload saved data before continuing the sync.', setup: false } : null);
   const simplePricing = page === 'pricing' && pricingView === 'grid';
   const activeJobs = jobs.filter(job => isActiveJob(job) && job.progress?.requires_resume !== true);
-  const comparisonsStartup = useComparisonStartupRefresh(adapter, data, pricingSelection, ownedPriceRefresh, analyticsStartup,
+  const comparisonsStartup = useComparisonStartupRefresh(adapter, data?.startup_preview ? null : data, pricingSelection, ownedPriceRefresh, analyticsStartup,
     submitting || analyticsManualBusy, activeJobs.length > 0);
   const currentSyncIds = new Set(activityJobGroups(jobs).current.map(job => job.id));
   const visibleJobs = visibleDashboardJobs(jobs.filter(job => job.state === 'complete' || currentSyncIds.has(job.id)));
@@ -462,7 +487,6 @@ export default function App({ adapter, walletControl }: {
       ? { ...current, feedback: comparisonActionFeedback(event.job!) } : current);
     if (event.error) {
       setJobError(event.error);
-      setComparisonAction(current => current ? { ...current, feedback: { tone: 'error', message: event.error! } } : current);
     }
     if (event.savedDataChanged) void reload();
   }), [adapter, updateJob, reload]);
@@ -539,6 +563,8 @@ export default function App({ adapter, walletControl }: {
   };
   const onStop = (job: Job) => { void stop(job); };
   const navigate = (next: Page) => {
+    // A Status → View period applies to that visit, not later normal visits.
+    if (next !== 'overview') setAnalyticsTarget(null);
     setPage(next); setSyncMenu(false); setRefreshOpen(false);
     requestAnimationFrame(() => { window.scrollTo({ top: 0, behavior: 'instant' }); mainRef.current?.focus({ preventScroll: true }); });
   };
@@ -576,12 +602,12 @@ export default function App({ adapter, walletControl }: {
   const viewControl = <div className="gift-section-actions">{giftPriceRefreshButton}<GiftDisplayControl view={pricingView} onChange={changePricingView} label="Pricing gift display" /></div>;
   const connectionChanged = () => { comparisonsStartup.manualAction(); void reload(); };
   const marketappConnection = cloud && data?.capabilities.marketapp_analytics_refresh && adapter.marketappAnalyticsRefresh
-    ? <Suspense fallback={<p role="status">Loading Marketapp connection…</p>}><MarketappConnection variant="connection" transport={adapter.marketappAnalyticsRefresh} wallet={data.wallet} onImported={async () => { comparisonsStartup.manualAction(); await reload(); }} startupBusy={analyticsStartup?.busy === true} onBusyChange={setAnalyticsManualBusy} /></Suspense>
-    : <section className="activity-connection-row"><div className="activity-connection-heading"><Icon name="wallet" size={20} /><h3>Marketapp login</h3><span className="connection-status">Not available</span></div><p className="activity-connection-note">{cloud ? 'Personal Marketapp login is not enabled for this beta account. Wallet and API key updates remain available.' : 'Personal Marketapp login is available in the Telegram app.'}</p><button type="button" className="button secondary small" disabled>Connect Marketapp</button></section>;
+    ? <Suspense fallback={<p role="status">Loading Marketapp connection…</p>}><MarketappConnection key={`${selectionContext}:${data.capabilities.wallet_configured}`} variant="connection" transport={adapter.marketappAnalyticsRefresh} wallet={data.wallet} onImported={async () => { comparisonsStartup.manualAction(); await reloadAnalytics(); }} startupBusy={analyticsStartup?.busy === true} onBusyChange={setAnalyticsManualBusy} /></Suspense>
+    : <section className="activity-connection-row"><div className="activity-connection-heading"><Icon name="wallet" size={20} /><h3>Marketapp login</h3><span className="connection-status">{publicAccount && !data?.capabilities.wallet_configured ? 'Verify wallet first' : 'Not available'}</span></div><p className="activity-connection-note">{publicAccount && !data?.capabilities.wallet_configured ? 'Verify your wallet above to connect your personal Marketapp account.' : cloud ? 'Personal Marketapp login is not enabled for this account. Wallet and API key updates remain available.' : 'Personal Marketapp login is available in the Telegram app.'}</p><button type="button" className="button secondary small" disabled>Connect Marketapp</button></section>;
   const activityClock = Math.max(activityNow, Date.now());
-  const freshnessRows = page === 'activity' && data ? activityFreshnessRows(data, jobs, { now: activityClock, giftRefresh: giftRefreshStatus }).map(row => ({ ...row,
-    updating: row.updating || (row.id === 'gifts' || row.id === 'prices') && giftRefreshStatus.phase === 'checking'
-      || row.id === `analytics-${analyticsStartup.periodDays}` && analyticsStartup.busy,
+  const freshnessRows = page === 'activity' && data ? activityFreshnessRows(data, jobs, { now: activityClock, giftRefresh: giftRefreshStatus,
+    analyticsStartup, analyticsReloadedAt }).map(row => ({ ...row,
+    updating: row.updating || (row.id === 'gifts' || row.id === 'prices') && giftRefreshStatus.phase === 'checking',
   })) : [];
   const activityResumeJob = (row: ActivityFreshnessRow) => row.id === 'listings' || row.id === 'rentals'
     ? resumableActivityComparisonJob(row.id, jobs, pricingSelection, data?.capabilities.account_generation) : null;
@@ -596,8 +622,8 @@ export default function App({ adapter, walletControl }: {
         : activityComparisonActionLabel(row.id === 'rentals' ? 'rentals' : 'listings', jobs, pricingSelection, data?.capabilities.account_generation);
   const activityActionFeedback = (row: ActivityFreshnessRow) => {
     if (row.id !== 'listings' && row.id !== 'rentals') return undefined;
-    if (comparisonAction?.context === comparisonActionContext && comparisonAction.rowId === row.id) return comparisonAction.feedback;
-    return comparisonAllowance || undefined;
+    return currentComparisonActionFeedback(comparisonAction, comparisonActionContext, row.id, jobs,
+      data?.capabilities.account_generation, activityClock) ?? comparisonAllowance ?? undefined;
   };
   const refreshActivityRow = (row: ActivityFreshnessRow) => {
     if (row.id === 'gifts' || row.id === 'prices') { comparisonsStartup.manualAction(); void refreshGiftPrices(); }
@@ -608,7 +634,8 @@ export default function App({ adapter, walletControl }: {
       const source = row.id === 'rentals' ? 'rentals' : 'listings';
       void launch(source === 'rentals' ? 'rental_prices' : 'prices', undefined, undefined, { ...pricingSelection, source });
     } else {
-      setAnalyticsTarget({ context: selectionContext, days: Number(row.id.replace('analytics-', '')) });
+      if (row.analyticsSelection === undefined) return;
+      setAnalyticsTarget({ context: selectionContext, days: row.analyticsSelection });
       navigate('overview');
     }
   };
@@ -627,12 +654,13 @@ export default function App({ adapter, walletControl }: {
       {cloud && <PullToRefresh surface={mainRef} context={pullContext} subject={canPullGifts ? 'gifts' : 'saved data'} refresh={pullRefresh} />}
       <div className={page === 'pricing' || page === 'gifts' ? 'sr-only' : 'page-heading concise-heading'}><h1>{NAV.find(item => item.id === page)?.label}</h1>
       </div>
+      {data?.startup_preview && <p className="startup-saved-view" role="status"><Icon name="clock" size={14} />{error ? 'Showing your saved view. Use Retry to check for updates.' : 'Showing your saved view while checking for updates…'}</p>}
       {page === 'activity' && jobError && !(data && comparisonAction?.context === comparisonActionContext && comparisonAction.feedback.tone === 'error' && comparisonAction.feedback.message === jobError && freshnessRows.some(row => row.id === comparisonAction.rowId)) && <div className="notice error" role="alert"><Icon name="alert" size={19} /><div><strong>Sync action failed</strong><p>{jobError}</p></div><button className="icon-button" aria-label="Dismiss sync error" onClick={() => setJobError(null)}><Icon name="close" size={17} /></button></div>}
       {page === 'activity' && error && <div className="notice error" role="alert"><Icon name="alert" size={19} /><div><strong>Could not load updates</strong><p>Reload saved data before continuing.</p></div><button className="text-button" onClick={() => { void reload(); }}>Retry<Icon name="refresh" size={15} /></button></div>}
       {page === 'activity' && data && <ActivityDataStatus rows={freshnessRows} now={activityClock} onAction={refreshActivityRow} actionLabel={activityActionLabel} actionDisabled={activityActionDisabled} actionDisabledReason={row => row.id === 'gifts' || row.id === 'prices' ? priceRefreshDisabledReason : row.id === 'listings' || row.id === 'rentals' ? activeJobs.length > 0 || submitting ? 'Another update is running.' : activityRequestAvailability(row)?.reason || comparisonAllowance?.message || collectionBlocker?.message || undefined : undefined} actionFeedback={activityActionFeedback} />}
       {page === 'activity' && ownedPriceRefresh && giftRefreshStatus.phase !== 'idle' && giftRefreshStatus.phase !== 'complete' && <OwnedPriceStatus driver={ownedPriceRefresh} rentalStatus={rentalStatusRefresh} />}
       {page === 'activity' && data && <Activity records={data.activity || []} jobs={jobs} onResume={onResume} onEfficient={onEfficient} disabled={busy || !canSync} onStop={onStop} stoppingJobs={stoppingJobs} stopDisabled={!data} blocker={collectionBlocker} onSetup={openCollectionSettings} view="progress" />}
-      {publicAccount && (page === 'activity' || needsPublicSetup || publicAccountOpen) && <Suspense fallback={<p role="status">Loading account settings…</p>}><PublicAccountSetup enabled variant={page === 'activity' ? 'connections' : 'setup'} marketappConnection={page === 'activity' ? marketappConnection : undefined} adapter={publicAccount} dashboardAdapter={adapter} jobs={jobs} portfolioCount={data?.summary.portfolio_count ?? 0} onChanged={connectionChanged} onClose={needsPublicSetup ? undefined : () => setPublicAccountOpen(false)} onExport={() => {
+      {publicAccount && (page === 'activity' || needsPublicSetup || publicAccountOpen) && <Suspense fallback={<p role="status">Loading account settings…</p>}><PublicAccountSetup enabled accountScope={publicAccountSettingsScope(data)} variant={page === 'activity' ? 'connections' : 'setup'} marketappConnection={marketappConnection} adapter={publicAccount} dashboardAdapter={adapter} jobs={jobs} portfolioCount={data?.summary.portfolio_count ?? 0} onChanged={connectionChanged} onClose={needsPublicSetup ? undefined : () => setPublicAccountOpen(false)} onExport={() => {
         if (!data) return;
         const blob = new Blob([JSON.stringify({version:1,exported_at:new Date().toISOString(),dashboard:data,jobs},null,2)],{type:'application/json'});
         const url = URL.createObjectURL(blob), link = document.createElement('a'); link.href=url;link.download='gift-rent-check-account.json';link.click();URL.revokeObjectURL(url);
@@ -644,7 +672,7 @@ export default function App({ adapter, walletControl }: {
       </section>}
       {page === 'pricing' && <PricingControls selection={pricingSelection} onChange={changePricing} loading={loading} compact />}
       {page === 'activity' && cloud && adapter.storageMaintenance && <StorageStatusCard snapshot={storageMaintenance.snapshot} onClean={storageMaintenance.cleanNow} now={activityClock} />}
-      {page !== 'activity' && settings && data && !data.capabilities.marketapp_configured && <div className="notice info marketapp-setup-notice"><Icon name="shield" size={18} /><div><strong>Add your Marketapp API key</strong><p>{collectionBlocker?.message} Saved data remains available.</p></div><button className="button secondary" onClick={openApiSettings}>Open API key setup</button></div>}
+      {page === 'pricing' && settings && data && !data.capabilities.marketapp_configured && <div className="notice info marketapp-setup-notice"><Icon name="shield" size={18} /><div><strong>Add your Marketapp API key</strong><p>{collectionBlocker?.message} Saved data remains available.</p></div><button className="button secondary" onClick={openApiSettings}>Open API key setup</button></div>}
       {data && (page === 'pricing' || page === 'activity') && <details className="grid-collection-settings data-actions" open={refreshOpen} onToggle={event => { setRefreshOpen(event.currentTarget.open); if (!event.currentTarget.open) setSyncMenu(false); }}>
         <summary>{page === 'activity' ? 'More tools & export' : 'Refresh & export'}</summary>
         {refreshOpen && <div className="grid-collection-content">{headingActions}<CollectionLimits data={data} selection={pricingSelection} />{cloud && <p>Keep Telegram open while updating.</p>}{page === 'pricing' && <>{ownedPriceRefresh && <OwnedPriceStatus driver={ownedPriceRefresh} rentalStatus={rentalStatusRefresh} />}{jobCards}<button className="text-button" onClick={() => navigate('activity')}>View status <Icon name="arrow" size={14} /></button></>}</div>}
@@ -653,11 +681,11 @@ export default function App({ adapter, walletControl }: {
       {page !== 'activity' && jobError && <div className="notice error" role="alert"><Icon name="alert" size={19} /><div><strong>Sync action failed</strong><p>{jobError}</p></div><button className="icon-button" aria-label="Dismiss sync error" onClick={() => setJobError(null)}><Icon name="close" size={17} /></button></div>}
       {data && !data.capabilities.network_enabled && refreshOpen && <div className="notice info"><Icon name="shield" size={18} /><div><strong>Saved data</strong><p>{savedGiftRefreshEnabled(adapter.mode, data.capabilities) ? rentalStatusRefresh ? 'Comparison sync is off. Your gifts can still refresh through Marketapp login or TON.' : 'Marketapp sync is off. Your gift prices can still update through TON.' : 'Sync is off. Browsing and export remain available.'}</p></div></div>}
       {!cloud && data && data.capabilities.network_enabled && !data.capabilities.wallet_configured && <div className="notice info"><Icon name="wallet" size={19} /><div><strong>Connect the dashboard to your wallet</strong><p>Set your wallet address in the local configuration, then restart the dashboard. No wallet connection or signing is needed.</p></div></div>}
-      {reviewWarnings.length > 0 && <div className="notice error"><Icon name="alert" size={18} /><div><strong>Some review evidence could not be loaded</strong>{reviewWarnings.map((warning, index) => <p key={index}>{warning}</p>)}</div></div>}
+      {reviewWarnings.length > 0 && <div className="notice error"><Icon name="alert" size={18} /><div><strong>Some review evidence could not be loaded</strong><details><summary>Details</summary>{reviewWarnings.map((warning, index) => <p key={index}>{warning}</p>)}</details></div></div>}
       {loading && !data ? <div className="loading-state" role="status"><div className="loading-cards">{[0, 1, 2, 3].map(key => <div className="skeleton" key={key} />)}</div><div className="skeleton loading-panel" /><p>Reading your saved collection…</p></div> : data ? <>
-        {page !== 'pricing' && page !== 'activity' && <div className="observation-caption"><span className="tiny-dot" /><span title={`Latest saved gift evidence: ${dateTime(latestEvidence)}. Individual checks may be older.`}>Gift data updated {relativeTime(latestEvidence)}</span></div>}
+        {page === 'gifts' && <div className="observation-caption"><span className="tiny-dot" /><span title={`Latest saved gift evidence: ${dateTime(latestEvidence)}. Individual checks may be older.`}>Gift data updated {relativeTime(latestEvidence)}</span></div>}
         {page === 'pricing' && <PricingPage key={selectionContext} data={data} selection={pricingSelection} onSelectionChange={changePricing} filters={pricingFilters} onFiltersChange={setPricingFilters} onSelect={selectGift} renderImage={gift => <GiftImage gift={gift} />} collectPrices={() => { void launch(priceJob); }} disabled={!canSync || busy} viewMode={pricingView} viewControl={viewControl} quickActions={cloud} />}
-        {page === 'overview' && <Overview data={data} adapter={adapter} reload={reload} onFilter={goFilter} onSelect={selectGift} analyticsStartup={analyticsStartup} onAnalyticsBusy={setAnalyticsManualBusy} initialAnalyticsDays={analyticsTarget?.context === selectionContext ? analyticsTarget.days : undefined} />}
+        {page === 'overview' && <Overview data={data} adapter={adapter} reload={reloadAnalytics} onFilter={goFilter} onSelect={selectGift} analyticsStartup={analyticsStartup} onAnalyticsBusy={setAnalyticsManualBusy} initialAnalyticsDays={analyticsTarget?.context === selectionContext ? analyticsTarget.days : undefined} />}
         {page === 'gifts' && <section className="panel gifts-panel">
           <div className="section-heading inventory-heading"><div><h2>{inventoryScope === 'portfolio' ? 'My gifts' : inventoryScope === 'candidates' ? 'Candidates' : 'All gifts'} <span className="heading-count">{filtered.length}</span></h2><span className="inventory-unit-caption">GRAM / day unless noted</span></div><div className="gift-section-actions">{giftPriceRefreshButton}<GiftDisplayControl view={inventoryView} onChange={changeInventoryView} label="My gifts display" /></div></div>
           <div className="filter-toolbar inventory-filters"><label className="search-field"><Icon name="search" size={18} /><input aria-label="Search gifts" placeholder="Search gifts…" value={search} onChange={event => setSearch(event.target.value)} />{search && <button className="icon-button" aria-label="Clear search" onClick={() => setSearch('')}><Icon name="close" size={15} /></button>}</label></div>
@@ -671,17 +699,16 @@ export default function App({ adapter, walletControl }: {
               {(collection || filter !== 'all' || inventoryScope !== 'portfolio') && <button type="button" className="text-button filter-reset" onClick={() => { setCollection(''); setFilter('all'); setInventoryScope('portfolio'); }}>Reset filters</button>}
             </div></details>
           </div>
-          {(inventorySort === 'last_rented' || inventorySort === 'rental_ending') && <p className="inventory-sort-note" id="inventory-sort-note">{inventorySort === 'last_rented' ? 'Newest known rental starts first. Missing dates appear last.' : 'Known rental end times first. Missing or unverified times appear last.'}</p>}
-          {filtered.length ? inventoryView === 'grid' ? <InventoryGrid key={selectionContext} gifts={filtered.slice(0, giftList.visibleCount)} onSelect={selectGift} renderImage={gift => <GiftImage gift={gift} />} quickActions={cloud} /> : <GiftTable key={selectionContext} gifts={filtered.slice(0, giftList.visibleCount)} onSelect={selectGift} quickActions={cloud} /> : <Empty title={data.gifts.length ? 'No matching gifts' : 'No gifts yet'} icon={data.gifts.length ? 'search' : 'gift'}>{data.gifts.length ? <>Try another filter.<button className="button secondary" onClick={() => { setSearch(''); setCollection(''); setFilter('all'); setInventoryScope('portfolio'); }}>Reset filters</button></> : cloud ? 'Import your saved portfolio to add gifts here.' : 'Import a portfolio or discover your wallet to add gifts.'}</Empty>}
+          {(inventorySort === 'last_rented' || inventorySort === 'rental_ending') && <p className="sr-only" id="inventory-sort-note">{inventorySort === 'last_rented' ? 'Newest known rental starts first. Missing dates appear last.' : 'Known rental end times first. Missing or unverified times appear last.'}</p>}
+          {filtered.length ? inventoryView === 'grid' ? <InventoryGrid key={selectionContext} gifts={filtered.slice(0, giftList.visibleCount)} onSelect={selectGift} renderImage={gift => <GiftImage gift={gift} />} quickActions={cloud} /> : <GiftTable key={selectionContext} gifts={filtered.slice(0, giftList.visibleCount)} onSelect={selectGift} quickActions={cloud} /> : <Empty title={data.gifts.length ? 'No matching gifts' : 'No gifts yet'} icon={data.gifts.length ? 'search' : 'gift'}>{data.gifts.length ? <>Try another filter.<button className="button secondary" onClick={() => { setSearch(''); setCollection(''); setFilter('all'); setInventoryScope('portfolio'); }}>Reset filters</button></> : cloud ? data.capabilities.public_account ? 'Open Status to connect your wallet and find your gifts.' : 'Import a portfolio to add your gifts.' : 'Import a portfolio or discover your wallet to add gifts.'}</Empty>}
           <ListFooter {...giftList} total={filtered.length} noun={inventoryScope === 'candidates' ? 'candidates' : 'gifts'} />
         </section>}
         {page === 'activity' && <Activity records={data.activity || []} jobs={jobs} onResume={onResume} onEfficient={onEfficient} disabled={busy || !canSync} onStop={onStop} stoppingJobs={stoppingJobs} stopDisabled={!data} blocker={collectionBlocker} onSetup={openCollectionSettings} view="history" giftCheck={ownedPriceRefresh && giftRefreshStatus.phase === 'complete' ? <OwnedPriceStatus driver={ownedPriceRefresh} rentalStatus={rentalStatusRefresh} /> : undefined} />}
       </> : !loading && !error && <Empty title="No saved data yet" icon="alert">{cloud ? 'Open this Mini App from your bot to load the portfolio.' : 'Start the dashboard service to load your portfolio.'}</Empty>}
-      <footer className="page-footer"><span><Icon name="shield" size={14} />Read-only · no price changes</span><span>TON & Marketapp</span></footer>
       </main>
     </div><nav className="mobile-nav" aria-label="Mobile navigation">{nav}</nav>
     {apiSettingsOpen && settings && <MarketappSettings settings={settings} csrf={data?.capabilities.csrf_token || ''} onChanged={connectionChanged} close={closeApiSettings} />}
-    {selectedGift && data && <GiftDetails key={`${selectionContext}:${selectedGift.id}`} gift={selectedGift} selection={pricingSelection} close={closeDetails} quickActions={cloud}
+    {selectedGift && data && <GiftDetails key={`${selectionContext}:${selectedGift.id}`} gift={selectedGift} selection={pricingSelection} close={closeDetails} allTime={data.personal_analytics_all_time} wallet={data.wallet} quickActions={cloud}
       driver={cloud && data.capabilities.owned_price_refresh_single ? ownedPriceRefresh : null}
       onCheck={async nft => { await refreshOneGift(nft); await reload(); }} checkDisabledReason={priceRefreshDisabledReason} />}
   </div>;

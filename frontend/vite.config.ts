@@ -16,7 +16,9 @@ export default defineConfig(({ mode }) => {
         return {
           html: html.replace('<title>Gift Rent Check · Rental prices</title>', '<title>Gift Rent Check · Telegram</title>')
             .replace('Compare rental asking prices for your TON gifts by collection, exact model, and Black backdrop.', 'Private Telegram dashboard for gift listing and rental-price comparisons.'),
-          tags: [{ tag: 'script', attrs: { src: 'https://telegram.org/js/telegram-web-app.js?64' }, injectTo: 'head-prepend' as const }],
+          // A deferred script would block the module entry's ordered execution,
+          // preventing its download timeout and parallel app import from starting.
+          tags: [{ tag: 'script', attrs: { id: 'telegram-web-app-sdk', src: 'https://telegram.org/js/telegram-web-app.js?64', async: true }, injectTo: 'head-prepend' as const }],
         };
       },
     }] : [],

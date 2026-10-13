@@ -13,8 +13,8 @@ const validSequence = value => Number.isSafeInteger(value) && value > 0;
 // Explicit opt-in after a development reset. New checkpoints are standalone;
 // atomic database triggers retain only the head and compact run/job archives.
 export const OPERATIONAL_STORAGE_VERSION = 1;
-export const COMPACT_OPERATIONAL_TRIGGER_NAMES = Object.freeze(['operational_storage_v1_private_insert', 'operational_storage_v1_public_insert']);
-export const COMPACT_OPERATIONAL_READY_SQL = `(SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN (${COMPACT_OPERATIONAL_TRIGGER_NAMES.map(name => `'${name}'`).join(',')}))=2`;
+export const COMPACT_OPERATIONAL_TRIGGER_NAMES = Object.freeze(['operational_storage_v1_private_insert', 'operational_storage_v1_public_insert', 'public_gift_refresh_archive_v1']);
+export const COMPACT_OPERATIONAL_READY_SQL = `(SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN (${COMPACT_OPERATIONAL_TRIGGER_NAMES.map(name => `'${name}'`).join(',')}))=${COMPACT_OPERATIONAL_TRIGGER_NAMES.length}`;
 export const usesCompactOperationalStorage = state => plain(state) && state.operational_storage_version === OPERATIONAL_STORAGE_VERSION;
 const targetRun = state => plain(state.owned_prices) && plain(state.owned_prices.run) ? state.owned_prices.run : null;
 const targetIdentity = run => plain(run) && validSequence(run.id) && Object.hasOwn(run, 'wallet')

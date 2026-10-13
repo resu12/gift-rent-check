@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createPublicDatabase} from './fixtures/public-database.mjs';
-import {installStorageAccounting,storageAccountingTriggers,installCheckpointSourceAccounting,checkpointSourceAccountingTriggers,installCompactStorageAccounting} from '../tools/storage-accounting.mjs';
+import {installStorageAccounting,storageAccountingTriggers,installCheckpointSourceAccounting,checkpointSourceAccountingTriggers,installCompactStorageAccounting,installAnalyticsStorageAccounting} from '../tools/storage-accounting.mjs';
 import {STORAGE_TABLES,storageTableByteExpression} from '../tgcloud/lib/storage-policy.js';
 
 async function install(db) {let after=0,result;do {result=await installStorageAccounting(db,{after});after=result.after;}while(!result.complete);return result;}
@@ -10,7 +10,7 @@ const eventSql="INSERT INTO cloud_events(sequence,event_key,state_json,records_j
 
 test('compact-table accounting upgrades an existing baseline without recounting or losing bytes',async t=>{
   const {database,db}=createPublicDatabase(t);await install(db);database.exec(eventSql);
-  const added=new Set(['service_record_payloads','service_record_occurrences','gift_refresh_runs']);
+  const added=new Set(['service_record_payloads','service_record_occurrences','gift_refresh_runs','public_gift_refresh_runs']);
   for(const trigger of storageAccountingTriggers().filter(item=>added.has(item.table))) database.exec(`DROP TRIGGER ${trigger.name}`);
   const before=database.prepare('SELECT * FROM service_storage_usage').get();
   await installCompactStorageAccounting(db);
@@ -27,6 +27,121 @@ test('compact accounting fails closed when an unaccounted new table already cont
   database.exec("INSERT INTO gift_refresh_runs VALUES(1,'{}',1)");
   await assert.rejects(()=>installCompactStorageAccounting(db),/Unaccounted/);
 });
+
+const latestAdditions=['public_gift_refresh_runs','personal_analytics_daily','public_personal_analytics_daily'];
+const originalAdditions=['service_checkpoint_sources','service_record_payloads','service_record_occurrences','gift_refresh_runs',...latestAdditions];
+const guards=database=>database.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'storage_accounting_upgrade_v1_%'").all();
+function removeAccounting(database,tables) {
+  for(const trigger of storageAccountingTriggers().filter(item=>tables.includes(item.table)))database.exec(`DROP TRIGGER ${trigger.name}`);
+}
+function counters(database) {
+  return {global:database.prepare('SELECT * FROM service_storage_usage').all(),
+    scopes:database.prepare('SELECT * FROM service_storage_scope_usage ORDER BY scope').all()};
+}
+function assertTrackedAdditions(database) {
+  database.exec("INSERT INTO public_gift_refresh_runs VALUES('101:1','101',1,'{}',1)");
+  database.exec("INSERT INTO personal_analytics_daily VALUES('private-day','wallet','2026-10-12','2026-10-13','fingerprint','1.5',1,0)");
+  database.exec("INSERT INTO public_personal_analytics_daily VALUES('public-day','101','wallet','2026-10-12','2026-10-13','fingerprint','2.5',1,0)");
+  assert.equal(database.prepare('SELECT total_bytes FROM service_storage_usage').get().total_bytes,measured(database));
+  assert.equal(database.prepare('SELECT SUM(total_bytes) AS bytes FROM service_storage_scope_usage').get().bytes,measured(database));
+}
+for(const order of [[installCompactStorageAccounting,installAnalyticsStorageAccounting],[installAnalyticsStorageAccounting,installCompactStorageAccounting]]) {
+  test(`an older combined baseline upgrades with ${order[0].name} first without resetting counters`,async t=>{
+    const {database,db,queries}=createPublicDatabase(t);await install(db);database.exec(eventSql);
+    database.exec("INSERT INTO service_record_payloads VALUES('existing','private','{\"saved\":true}')");
+    removeAccounting(database,latestAdditions);
+    const before=counters(database),start=queries.length;
+    for(const installer of order) {
+      assert.equal((await installer(db)).complete,true);
+      assert.deepEqual(counters(database),before);
+    }
+    assert.equal(guards(database).length,0);
+    assert.ok(!queries.slice(start).some(query=>query.sql.includes('SUM(')||/^UPDATE service_storage_(?:usage|scope_usage) SET/.test(query.sql)));
+    assertTrackedAdditions(database);
+    const after=counters(database);
+    for(const installer of order)await installer(db);
+    assert.deepEqual(counters(database),after,'repeated setup retains accounted data and exact counters');
+  });
+}
+
+test('source-pin installer also upgrades the original baseline with all later empty additions pending',async t=>{
+  const {database,db}=createPublicDatabase(t);await install(db);database.exec(eventSql);
+  removeAccounting(database,originalAdditions);
+  const before=counters(database);
+  assert.equal((await installCheckpointSourceAccounting(db)).usage_trigger_count,STORAGE_TABLES.length*3);
+  assert.deepEqual(counters(database),before);
+  assert.equal(guards(database).length,0);
+  assertTrackedAdditions(database);
+  database.exec("INSERT INTO service_checkpoint_sources VALUES('pin','private','gift_state',1)");
+  assert.equal(database.prepare('SELECT total_bytes FROM service_storage_usage').get().total_bytes,measured(database));
+});
+
+test('an interrupted additive install fences writes until all three accounting operations are ready',async t=>{
+  const {database,db}=createPublicDatabase(t);await install(db);database.exec(eventSql);
+  removeAccounting(database,latestAdditions);
+  const before=counters(database);
+  const failing={...db,async run(sql,params){
+    if(sql.startsWith('CREATE TRIGGER IF NOT EXISTS storage_usage_v1_public_gift_refresh_runs_update'))throw Error('Simulated interruption');
+    return db.run(sql,params);
+  }};
+  await assert.rejects(()=>installAnalyticsStorageAccounting(failing),/Simulated interruption/);
+  assert.equal(guards(database).length,1);
+  assert.throws(()=>database.exec("INSERT INTO public_gift_refresh_runs VALUES('101:1','101',1,'{}',1)"),/upgrade is incomplete/);
+  assert.deepEqual(counters(database),before);
+  await installCompactStorageAccounting(db);
+  assert.deepEqual(counters(database),before);
+  assert.equal(guards(database).length,0);
+  assertTrackedAdditions(database);
+});
+
+test('an interruption after accounting activation leaves a harmless guard and resumes with accounted writes',async t=>{
+  const {database,db}=createPublicDatabase(t);await install(db);removeAccounting(database,latestAdditions);
+  const failing={...db,async run(sql,params){
+    if(sql.startsWith('DROP TRIGGER storage_accounting_upgrade_v1_'))throw Error('Simulated interruption');
+    return db.run(sql,params);
+  }};
+  await assert.rejects(()=>installCompactStorageAccounting(failing),/Simulated interruption/);
+  assert.equal(guards(database).length,latestAdditions.length);
+  assertTrackedAdditions(database);
+  const before=counters(database);
+  await installAnalyticsStorageAccounting(db);
+  assert.deepEqual(counters(database),before);
+  assert.equal(guards(database).length,0);
+});
+
+test('a row racing the additive preflight is detected after the write fence without recounting it',async t=>{
+  const {database,db}=createPublicDatabase(t);await install(db);removeAccounting(database,['public_gift_refresh_runs']);
+  const before=counters(database);
+  const raced={...db,async run(sql,params){
+    if(sql.startsWith('CREATE TRIGGER storage_accounting_upgrade_v1_public_gift_refresh_runs '))
+      database.exec("INSERT INTO public_gift_refresh_runs VALUES('101:1','101',1,'{}',1)");
+    return db.run(sql,params);
+  }};
+  await assert.rejects(()=>installAnalyticsStorageAccounting(raced),/Unaccounted/);
+  assert.deepEqual(counters(database),before);
+  assert.equal(database.prepare('SELECT count(*) AS n FROM public_gift_refresh_runs').get().n,1);
+  assert.throws(()=>database.exec("INSERT INTO public_gift_refresh_runs VALUES('101:2','101',2,'{}',2)"),/upgrade is incomplete/);
+  await assert.rejects(()=>installCompactStorageAccounting(db),/Unaccounted/);
+});
+
+for(const installer of [installCompactStorageAccounting,installAnalyticsStorageAccounting]) {
+  test(`${installer.name} refuses nonempty pending tables from the other feature`,async t=>{
+    const {database,db}=createPublicDatabase(t);await install(db);removeAccounting(database,latestAdditions);
+    if(installer===installAnalyticsStorageAccounting)
+      database.exec("INSERT INTO public_gift_refresh_runs VALUES('101:1','101',1,'{}',1)");
+    else database.exec("INSERT INTO public_personal_analytics_daily VALUES('public-day','101','wallet','2026-10-12','2026-10-13','fingerprint','2.5',1,0)");
+    const before=counters(database);
+    await assert.rejects(()=>installer(db),/Unaccounted/);
+    assert.deepEqual(counters(database),before);
+    assert.equal(guards(database).length,0);
+  });
+  test(`${installer.name} does not accept a missing original accounting trigger as an additive upgrade`,async t=>{
+    const {database,db}=createPublicDatabase(t);await install(db);removeAccounting(database,latestAdditions);
+    database.exec('DROP TRIGGER storage_usage_v1_cloud_events_update');
+    await assert.rejects(()=>installer(db),/repair/);
+    assert.equal(guards(database).length,0);
+  });
+}
 
 test('fixed descriptors cover every persisted source column and exclude accounting metadata',t=>{
   const {database}=createPublicDatabase(t);

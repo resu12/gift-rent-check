@@ -9,6 +9,10 @@
 .app-shell .owned-price-explanation{padding-top:6px;overflow-wrap:anywhere}
 .app-shell .owned-price-explanation p{margin:0 0 8px;color:#a6babf;font-size:12px;line-height:1.6}
 .app-shell .owned-price-explanation p:last-child{margin-bottom:0}
+.app-shell .owned-price-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px;margin:0 0 12px;padding-bottom:12px;border-bottom:1px solid #2d414b}
+.app-shell .owned-price-facts>div{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.app-shell .owned-price-facts dt{color:#a6babf;font-size:12px}.app-shell .owned-price-facts dd{margin:0;color:#dce9eb;font-variant-numeric:tabular-nums;font-size:12px}
+.app-shell .owned-price-result-warning{color:#e2c79c}
 .app-shell .owned-price-unresolved{padding-top:8px;color:#e2c79c;font-size:12px;line-height:1.6;white-space:nowrap}
 .app-shell .owned-price-complete .owned-price-details>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;list-style:none;min-height:32px}
 .app-shell .owned-price-complete .owned-price-details>summary::-webkit-details-marker{display:none}
@@ -18,4 +22,4 @@
 .app-shell .owned-price-disclosure{white-space:nowrap;font-size:12px;flex-shrink:0}
 .app-shell .owned-price-disclosure::after{content:' ›';display:inline-block;margin-left:3px}
 .app-shell .owned-price-details[open] .owned-price-disclosure::after{transform:rotate(90deg)}
-@media(max-width:480px){.app-shell .owned-price-status.job-card.sync-card{padding:10px 12px}.app-shell .owned-price-complete .owned-price-details>summary{gap:8px}.app-shell .owned-price-result{font-size:12px}}
+@media(max-width:480px){.app-shell .owned-price-status.job-card.sync-card{padding:10px 12px}.app-shell .owned-price-complete .owned-price-details>summary{gap:8px}.app-shell .owned-price-result{font-size:12px}.app-shell .owned-price-facts{grid-template-columns:1fr}.app-shell .owned-price-unresolved{white-space:normal;text-align:right}}

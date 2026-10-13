@@ -66,7 +66,7 @@ def prepare_records(store, *, wallet=None, review_path=None, now=None, days=90):
     owned = {address_key(g["nft_address"]) for g in dashboard["gifts"] if g["is_portfolio"]}
     scopes = {address_key(g["collection_address"]) for g in dashboard["gifts"] if g.get("collection_address")}
     for gift in dashboard["gifts"]:
-        gift = {k: v for k, v in gift.items() if k not in {"pricing", "rental_history", "review_source_filename"}}
+        gift = {k: v for k, v in gift.items() if k not in {"pricing", "rental_history", "rental_statistics", "review_source_filename"}}
         add("portfolio", gift, gift.get("observed_at"))
     add("settings", {"wallet": dashboard["wallet"], "imported_at": now.isoformat(),
         "comparison_from": cutoff.isoformat(), "comparison_to": now.isoformat(),

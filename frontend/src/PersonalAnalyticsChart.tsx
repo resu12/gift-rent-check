@@ -65,7 +65,7 @@ export function PersonalAnalyticsChart({ buckets, heights, group, label, interac
     <div className="personal-analytics-bars" style={{ gap: buckets.length > 90 ? 0 : undefined }}
       {...(interactive && buckets.length ? { tabIndex: 0, role: 'slider', 'aria-label': `${label} rental period`, 'aria-valuemin': 0,
         'aria-valuemax': buckets.length - 1, 'aria-valuenow': selection?.index ?? keyboardIndex.current,
-        'aria-valuetext': accessible ? `${accessible.period}, ${accessible.volume}, ${accessible.rentals}, including extensions${accessible.partial ? ', partial period' : ''}` : undefined,
+        'aria-valuetext': accessible ? `${accessible.period}, ${accessible.volume}, ${accessible.rentals}${accessible.partial ? ', partial period' : ''}${accessible.coverage ? `, ${accessible.coverage}` : ''}` : undefined,
         onPointerDown: press, onPointerMove: move, onPointerUp: release,
         onPointerCancel: () => { pointer.current = null; setSelection(null); },
         onLostPointerCapture: () => { pointer.current = null; },
@@ -75,16 +75,16 @@ export function PersonalAnalyticsChart({ buckets, heights, group, label, interac
       } : {})}>
       {buckets.map((bucket, index) => {
         const point = points[index];
-        return <div key={bucket.key} className={`personal-analytics-bar${bucket.partial ? ' partial' : ''}${bucket.volume === '0' ? ' zero' : ''}${interactive && selection?.index === index ? ' selected' : ''}`}
-          title={interactive ? undefined : `${point.period}: ${point.volume}, ${point.rentals}${point.partial ? ' (partial period)' : ''}`}>
+        return <div key={bucket.key} className={`personal-analytics-bar${bucket.partial ? ' partial' : ''}${bucket.gap ? ' gap' : ''}${bucket.volume === '0' ? ' zero' : ''}${interactive && selection?.index === index ? ' selected' : ''}`}
+          title={interactive ? undefined : `${point.period}: ${point.volume}, ${point.rentals}${point.partial ? ' (partial period)' : ''}${point.coverage ? `; ${point.coverage}` : ''}`}>
           <span style={{ height: `${heights[index]}%` }} />
         </div>;
       })}
     </div>
     {interactive && detail && <div className="personal-analytics-tooltip" role="tooltip"
       style={{ left: `${selectedPosition}%`, transform: `translateX(-${selectedPosition}%)` }}>
-      <span>{detail.period}{detail.partial && <small>Partial period</small>}</span>
-      <strong>{detail.volume}</strong><span>{detail.rentals}</span>
+      <span>{detail.period}{detail.partial && !detail.gap && <small>Partial period</small>}</span>
+      <strong>{detail.volume}</strong>{!detail.gap && <span>{detail.rentals}</span>}{detail.coverage && <small>{detail.coverage}</small>}
     </div>}
     {buckets.length > 0 && <div className="personal-analytics-axis"><span>{group === 'year' ? buckets[0].key.slice(0, 4) : analyticsDate(buckets[0].start)}</span>{(group !== 'year' || buckets.length > 1) && <span>{group === 'year' ? buckets[buckets.length - 1].key.slice(0, 4) : analyticsDate(buckets[buckets.length - 1].end)}</span>}</div>}
   </div>;

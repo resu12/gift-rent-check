@@ -10,6 +10,11 @@ try {
   if (publicReleaseConfig.enabled) {
     const {validatePublicReleaseConfig} = await import('../tgcloud/lib/public-runtime.js');
     validatePublicReleaseConfig(publicReleaseConfig);
+    if(publicReleaseConfig.openRegistration) {
+      const {publicRegistrationReadiness}=await import('../tgcloud/lib/storage-policy.js');
+      const readiness=publicRegistrationReadiness(publicReleaseConfig,{requireRecent:true});
+      if(!readiness.ready) {console.error('Public registration checks incomplete: '+readiness.blockers.join(', '));throw new Error();}
+    }
   }
   if ((!publicReleaseConfig.enabled || publicReleaseConfig.preservePrivateOwner) &&
       (!Number.isSafeInteger(ownerTelegramId) || ownerTelegramId <= 0 || typeof marketappToken !== 'string' || !marketappToken.trim())) throw new Error();

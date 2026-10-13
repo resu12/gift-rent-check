@@ -5,15 +5,16 @@ import { Icon } from '../Icons';
 import { observeWalletRestoration, shortWalletAddress, walletBinding } from './walletIdentity';
 import './walletConnection.css';
 
-export function WalletConnection({ savedWallet, dashboardReady = true, activityTarget }: {
+export function WalletConnection({ savedWallet, dashboardReady = true, activityTarget, initiallyExpanded = false }: {
   savedWallet: string | null;
   dashboardReady?: boolean;
   activityTarget?: HTMLElement | null;
+  initiallyExpanded?: boolean;
 }) {
   const wallet = useTonWallet();
   const [tonConnectUI] = useTonConnectUI();
   const [restored, setRestored] = useState(false);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(initiallyExpanded);
   const [pending, setPending] = useState<'connect' | 'disconnect' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const pendingRef = useRef(false);

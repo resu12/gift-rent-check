@@ -1,0 +1,1123 @@
+{
+  "source_commit": "2ff3fbf96c0997e1f5113ec03cd4122dfa0450d3",
+  "note": "Import/export names only from the v0.4.0 source release. No runtime data or private configuration. Tests supply three synthetic deployed configuration modules.",
+  "modules": {
+    "endpoints/cancelMarketappAnalyticsRefresh": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/cancelMarketappLoginTest": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/deletePublicAccount": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/disconnectMarketappAnalyticsSession": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/disconnectPublicWallet": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/finishMarketappAnalyticsRefresh": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/finishMarketappLoginTest": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/finishWalletVerification": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/getDashboard": {
+      "imports": [
+        "../lib/bounded-response.js",
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/getDashboardRevision": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/getGiftRefresh": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/getJobs": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/getMarketappAnalyticsRefreshStatus": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/getMarketappSettings": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/getOwnedPriceRefresh": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/getPublicAccount": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/getState": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/getStorageStatus": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/importChunk": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/importPersonalAnalytics": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/reactivatePublicAccount": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/refreshSavedMarketappAnalytics": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/refreshStartupComparisons": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/refreshStartupMarketappAnalytics": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/removeMarketappApiKey": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/resumeJob": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/resumeRun": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/saveMarketappApiKey": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/startGiftRefresh": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/startJob": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/startMarketappAnalyticsRefresh": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/startMarketappLoginTest": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/startOwnedPriceRefresh": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/startRun": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/startWalletVerification": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/stepGiftRefresh": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/stepJob": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/stepOwnedPriceRefresh": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/stepRun": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/stepStorageMaintenance": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/stopGiftRefresh": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/stopJob": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/stopOwnedPriceRefresh": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/stopRun": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "endpoints/testMarketappApiKey": {
+      "imports": [
+        "../lib/runtime.js"
+      ],
+      "exports": [],
+      "default": true
+    },
+    "lib/bounded-response": {
+      "imports": [],
+      "exports": [
+        "BoundedResponseError",
+        "DASHBOARD_WIRE_FORMAT",
+        "DASHBOARD_WIRE_LIMITS",
+        "boundedRawEvidence",
+        "cloudReadErrorResponse",
+        "encodeDashboardWire",
+        "fetchBoundedResponse",
+        "utf8Size"
+      ],
+      "default": false
+    },
+    "lib/budget-reset-checkpoint-storage": {
+      "imports": [],
+      "exports": [
+        "BUDGET_RESET_MARKER",
+        "BUDGET_RESET_SOURCE_FENCE",
+        "CHECKPOINT_SOURCE_TRIGGERS_READY",
+        "CHECKPOINT_SOURCE_TRIGGER_NAMES",
+        "checkpointSourceIndexReadySql",
+        "checkpointSourceScopeSql",
+        "createBudgetResetCheckpointStorage",
+        "decodeBudgetResetReference",
+        "encodeBudgetResetReference",
+        "findBoundedCheckpointSource",
+        "readCheckpointPhysicalPage"
+      ],
+      "default": false
+    },
+    "lib/checkpoint-storage": {
+      "imports": [
+        "./budget-reset-checkpoint-storage.js"
+      ],
+      "exports": [
+        "COMPACTABLE_CHECKPOINT",
+        "COMPACT_OPERATIONAL_READY_SQL",
+        "COMPACT_OPERATIONAL_TRIGGER_NAMES",
+        "GIFT_SOURCE_FENCE",
+        "INLINE_TARGETS",
+        "OPERATIONAL_STORAGE_VERSION",
+        "OWNED_SOURCE_FENCE",
+        "OWNED_TARGET_SOURCE_FENCE",
+        "createCheckpointSourceIndex",
+        "createCheckpointStorage",
+        "decodeCheckpoint",
+        "encodeCheckpoint",
+        "usesCompactOperationalStorage"
+      ],
+      "default": false
+    },
+    "lib/cloud-engine": {
+      "imports": [
+        "./bounded-response.js",
+        "./cloud-pricing.js",
+        "./collection-schedule.js",
+        "./comparison-freshness.js",
+        "./engine.js",
+        "./history-refresh.js",
+        "./market-budget.js",
+        "./market-cache.js",
+        "./personal-analytics.js",
+        "./storage-admission.js"
+      ],
+      "exports": [
+        "CLOUD_LIMITS",
+        "CloudRequestError",
+        "STARTUP_COMPARISON_POLICY",
+        "cloudSyncProgress",
+        "createCloudEngine",
+        "parseCloudPage"
+      ],
+      "default": false
+    },
+    "lib/cloud-pricing-core": {
+      "imports": [],
+      "exports": [
+        "addressKey",
+        "canonicalAddress",
+        "canonicalJSON",
+        "compare",
+        "decimal",
+        "decimalText",
+        "instant",
+        "instantOrder",
+        "iso",
+        "multiply",
+        "plus",
+        "rational",
+        "resolveCloudWindow",
+        "sumRationals",
+        "traitKey",
+        "validateSavedCloudWindow"
+      ],
+      "default": false
+    },
+    "lib/cloud-pricing": {
+      "imports": [
+        "./cloud-pricing-core.js",
+        "./price-tracking.js",
+        "./rental-expiry-check.js",
+        "./ton-price-decoder.js"
+      ],
+      "exports": [
+        "addressKey",
+        "buildCloudDashboard",
+        "canonicalAddress",
+        "createCloudDashboardBuilder",
+        "resolveCloudWindow",
+        "validateSavedCloudWindow"
+      ],
+      "default": false
+    },
+    "lib/cloud-repository": {
+      "imports": [
+        "./bounded-response.js",
+        "./budget-reset-checkpoint-storage.js",
+        "./checkpoint-storage.js",
+        "./cloud-pricing-core.js",
+        "./dashboard-cache.js",
+        "./gift-refresh-storage.js",
+        "./marketapp-refresh-outcome.js",
+        "./marketapp-website-gate.js",
+        "./owned-price-engine.js",
+        "./owned-refresh-archive.js",
+        "./personal-analytics.js",
+        "./ton-price-decoder.js"
+      ],
+      "exports": [
+        "CloudStorageFullError",
+        "NORMALIZED_RECORD_KINDS",
+        "NORMALIZED_RECORD_READY_SQL",
+        "NORMALIZED_RECORD_TRIGGER_NAMES",
+        "RESET_EVIDENCE_KINDS",
+        "compactControlRetirement",
+        "compactStorageGuard",
+        "compactStorageParameters",
+        "createCloudRepository",
+        "decodeNormalizedRecord",
+        "normalizedEventRecords",
+        "normalizedRecordOverhead",
+        "normalizedRecordPrefix",
+        "normalizedRecordScope",
+        "preparedRecordJSON",
+        "visitCompactRecordPages"
+      ],
+      "default": false
+    },
+    "lib/collection-schedule": {
+      "imports": [
+        "./cloud-pricing-core.js"
+      ],
+      "exports": [
+        "COLLECTION_SCHEDULE_VERSION",
+        "collectionEfficiency",
+        "commitCollectionTurn",
+        "newCollectionSchedule",
+        "nextCollectionStream",
+        "validCollectionSchedule"
+      ],
+      "default": false
+    },
+    "lib/comparison-freshness": {
+      "imports": [
+        "./cloud-pricing-core.js",
+        "./history-refresh.js",
+        "./market-cache.js"
+      ],
+      "exports": [
+        "comparisonFreshness",
+        "completedComparisonEvidence",
+        "recordComparisonCompletion"
+      ],
+      "default": false
+    },
+    "lib/dashboard-cache": {
+      "imports": [
+        "./bounded-response.js",
+        "./ton-price-decoder.js"
+      ],
+      "exports": [
+        "createDashboardCache"
+      ],
+      "default": false
+    },
+    "lib/engine": {
+      "imports": [],
+      "exports": [
+        "LIMITS",
+        "createEngine",
+        "nanoAmounts",
+        "validatePage"
+      ],
+      "default": false
+    },
+    "lib/gift-refresh-engine": {
+      "imports": [
+        "./bounded-response.js",
+        "./gift-refresh-storage.js",
+        "./marketapp-analytics-refresh.js",
+        "./marketapp-gifts-page.js",
+        "./marketapp-website-session.js",
+        "./owned-price-engine.js",
+        "./personal-analytics.js",
+        "./rental-expiry-check.js",
+        "./storage-admission.js",
+        "./ton-price-decoder.js"
+      ],
+      "exports": [
+        "GIFT_REFRESH_LIMITS",
+        "createGiftRefreshEngine"
+      ],
+      "default": false
+    },
+    "lib/gift-refresh-storage": {
+      "imports": [
+        "./personal-analytics.js",
+        "./ton-price-decoder.js"
+      ],
+      "exports": [
+        "createGiftRefreshStorage",
+        "giftRefreshSessionKey"
+      ],
+      "default": false
+    },
+    "lib/history-refresh": {
+      "imports": [],
+      "exports": [
+        "HISTORY_REFRESH_POLICY",
+        "completedHistoryCoverage",
+        "historyRefreshProgress",
+        "planHistoryRefresh",
+        "validHistoryPlan"
+      ],
+      "default": false
+    },
+    "lib/invite-provider-fetch": {
+      "imports": [
+        "./public-provider-budget.js"
+      ],
+      "exports": [
+        "createInviteProviderFetch"
+      ],
+      "default": false
+    },
+    "lib/market-budget": {
+      "imports": [],
+      "exports": [
+        "applyMarketBudgetReset",
+        "effectiveMarketAttempts",
+        "marketBudgetAvailableAt"
+      ],
+      "default": false
+    },
+    "lib/market-cache": {
+      "imports": [
+        "./cloud-pricing-core.js",
+        "./history-refresh.js"
+      ],
+      "exports": [
+        "MARKET_CACHE_POLICY",
+        "cachedMarketStream",
+        "completedMarketStream",
+        "marketCacheKey",
+        "marketCacheProgress",
+        "pruneMarketCache"
+      ],
+      "default": false
+    },
+    "lib/marketapp-analytics-page": {
+      "imports": [
+        "./cloud-pricing-core.js",
+        "./personal-analytics.js"
+      ],
+      "exports": [
+        "MARKETAPP_ANALYTICS_PAGE_MAX_BYTES",
+        "MarketappAnalyticsPageError",
+        "extractMarketappAnalyticsPage",
+        "extractMarketappWalletIdentity"
+      ],
+      "default": false
+    },
+    "lib/marketapp-analytics-refresh": {
+      "imports": [
+        "./cloud-pricing-core.js",
+        "./marketapp-analytics-page.js",
+        "./marketapp-login.js",
+        "./marketapp-refresh-outcome.js",
+        "./marketapp-website-session.js",
+        "./personal-analytics.js",
+        "./storage-admission.js",
+        "./ton-price-decoder.js"
+      ],
+      "exports": [
+        "MARKETAPP_REFRESH_ERROR_CODES",
+        "MARKETAPP_REMEMBERED_SESSION_MAX_MS",
+        "MARKETAPP_STARTUP_ANALYTICS_INTERVAL_MS",
+        "MarketappRefreshRequestError",
+        "createMarketappAnalyticsRefreshEngine",
+        "marketappAnalyticsUrl",
+        "marketappRefreshErrorResponse",
+        "parseMarketappSessionCookie",
+        "parseMarketappSessionCookieMetadata"
+      ],
+      "default": false
+    },
+    "lib/marketapp-gifts-page": {
+      "imports": [
+        "./cloud-pricing-core.js",
+        "./marketapp-analytics-page.js",
+        "./personal-analytics.js"
+      ],
+      "exports": [
+        "MARKETAPP_GIFTS_PAGE_MAX_BYTES",
+        "MARKETAPP_GIFTS_PAGE_SIZE",
+        "MarketappGiftsPageError",
+        "extractMarketappGiftsPage",
+        "marketappGiftsUrl"
+      ],
+      "default": false
+    },
+    "lib/marketapp-login": {
+      "imports": [
+        "./cloud-pricing-core.js",
+        "./personal-analytics.js",
+        "./storage-admission.js",
+        "./ton-price-decoder.js"
+      ],
+      "exports": [
+        "MARKETAPP_LOGIN_ERROR_CODES",
+        "MARKETAPP_LOGIN_LIMITS",
+        "MARKETAPP_LOGIN_MANIFEST",
+        "MarketappLoginRequestError",
+        "createMarketappLoginEngine",
+        "marketappLoginErrorResponse",
+        "parseMarketappChallenge"
+      ],
+      "default": false
+    },
+    "lib/marketapp-refresh-outcome": {
+      "imports": [],
+      "exports": [
+        "MARKETAPP_REFRESH_ERROR_CODES",
+        "safeMarketappRefreshOutcome"
+      ],
+      "default": false
+    },
+    "lib/marketapp-refresh-status": {
+      "imports": [
+        "./marketapp-analytics-refresh.js",
+        "./marketapp-refresh-outcome.js",
+        "./personal-analytics.js"
+      ],
+      "exports": [
+        "createMarketappRefreshStatusEngine",
+        "safeMarketappRefreshOutcome"
+      ],
+      "default": false
+    },
+    "lib/marketapp-remembered-session-box": {
+      "imports": [
+        "./personal-analytics.js",
+        "./ton-price-decoder.js",
+        "./vendor/tweetnacl-secretbox.js"
+      ],
+      "exports": [
+        "createMarketappRememberedSessionBox"
+      ],
+      "default": false
+    },
+    "lib/marketapp-session-box": {
+      "imports": [
+        "./personal-analytics.js",
+        "./ton-price-decoder.js",
+        "./vendor/tweetnacl-secretbox.js"
+      ],
+      "exports": [
+        "createMarketappSessionBox"
+      ],
+      "default": false
+    },
+    "lib/marketapp-website-gate": {
+      "imports": [],
+      "exports": [
+        "MARKETAPP_WEBSITE_LIMITS",
+        "createMarketappWebsiteGate"
+      ],
+      "default": false
+    },
+    "lib/marketapp-website-session": {
+      "imports": [
+        "./personal-analytics.js"
+      ],
+      "exports": [
+        "MARKETAPP_REMEMBERED_SESSION_MAX_MS",
+        "MarketappWebsiteSessionError",
+        "createMarketappWebsiteSession"
+      ],
+      "default": false
+    },
+    "lib/owned-price-engine": {
+      "imports": [
+        "./bounded-response.js",
+        "./cloud-pricing-core.js",
+        "./storage-admission.js",
+        "./ton-price-decoder.js"
+      ],
+      "exports": [
+        "OWNED_PRICE_LIMITS",
+        "OwnedPriceRequestError",
+        "createOwnedPriceEngine",
+        "ownedGiftScope",
+        "ownedPriceErrorResponse",
+        "ownedScopeRecordFilter",
+        "readOwnedGiftScope"
+      ],
+      "default": false
+    },
+    "lib/owned-refresh-archive": {
+      "imports": [],
+      "exports": [
+        "createOwnedRefreshArchive"
+      ],
+      "default": false
+    },
+    "lib/personal-analytics": {
+      "imports": [
+        "./cloud-pricing-core.js",
+        "./ton-price-decoder.js"
+      ],
+      "exports": [
+        "PERSONAL_ANALYTICS_MAX_BYTES",
+        "configuredAnalyticsWallet",
+        "normalizePersonalAnalytics",
+        "utf8Bytes"
+      ],
+      "default": false
+    },
+    "lib/price-tracking": {
+      "imports": [
+        "./cloud-pricing-core.js",
+        "./ton-price-decoder.js"
+      ],
+      "exports": [
+        "buildGiftPriceTracking",
+        "observedPriceChanges",
+        "recordedGiftRentals"
+      ],
+      "default": false
+    },
+    "lib/private-marketapp-settings": {
+      "imports": [
+        "./public-credential-box.js"
+      ],
+      "exports": [
+        "PrivateMarketappSettingsError",
+        "createPrivateMarketappSettings"
+      ],
+      "default": false
+    },
+    "lib/public-account": {
+      "imports": [
+        "./bounded-response.js",
+        "./cloud-engine.js",
+        "./public-credential-box.js"
+      ],
+      "exports": [
+        "PublicRequestError",
+        "createPublicAccountEngine",
+        "openPublicMarketappKey"
+      ],
+      "default": false
+    },
+    "lib/public-credential-box": {
+      "imports": [
+        "./personal-analytics.js",
+        "./ton-price-decoder.js",
+        "./vendor/tweetnacl-secretbox.js"
+      ],
+      "exports": [
+        "createPrivateCredentialBox",
+        "createPublicCredentialBox",
+        "hex",
+        "hmacSha256",
+        "keyBytes",
+        "validMarketappApiKey"
+      ],
+      "default": false
+    },
+    "lib/public-discovery-models": {
+      "imports": [
+        "./cloud-pricing-core.js"
+      ],
+      "exports": [
+        "discoveryCollection",
+        "discoveryIdentity",
+        "discoveryJson",
+        "discoveryLogicalTime",
+        "parseDiscoveryTon"
+      ],
+      "default": false
+    },
+    "lib/public-discovery-storage": {
+      "imports": [],
+      "exports": [
+        "CANDIDATES",
+        "CATALOG",
+        "compactDiscoveryJob",
+        "expandDiscoveryJob"
+      ],
+      "default": false
+    },
+    "lib/public-discovery": {
+      "imports": [
+        "./bounded-response.js",
+        "./cloud-engine.js",
+        "./cloud-pricing-core.js",
+        "./personal-analytics.js",
+        "./public-discovery-models.js",
+        "./storage-admission.js",
+        "./ton-price-decoder.js"
+      ],
+      "exports": [
+        "PUBLIC_DISCOVERY_LIMITS",
+        "PublicDiscoveryError",
+        "createPublicDiscoveryEngine"
+      ],
+      "default": false
+    },
+    "lib/public-provider-budget": {
+      "imports": [
+        "./personal-analytics.js",
+        "./public-credential-box.js"
+      ],
+      "exports": [
+        "PublicProviderBudgetError",
+        "createPublicProviderBudget",
+        "createPublicProviderFetch",
+        "publicProviderForRequest"
+      ],
+      "default": false
+    },
+    "lib/public-repository": {
+      "imports": [
+        "./bounded-response.js",
+        "./checkpoint-storage.js",
+        "./cloud-repository.js",
+        "./marketapp-refresh-outcome.js",
+        "./marketapp-website-gate.js",
+        "./owned-price-engine.js",
+        "./personal-analytics.js",
+        "./public-discovery-storage.js",
+        "./storage-admission.js",
+        "./storage-policy.js",
+        "./ton-price-decoder.js"
+      ],
+      "exports": [
+        "PublicAccountError",
+        "PublicCredentialChangedError",
+        "PublicStorageLimitError",
+        "PublicWalletChangedError",
+        "createPublicRepository",
+        "migrateLegacyOwner",
+        "verifiedTelegramUserId"
+      ],
+      "default": false
+    },
+    "lib/public-routing": {
+      "imports": [],
+      "exports": [
+        "shouldUsePublicAccount"
+      ],
+      "default": false
+    },
+    "lib/public-runtime": {
+      "imports": [
+        "./bounded-response.js",
+        "./cloud-engine.js",
+        "./cloud-pricing.js",
+        "./cloud-repository.js",
+        "./marketapp-analytics-refresh.js",
+        "./marketapp-login.js",
+        "./marketapp-refresh-status.js",
+        "./marketapp-remembered-session-box.js",
+        "./marketapp-session-box.js",
+        "./owned-price-engine.js",
+        "./personal-analytics.js",
+        "./public-account.js",
+        "./public-credential-box.js",
+        "./public-discovery.js",
+        "./public-provider-budget.js",
+        "./public-repository.js",
+        "./public-wallet.js",
+        "./storage-admission.js"
+      ],
+      "exports": [
+        "createPublicRuntime",
+        "validatePublicReleaseConfig"
+      ],
+      "default": false
+    },
+    "lib/public-wallet": {
+      "imports": [
+        "./cloud-pricing-core.js",
+        "./personal-analytics.js",
+        "./public-credential-box.js",
+        "./ton-price-decoder.js",
+        "./vendor/tweetnacl-secretbox.js"
+      ],
+      "exports": [
+        "PUBLIC_WALLET_CODES",
+        "PublicWalletError",
+        "createPublicWalletEngine",
+        "publicWalletProofDigest",
+        "publicWalletStateInit",
+        "verifyPublicWalletProof"
+      ],
+      "default": false
+    },
+    "lib/rental-expiry-check": {
+      "imports": [],
+      "exports": [
+        "isOperationalStatusFailure",
+        "isSupplementaryExpiryFailure"
+      ],
+      "default": false
+    },
+    "lib/repository": {
+      "imports": [],
+      "exports": [
+        "createRepository"
+      ],
+      "default": false
+    },
+    "lib/runtime": {
+      "imports": [
+        "./bounded-response.js",
+        "./cloud-engine.js",
+        "./cloud-repository.js",
+        "./engine.js",
+        "./gift-refresh-engine.js",
+        "./invite-provider-fetch.js",
+        "./marketapp-analytics-refresh.js",
+        "./marketapp-login.js",
+        "./marketapp-refresh-status.js",
+        "./marketapp-remembered-session-box.js",
+        "./marketapp-session-box.js",
+        "./owned-price-engine.js",
+        "./private-config.js",
+        "./private-marketapp-settings.js",
+        "./private-refresh-key.js",
+        "./public-credential-box.js",
+        "./public-provider-budget.js",
+        "./public-release-config.js",
+        "./public-routing.js",
+        "./public-runtime.js",
+        "./repository.js",
+        "./storage-admission.js",
+        "./storage-config.js",
+        "./storage-maintenance.js",
+        "sdk"
+      ],
+      "exports": [
+        "cloud",
+        "engine",
+        "giftRefresh",
+        "invokeCloud",
+        "invokeGiftRefresh",
+        "invokeMarketappAnalytics",
+        "invokeMarketappLogin",
+        "invokeMarketappRefreshStatus",
+        "invokeMarketappSettings",
+        "invokeOwnedPrice",
+        "invokePublicAccount",
+        "invokePublicWallet",
+        "invokeStorage",
+        "marketappAnalytics",
+        "marketappLogin",
+        "ownedPrices"
+      ],
+      "default": false
+    },
+    "lib/storage-admission": {
+      "imports": [
+        "./bounded-response.js",
+        "./storage-policy.js"
+      ],
+      "exports": [
+        "PUBLIC_COLLECTION_HEADROOM_BYTES",
+        "STORAGE_SQL_NOW",
+        "StorageCapacityError",
+        "createStorageAdmission",
+        "withStorageReservation"
+      ],
+      "default": false
+    },
+    "lib/storage-config": {
+      "imports": [],
+      "exports": [
+        "storagePolicy"
+      ],
+      "default": false
+    },
+    "lib/storage-maintenance": {
+      "imports": [
+        "./budget-reset-checkpoint-storage.js",
+        "./checkpoint-storage.js",
+        "./public-repository.js",
+        "./storage-admission.js",
+        "./storage-policy.js"
+      ],
+      "exports": [
+        "createStorageMaintenance"
+      ],
+      "default": false
+    },
+    "lib/storage-policy": {
+      "imports": [],
+      "exports": [
+        "DEFAULT_PUBLIC_ACCOUNT_BYTES",
+        "DEFAULT_STORAGE_POLICY",
+        "STORAGE_TABLES",
+        "normalizeStoragePolicy",
+        "storagePaused",
+        "storageTableByteExpression",
+        "utf8Size"
+      ],
+      "default": false
+    },
+    "lib/ton-price-decoder": {
+      "imports": [
+        "./cloud-pricing-core.js"
+      ],
+      "exports": [
+        "CONTRACT_VARIANTS",
+        "DECODER_VERSION",
+        "MARKETAPP_OPERATOR",
+        "OBSERVED_7F44_CODE_HASH",
+        "STORAGE_LAYOUT_VERSION",
+        "SUPPORTED_CODE_HASH",
+        "Slice",
+        "decodePriceContract",
+        "ordinaryBoc",
+        "sha256"
+      ],
+      "default": false
+    },
+    "lib/vendor/tweetnacl-secretbox": {
+      "imports": [],
+      "exports": [
+        "isValidEd25519Point",
+        "secretbox",
+        "verifyDetached"
+      ],
+      "default": false
+    },
+    "schema": {
+      "imports": [
+        "sdk/db"
+      ],
+      "exports": [
+        "cloudEvents",
+        "collectorState",
+        "dashboardProjectionCache",
+        "giftRefreshRuns",
+        "marketappAnalyticsSessions",
+        "marketappLoginAttempts",
+        "marketappWebsiteGates",
+        "marketappWebsiteRequests",
+        "ownedRefreshIndex",
+        "ownedRefreshRuns",
+        "ownedRefreshSessions",
+        "personalRentalAnalytics",
+        "privateProviderCredentials",
+        "publicAccounts",
+        "publicCloudEvents",
+        "publicDashboardProjectionCache",
+        "publicLegacyCollectorState",
+        "publicLegacyMigrations",
+        "publicMarketappAnalyticsSessions",
+        "publicMarketappLoginAttempts",
+        "publicOwnedRefreshIndex",
+        "publicOwnedRefreshRuns",
+        "publicOwnedRefreshSessions",
+        "publicPersonalRentalAnalytics",
+        "publicProviderCredentials",
+        "publicProviderGates",
+        "publicWalletAttempts",
+        "publicWalletChallenges",
+        "serviceCheckpointSourceScans",
+        "serviceCheckpointSources",
+        "serviceRecordOccurrences",
+        "serviceRecordPayloads",
+        "serviceStorageMonitor",
+        "serviceStorageReservations",
+        "serviceStorageScopeUsage",
+        "serviceStorageUsage"
+      ],
+      "default": false
+    }
+  }
+}

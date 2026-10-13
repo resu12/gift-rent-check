@@ -39,3 +39,15 @@ The owner and invited development account now use the compact layout. The reset 
 Synthetic repeated-history testing retained all observations while reducing 10,000-record storage from about 15.1 MB to 3.0 MB. After correcting the initial query plan, the compact reader was comparable to the legacy reader at 10,000 and 20,000 observations. These are development benchmarks, not estimates of supported public account count.
 
 Validation passed 1,094 backend tests (two intentional skips), 720 frontend tests, TypeScript and the Telegram build. The final recovery tests cover stopping a 400 KB checkpoint while storage is paused; only bytes retired in that exact atomic write are credited, and the existing 256 KiB net-growth recovery allowance remains enforced. Account deletion/recreation, reset races, quota limits, replay controls, unknown evidence fields and historical-read boundaries are covered. Published as revision 102.
+
+## Multi-user release follow-up
+
+Invited accounts now have a scoped Marketapp login, encrypted remembered sessions, personal analytics and signed-in gift refresh with TON fallback. Public gift outcomes use a small account-scoped archive installed alongside existing compact triggers. No further data reset is needed.
+
+The [registration checklist](telegram-serverless.md#registration-readiness-and-recovery) now enforces explicit capacity evidence at deployment. [Encrypted backup and recovery verification plus concurrent workload tools](backup-recovery-and-capacity.md) are available. Local workload results do not establish hosted capacity. Keep registration closed until the remaining provider and operational evidence is recorded.
+
+### Verification on 12 October 2026
+
+Published revision 107 after the additive archive migration and accounting setup. Backend validation passed 1,131 tests with two intentional skips; all 733 frontend tests, TypeScript and the production build passed. The live invited-account dashboard and analytics-status probe passed, as did missing-identity denial and archive readiness. The probe made no provider requests and changed no saved record sequences. This administrative check does not replace the user's first real Marketapp wallet approval in Telegram.
+
+The example and current pilot cap are five accounts. A local 16-account workload with 200 gifts and three observations each passed isolation, quota, generation and concurrent-write checks; its timing does not prove hosted capacity. Live backup attempts failed safely: the current database is roughly 60 MB across about 75,000 rows, above the bounded exporter's 32 MiB limit, and the host rejected atomic snapshot queries. No backup/recovery receipt was recorded. Open registration remains disabled pending verified hosting capacity, a working backup/recovery path for the current dataset, and representative hosted load evidence.

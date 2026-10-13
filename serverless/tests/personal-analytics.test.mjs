@@ -163,6 +163,17 @@ function setup() {
 }
 const seed = async engine => engine.importChunk(ctx, {import_id: 'analytics-settings', chunk_index: 0, records: [{kind: 'settings', key: 'wallet', observed_at: '2026-10-04T00:00:00Z', record: {wallet}}]});
 
+test('future captures cannot become permanent winners in saved analytics history', async () => {
+  const t = setup();
+  try {
+    await seed(t.engine);
+    const source = fixture(); source.captured_at = '2026-10-05T12:00:00Z';
+    await assert.rejects(t.engine.importPersonalAnalytics(ctx, {snapshot: JSON.stringify(source)}), /capture time is in the future/);
+    assert.equal(t.database.prepare('SELECT count(*) AS n FROM personal_rental_analytics').get().n, 0);
+    assert.equal(t.requests(), 0);
+  } finally { t.database.close(); }
+});
+
 function periodFixture(length, volume, capturedAt = '2026-10-03T12:00:00Z', owner = wallet) {
   const source = fixture(), last = Date.parse('2026-10-03T00:00:00Z');
   const days = Array.from({length}, (_, index) => new Date(last - (length - index - 1) * 86400000).toISOString().slice(0, 10));

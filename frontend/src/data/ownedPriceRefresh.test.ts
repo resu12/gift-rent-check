@@ -606,13 +606,61 @@ test('backend busy response remains actionable and never starts or steps an unre
       calls.push({ name, input });
       if (name === 'startOwnedPriceRefresh') throw Object.assign(new Error('secret provider body'), { code: 'OWNED_PRICE_BUSY' });
       return { run: null, server_time: 0, next_allowed_at: 0 };
-    }), onSavedDataChanged: assert.fail });
+    }), onSavedDataChanged: () => assert.fail('No saved-data change was expected.') });
   await driver.refreshGift(giftAddress);
   assert.deepEqual(calls, [{ name: 'startOwnedPriceRefresh', input: { session_id: 'gift-session', nft_address: giftAddress } },
     { name: 'getOwnedPriceRefresh', input: { session_id: 'gift-session' } }]);
-  assert.equal(driver.getSnapshot().run, null); assert.equal(driver.getSnapshot().phase, 'unavailable');
-  assert.match(driver.getSnapshot().error ?? '', /still finishing/);
+  assert.equal(driver.getSnapshot().run, null); assert.equal(driver.getSnapshot().phase, 'waiting');
+  assert.equal(driver.getSnapshot().error, null); assert.equal(driver.getSnapshot().canStop, false);
+  assert.equal(driver.getSnapshot().canRefresh, true);
+  assert.match(ownedPriceStatusText(driver.getSnapshot()), /still finishing/);
   assert.ok(!ownedPriceStatusText(driver.getSnapshot()).includes('secret'));
+});
+
+test('busy portfolio Start waits without taking over a different session or inventing saved progress', async () => {
+  const calls: OwnedPriceEndpoint[] = [];
+  const driver = new OwnedPriceRefreshDriver({ wallet: walletAddress, sessionId: 'current-session',
+    transport: { portfolioRefresh: true, ...mockTransport(name => {
+      calls.push(name);
+      if (name === 'startGiftRefresh') throw { code: 'OWNED_PRICE_BUSY', message: 'private provider body' };
+      return saved({ scope: 'portfolio', wallet: walletAddress, session_id: 'other-session', checked: 88, updated: 88 });
+    }) }, onSavedDataChanged: () => assert.fail('No saved-data change was expected.') });
+  await driver.start();
+  assert.deepEqual(calls, ['startGiftRefresh', 'getGiftRefresh']);
+  assert.equal(driver.getSnapshot().phase, 'waiting'); assert.equal(driver.getSnapshot().run, null);
+  assert.equal(driver.getSnapshot().canStop, false); assert.equal(driver.getSnapshot().canRefresh, true);
+  await driver.reopen(); assert.equal(calls.length, 2, 'visibility never queues another Start');
+});
+
+test('busy Step preserves saved progress and allows only an explicit Stop of its bound session', async () => {
+  const calls: { name: OwnedPriceEndpoint; input: Record<string, unknown> }[] = [];
+  const run = { scope: 'portfolio' as const, wallet: walletAddress, session_id: 'current-session', checked: 161,
+    updated: 88, unresolved: 73, status_updated: 88, status_unresolved: 73 };
+  const driver = new OwnedPriceRefreshDriver({ wallet: walletAddress, sessionId: 'current-session',
+    transport: { portfolioRefresh: true, ...mockTransport((name, input) => {
+      calls.push({ name, input });
+      if (name === 'stepGiftRefresh') throw { code: 'OWNED_PRICE_BUSY' };
+      return saved({ ...run, ...(name === 'stopGiftRefresh' ? { state: 'partial', reason: 'stopped_by_you' } : {}) });
+    }) }, onSavedDataChanged() {} });
+  await driver.start();
+  assert.deepEqual(calls.map(call => call.name), ['startGiftRefresh', 'stepGiftRefresh', 'getGiftRefresh']);
+  assert.equal(driver.getSnapshot().phase, 'waiting'); assert.equal(driver.getSnapshot().run?.checked, 161);
+  assert.equal(driver.getSnapshot().run?.updated, 88); assert.equal(driver.getSnapshot().canStop, true);
+  await driver.stop();
+  assert.equal(driver.getSnapshot().phase, 'partial'); assert.equal(driver.getSnapshot().error, null);
+  assert.deepEqual(calls.at(-1), { name: 'stopGiftRefresh', input: { run_id: 17, session_id: 'current-session' } });
+});
+
+test('a busy response reconciled to its exact completed session becomes complete without retry', async () => {
+  const calls: OwnedPriceEndpoint[] = [];
+  const driver = new OwnedPriceRefreshDriver({ wallet: walletAddress, sessionId: 'current-session',
+    transport: { portfolioRefresh: true, ...mockTransport(name => {
+      calls.push(name); if (name === 'startGiftRefresh') throw { code: 'OWNED_PRICE_BUSY' };
+      return saved({ scope: 'portfolio', wallet: walletAddress, session_id: 'current-session', state: 'complete', checked: 161, updated: 161 });
+    }) }, onSavedDataChanged() {} });
+  await driver.start();
+  assert.equal(driver.getSnapshot().phase, 'complete'); assert.equal(driver.getSnapshot().error, null);
+  assert.deepEqual(calls, ['startGiftRefresh', 'getGiftRefresh']);
 });
 
 test('storage-full gift refresh names the recovery problem without leaking backend details or retrying', async () => {
@@ -622,7 +670,7 @@ test('storage-full gift refresh names the recovery problem without leaking backe
       calls.push(name);
       if (name === 'startOwnedPriceRefresh') throw Object.assign(new Error('private database SQL and credentials'), { code: 'STORAGE_FULL' });
       return { run: null, server_time: 0, next_allowed_at: 0 };
-    }), onSavedDataChanged: assert.fail });
+    }), onSavedDataChanged: () => assert.fail('No saved-data change was expected.') });
   await driver.start();
   assert.deepEqual(calls, ['startOwnedPriceRefresh', 'getOwnedPriceRefresh']);
   assert.match(driver.getSnapshot().error ?? '', /app storage is full/);
@@ -637,7 +685,7 @@ test('capacity protection directs gift refresh to Status cleanup without repeati
       calls.push(name);
       if (name === 'startOwnedPriceRefresh') throw Object.assign(new Error('private database SQL and credentials'), { code: 'STORAGE_CAPACITY_PAUSED' });
       return { run: null, server_time: 0, next_allowed_at: 0 };
-    }), onSavedDataChanged: assert.fail });
+    }), onSavedDataChanged: () => assert.fail('No saved-data change was expected.') });
   await driver.start();
   assert.deepEqual(calls, ['startOwnedPriceRefresh', 'getOwnedPriceRefresh']);
   assert.match(driver.getSnapshot().error ?? '', /Clean up storage from Status/);
@@ -649,7 +697,7 @@ test('targeted Start rejects another scope, target, wallet or same-gift session 
   for (const response of [saved(), giftSaved({ nft_address: otherGiftAddress }), giftSaved({ wallet: otherWalletAddress }), giftSaved({ session_id: 'another-session' })]) {
     const calls: OwnedPriceEndpoint[] = [];
     const driver = new OwnedPriceRefreshDriver({ wallet: walletAddress, sessionId: 'opening', createSessionId: () => 'gift-session',
-      transport: mockTransport(name => { calls.push(name); return response; }), onSavedDataChanged: assert.fail });
+      transport: mockTransport(name => { calls.push(name); return response; }), onSavedDataChanged: () => assert.fail('No saved-data change was expected.') });
     await driver.refreshGift(giftAddress);
     assert.deepEqual(calls, ['startOwnedPriceRefresh', 'getOwnedPriceRefresh']);
     assert.equal(driver.getSnapshot().run, null); assert.equal(driver.getSnapshot().phase, 'unavailable');
@@ -659,7 +707,7 @@ test('targeted Start rejects another scope, target, wallet or same-gift session 
 
 test('full-portfolio Start never adopts a targeted run', async () => {
   const calls: OwnedPriceEndpoint[] = [];
-  const driver = new OwnedPriceRefreshDriver({ sessionId: 'opening', transport: mockTransport(name => { calls.push(name); return giftSaved(); }), onSavedDataChanged: assert.fail });
+  const driver = new OwnedPriceRefreshDriver({ sessionId: 'opening', transport: mockTransport(name => { calls.push(name); return giftSaved(); }), onSavedDataChanged: () => assert.fail('No saved-data change was expected.') });
   await driver.start(); assert.deepEqual(calls, ['startOwnedPriceRefresh', 'getOwnedPriceRefresh']);
   assert.equal(driver.getSnapshot().run, null); assert.equal(driver.getSnapshot().phase, 'unavailable');
 });
@@ -670,7 +718,7 @@ test('every targeted Step validates scope and immutable session before accepting
     const driver = new OwnedPriceRefreshDriver({ wallet: walletAddress, sessionId: 'opening', createSessionId: () => 'gift-session',
       transport: mockTransport(name => {
         calls.push(name); return name === 'stepOwnedPriceRefresh' ? giftSaved({ ...fields, state: 'complete', checked: 1, updated: 1 } as Partial<OwnedPriceRun>) : giftSaved();
-      }), onSavedDataChanged: assert.fail });
+      }), onSavedDataChanged: () => assert.fail('No saved-data change was expected.') });
     await driver.refreshGift(giftAddress);
     assert.deepEqual(calls, ['startOwnedPriceRefresh', 'stepOwnedPriceRefresh', 'getOwnedPriceRefresh']);
     assert.equal(driver.getSnapshot().run?.checked, 0); assert.equal(driver.getSnapshot().phase, 'unavailable');
@@ -720,7 +768,7 @@ test('explicit Stop recovers an ambiguously committed targeted Start and stops i
       if (name === 'startOwnedPriceRefresh') return start.promise;
       if (name === 'getOwnedPriceRefresh') return giftSaved({ account_generation: 0 });
       assert.equal(name, 'stopOwnedPriceRefresh'); stopping.resolve(); return stop.promise;
-    }), onSavedDataChanged: assert.fail });
+    }), onSavedDataChanged: () => assert.fail('No saved-data change was expected.') });
   const running = driver.refreshGift(giftAddress); await driver.stop();
   start.reject(new Error('Start may have committed')); await stopping.promise;
   assert.equal(driver.getSnapshot().canRefresh, false);
@@ -742,7 +790,7 @@ test('hiding an ambiguous targeted Start reconciles its commit without sending a
       calls.push({ name, input });
       if (name === 'startOwnedPriceRefresh') return start.promise;
       assert.equal(name, 'getOwnedPriceRefresh'); return giftSaved();
-    }), onSavedDataChanged: assert.fail });
+    }), onSavedDataChanged: () => assert.fail('No saved-data change was expected.') });
   const running = driver.refreshGift(giftAddress); driver.interrupt();
   start.reject(new Error('Start may have committed')); await running; await driver.start();
   assert.deepEqual(calls, [
@@ -770,7 +818,7 @@ test('same-wallet account incarnation changes discard late Step and block replay
     transport: mockTransport((name, input) => {
       calls.push({ name, input }); if (name === 'startOwnedPriceRefresh') return giftSaved({ account_generation: 0 });
       stepping.resolve(); return reply.promise;
-    }), onSavedDataChanged: assert.fail });
+    }), onSavedDataChanged: () => assert.fail('No saved-data change was expected.') });
   const pending = driver.refreshGift(giftAddress); await stepping.promise; driver.setContext(walletAddress, 2);
   reply.resolve(giftSaved({ account_generation: 0, state: 'complete', checked: 1, updated: 1 })); await pending;
   assert.deepEqual(calls, [{ name: 'startOwnedPriceRefresh', input: { session_id: 'gift-session', nft_address: giftAddress } },

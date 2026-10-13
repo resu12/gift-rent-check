@@ -57,7 +57,7 @@ export interface OwnedPriceResponse {
 }
 
 export interface OwnedPriceSnapshot {
-  phase: 'idle' | 'checking' | 'complete' | 'partial' | 'unavailable';
+  phase: 'idle' | 'checking' | 'waiting' | 'complete' | 'partial' | 'unavailable';
   run: OwnedPriceRun | null;
   /** The requested scope remains known even when Start fails before returning a run. */
   scope?: 'portfolio' | 'gift';
@@ -72,10 +72,12 @@ export interface OwnedPriceSnapshot {
   verification?: GiftRefreshVerification;
 }
 
+export interface OwnedPriceSavedUpdate { terminal: boolean }
+
 interface RefreshOptions {
   transport: OwnedPriceTransport;
   sessionId: string;
-  onSavedDataChanged(): void;
+  onSavedDataChanged(update?: OwnedPriceSavedUpdate): void;
   now?: () => number;
   wait?: (ms: number, signal: AbortSignal) => Promise<void>;
   maxCalls?: number;
@@ -130,6 +132,53 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+/** Batch intermediate evidence reads; a final commit still requests immediate confirmation. */
+export function createOwnedPriceReloadScheduler(options: {
+  reload(): Promise<void>;
+  isHidden(): boolean;
+  delayMs?: number;
+  timer?(callback: () => void, ms: number): ReturnType<typeof setTimeout>;
+  clear?(handle: ReturnType<typeof setTimeout>): void;
+}) {
+  const timer = options.timer ?? ((callback, ms) => globalThis.setTimeout(callback, ms));
+  const clear = options.clear ?? (handle => globalThis.clearTimeout(handle));
+  let scheduled: ReturnType<typeof setTimeout> | undefined, active: Promise<void> | null = null;
+  let dirty = false, disposed = false, epoch = 0;
+  const unschedule = () => { if (scheduled !== undefined) clear(scheduled); scheduled = undefined; };
+  const flush = (): Promise<void> => {
+    unschedule();
+    if (disposed || options.isHidden()) return Promise.resolve();
+    if (active) {
+      const owner = epoch;
+      return active.then(() => owner === epoch ? flush() : undefined);
+    }
+    if (!dirty) return Promise.resolve();
+    dirty = false;
+    const owner = epoch;
+    const operation = Promise.resolve().then(() => {
+      if (!disposed && owner === epoch && !options.isHidden()) return options.reload();
+      if (!disposed && owner === epoch) dirty = true;
+    }).finally(() => { if (active === operation) active = null; });
+    active = operation;
+    return operation;
+  };
+  return {
+    notify(update?: OwnedPriceSavedUpdate) {
+      if (disposed) return;
+      dirty = true;
+      if (options.isHidden()) return;
+      if (update?.terminal !== false) { void flush().catch(() => undefined); return; }
+      if (scheduled === undefined) scheduled = timer(() => {
+        scheduled = undefined; void flush().catch(() => undefined);
+      }, options.delayMs ?? 4000);
+    },
+    flush,
+    pause() { unschedule(); },
+    cancel() { epoch++; dirty = false; unschedule(); },
+    dispose() { disposed = true; epoch++; dirty = false; unschedule(); },
+  };
+}
+
 const OWNED_PRICE_BUSY_MESSAGE = 'Another gift check is still finishing. Wait for it or stop it in Status, then try again.';
 class OwnedPriceScopeError extends Error { readonly code = 'OWNED_PRICE_SCOPE_CHANGED'; }
 function ownedPriceErrorMessage(error: unknown, targeted: boolean): string {
@@ -161,6 +210,7 @@ export class OwnedPriceRefreshDriver {
   private stopConfirmed = false;
   private reconciliation: Promise<void> | null = null;
   private unavailable = false;
+  private waitingForCheck = false;
   private notifiedChecked = 0;
   private notifiedUpdates = 0;
   private notifiedStatuses = 0;
@@ -193,8 +243,9 @@ export class OwnedPriceRefreshDriver {
     const run = this.current?.run ?? null;
     const phase = this.contextChanged ? 'idle' : run?.state === 'complete' ? 'complete'
       : this.unavailable || run?.state === 'failed' ? 'unavailable'
+        : this.waitingForCheck ? 'waiting'
         : run?.state === 'partial' || this.controller.signal.aborted ? 'partial' : 'checking';
-    this.snapshot = { phase, run, scope: this.target ? 'gift' : 'portfolio', canStop: phase === 'checking' && !this.stopRequested, canRefresh: !this.pending && !this.stopActive,
+    this.snapshot = { phase, run, scope: this.target ? 'gift' : 'portfolio', canStop: (phase === 'checking' || phase === 'waiting' && run?.state === 'running') && !this.stopRequested, canRefresh: !this.pending && !this.stopActive,
       error: phase === 'unavailable' ? this.error : null,
       ...(this.current?.provider ? { provider: this.current.provider } : {}),
       ...(this.current?.cache_hit !== undefined ? { cacheHit: this.current.cache_hit } : {}),
@@ -212,7 +263,7 @@ export class OwnedPriceRefreshDriver {
     this.epoch++; this.controller.abort(); this.started = true; this.current = null;
     this.observedAt = 0; this.notifiedChecked = 0; this.notifiedUpdates = 0;
     this.notifiedStatuses = 0; this.notifiedStatusUnresolved = 0;
-    this.error = null; this.unavailable = false; this.contextChanged = true;
+    this.error = null; this.unavailable = false; this.waitingForCheck = false; this.contextChanged = true;
     this.publish();
   }
 
@@ -238,6 +289,7 @@ export class OwnedPriceRefreshDriver {
     }
     const previousState = this.current?.run?.state;
     this.current = response;
+    if (response.run && response.run.state !== 'running') this.waitingForCheck = false;
     this.observedAt = (this.options.now ?? Date.now)();
     // Unresolved checks also save observation freshness and historical-price
     // warnings, even when no numeric amount changed.
@@ -245,9 +297,10 @@ export class OwnedPriceRefreshDriver {
     // already checked every gift. Its final commit must still reload saved
     // data even when price/check counters remain unchanged.
     const completedEvidence = response.run && response.run.checked > 0 && previousState === 'running' && response.run.state !== 'running';
-    if (response.run && (response.run.checked > this.notifiedChecked || response.run.updated > this.notifiedUpdates
+    const reusedComplete = previousState === undefined && response.cache_hit === true && response.run?.state === 'complete';
+    if (!reusedComplete && response.run && (response.run.checked > this.notifiedChecked || response.run.updated > this.notifiedUpdates
       || (response.run.status_updated ?? 0) > this.notifiedStatuses || (response.run.status_unresolved ?? 0) > this.notifiedStatusUnresolved
-      || completedEvidence)) this.options.onSavedDataChanged();
+      || completedEvidence)) this.options.onSavedDataChanged({ terminal: response.run.state !== 'running' });
     this.notifiedChecked = Math.max(this.notifiedChecked, response.run?.checked ?? 0);
     this.notifiedUpdates = Math.max(this.notifiedUpdates, response.run?.updated ?? 0);
     this.notifiedStatuses = Math.max(this.notifiedStatuses, response.run?.status_updated ?? 0);
@@ -313,6 +366,7 @@ export class OwnedPriceRefreshDriver {
     this.stopConfirmed = false;
     this.reconciliation = null;
     this.unavailable = false;
+    this.waitingForCheck = false;
     this.contextChanged = false;
     this.error = null;
     this.notifiedChecked = 0;
@@ -418,7 +472,11 @@ export class OwnedPriceRefreshDriver {
       }
     } catch (error) {
       if (epoch === this.epoch) {
-        this.unavailable = true; this.error = ownedPriceErrorMessage(error, Boolean(this.target));
+        // A rejected concurrent request is not a failed check. Reconcile only
+        // this exact session; never retry or take over somebody else's run.
+        this.waitingForCheck = Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'OWNED_PRICE_BUSY');
+        this.unavailable = !this.waitingForCheck;
+        this.error = this.waitingForCheck ? null : ownedPriceErrorMessage(error, Boolean(this.target));
         this.interrupt();
       }
     } finally {
@@ -471,8 +529,8 @@ export function createOwnedPriceStartupGate(
     dashboardLoaded(enabled: boolean) { ready = enabled; startIfVisible(); },
     visibilityChanged() { if (isHidden()) interrupt(); else startIfVisible(); },
     interrupt,
-    manualRefresh(refresh: () => Promise<void>) {
-      if (!ready || disposed || isHidden()) return Promise.resolve();
+    manualRefresh(refresh: () => Promise<void>, authorized = false) {
+      if ((!ready && !authorized) || disposed || isHidden()) return Promise.resolve();
       hiddenAt = null;
       attempted = true;
       return refresh();
@@ -484,6 +542,7 @@ export function createOwnedPriceStartupGate(
 export function ownedPriceStatusText(snapshot: OwnedPriceSnapshot): string {
   const { run, phase } = snapshot;
   if (phase === 'idle') return '';
+  if (phase === 'waiting') return 'Another gift check is still finishing. Your saved data is kept. Try Refresh again shortly.';
   if (snapshot.error) return snapshot.error;
   if (run?.scope === 'gift') {
     if (phase === 'checking') return 'Checking this gift…';

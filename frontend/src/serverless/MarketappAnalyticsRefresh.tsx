@@ -7,7 +7,7 @@ import { marketappWalletFactory, openMarketappWallet } from './MarketappLoginTes
 import './marketappLoginTest.css';
 import './marketappAnalyticsRefresh.css';
 
-export default function MarketappAnalyticsRefresh({ transport, wallet, periodDays = 30, onImported, startupBusy = false, onBusyChange, onViewChange, showOutcome = true, variant = 'analytics' }: {
+export default function MarketappAnalyticsRefresh({ transport, wallet, periodDays = 30, onImported, startupBusy = false, onBusyChange, onViewChange, showOutcome = true, variant = 'analytics', savedHistory = false }: {
   transport: MarketappAnalyticsRefreshAdapter;
   wallet: string | null;
   periodDays?: MarketappAnalyticsPeriod;
@@ -17,6 +17,7 @@ export default function MarketappAnalyticsRefresh({ transport, wallet, periodDay
   onViewChange?: (view: MarketappAnalyticsRefreshView | null) => void;
   showOutcome?: boolean;
   variant?: 'analytics' | 'connection';
+  savedHistory?: boolean;
 }) {
   const [view, setView] = useState<MarketappAnalyticsRefreshView>({ phase: 'idle' });
   const [more, setMore] = useState(false);
@@ -69,20 +70,20 @@ export default function MarketappAnalyticsRefresh({ transport, wallet, periodDay
   return <div className={`marketapp-login-test marketapp-analytics-refresh${connectionView ? ' marketapp-activity-connection activity-connection-row' : ''}`}>
     {connectionView ? <>
       <div className="activity-connection-heading"><Icon name={remembered && !connectionExpired ? 'check' : 'wallet'} size={20} /><h3>Marketapp login</h3><span className="connection-status">{connectionExpired ? 'Expired' : connectionLabel === 'Approval needed' ? 'Not connected' : connectionLabel}</span></div>
-      <p className="activity-connection-note">Personal analytics & gift status.</p>
+      <p className="activity-connection-note">Your personal rental analytics and gift status. Uses your wallet approval, separately from your API key.</p>
       {(!remembered || connectionExpired) && <p className="marketapp-login-consent marketapp-connection-approval">{!wallet ? 'Connect your wallet first.' : `Wallet approval saves your login and refreshes ${periodDays === 365 ? '1-year' : '30-day'} analytics.`}</p>}
       <div className="marketapp-activity-connection-actions">
         {remembered && !connectionExpired ? <button type="button" className="button secondary small" disabled={busy} onClick={disconnect}>{view.phase === 'disconnecting' ? 'Disconnecting…' : 'Disconnect Marketapp'}</button>
           : <button type="button" className="button secondary small" disabled={busy || limited || !wallet || view.sessionReady === false} onClick={start}><Icon name="wallet" size={16} />{working ? 'Connecting…' : connectionExpired ? 'Reconnect Marketapp' : 'Connect Marketapp'}</button>}
         {connectionExpired && <button type="button" className="text-button" disabled={busy} onClick={disconnect}>{view.phase === 'disconnecting' ? 'Disconnecting…' : 'Disconnect Marketapp'}</button>}
       </div>
-      <details className="activity-access-details"><summary>Access details</summary><p className="marketapp-login-consent">Login is encrypted and remembered for up to 7 days. Disconnecting keeps saved data.</p></details>
+      <details className="activity-access-details"><summary>Access details</summary><p className="marketapp-login-consent">Login is encrypted for your Telegram account and remembered for up to 7 days. Disconnecting keeps saved data. This approval does not request a transaction.</p></details>
       {startupBusy && !manualBusy && <p role="status">Analytics are refreshing. Connection actions will be available shortly.</p>}
     </> : <>
-    <div className="marketapp-analytics-refresh-actions"><button type="button" className="button secondary small" aria-label={`Refresh ${periodDays === 365 ? '1-year' : '30-day'} rental analytics`} disabled={busy || limited || !wallet || view.sessionReady === false} onClick={start}><Icon name="refresh" size={16} className={view.phase === 'updating' ? 'spinning' : undefined} />{view.phase === 'updating' ? 'Refreshing…' : 'Refresh'}</button></div>
+    <div className="marketapp-analytics-refresh-actions"><button type="button" className="button secondary small" aria-label={savedHistory ? 'Refresh saved history using the 1-year report' : `Refresh ${periodDays === 365 ? '1-year' : '30-day'} rental analytics`} disabled={busy || limited || !wallet || view.sessionReady === false} onClick={start}><Icon name="refresh" size={16} className={view.phase === 'updating' ? 'spinning' : undefined} />{view.phase === 'updating' ? 'Refreshing…' : 'Refresh'}</button></div>
     <details className="marketapp-connection-options"><summary>Marketapp connection <span>{connectionLabel}</span></summary>
       {supportsRemembering ? remembered ? <div className="marketapp-remembered-login"><p className="marketapp-login-consent">Refresh uses your saved Marketapp login.</p><button type="button" className="text-button" disabled={busy} onClick={disconnect}>Disconnect</button></div>
-        : <><p className="marketapp-login-consent">{rememberLogin ? 'Wallet approval required. Login will be remembered.' : 'Wallet approval required for each refresh.'}</p><div className="marketapp-remember-login"><label><input type="checkbox" checked={rememberLogin} disabled={busy} onChange={event => setRememberLogin(event.target.checked)} />Remember Marketapp login</label><small>Optional. Encrypted in your private backend for up to 7 days; otherwise used only for this refresh.</small></div></>
+        : <><p className="marketapp-login-consent">{rememberLogin ? 'Wallet approval required. Login will be remembered.' : 'Wallet approval required for each refresh.'}</p><div className="marketapp-remember-login"><label><input type="checkbox" checked={rememberLogin} disabled={busy} onChange={event => setRememberLogin(event.target.checked)} />Remember Marketapp login</label><small>Optional. Encrypted for your Telegram account for up to 7 days; otherwise used only for this refresh.</small></div></>
         : <p className="marketapp-login-consent">Wallet approval required. Login is used only for this refresh.</p>}
     </details>
     {!remembered && <p className="marketapp-login-consent">{rememberLogin ? 'Wallet approval required · login will be remembered.' : 'Wallet approval required.'}</p>}

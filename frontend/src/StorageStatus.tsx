@@ -13,27 +13,27 @@ export function StorageStatusCard({ snapshot, onClean, now = Date.now() }: {
   const checked = status?.checked_at && Date.parse(status.checked_at) <= now + 30000 ? status.checked_at : null;
   const lastCleanup = status?.cleanup.last_completed_at && Date.parse(status.cleanup.last_completed_at) <= now + 30000
     ? status.cleanup.last_completed_at : null;
-  const waitingMessage = view.waitingForProvider ? `Waiting for other updates to finish.${snapshot.continuation === 'waiting' && snapshot.pauseReason === 'provider' ? ' Cleanup resumes automatically.' : ''}` : null;
+  const waitingMessage = view.waitingForProvider ? `Other updates are running.${snapshot.continuation === 'waiting' && snapshot.pauseReason === 'provider' ? ' Cleanup will continue automatically.' : ''}` : null;
   const message = snapshot.error || waitingMessage
     || (snapshot.continuation === 'waiting' && snapshot.pauseReason === 'hidden' ? 'Return to this app to resume cleanup.' : null)
-    || (status?.cleanup.state === 'blocked' ? 'Cleanup stopped. Saved data is retained. Try again.' : null)
-    || (snapshot.bounded ? 'Progress saved. Continue cleanup to finish.' : null)
+    || (status?.cleanup.state === 'blocked' ? 'Cleanup could not finish. Your saved data is kept. Try again.' : null)
+    || (snapshot.bounded ? 'Cleanup paused. Choose Continue cleanup to finish.' : null)
     || (view.status === 'paused' ? view.active ? 'New updates wait until cleanup makes enough room.' : 'New updates are paused. Clean up storage to continue.' : null)
-    || (view.active ? 'Keep this app open while the check runs.' : null)
-    || (view.status === 'warning' ? 'Clean up cached data to make room for updates.' : null);
+    || (view.active ? 'Keep the app open to finish.' : null)
+    || (view.status === 'warning' ? 'Clean up to make room for updates.' : null);
   return <section className={`storage-status ${view.tone}`} aria-labelledby={titleId}>
     <div className="storage-status-main">
       <div className="storage-status-title"><Icon name="layers" size={18} /><h2 id={titleId}>Storage</h2>
         <span className="storage-status-state" role="status"><Icon name={view.active ? 'refresh' : view.status === 'healthy' ? 'check' : view.status === 'paused' ? 'alert' : 'clock'} size={13} className={view.active ? 'spinning' : undefined} />{view.status === 'warning' ? 'Cleanup suggested' : view.label}</span>
       </div>
       <div className="storage-status-usage">
-        <span>{status?.estimated_bytes != null ? <><strong>{storageSize(status.estimated_bytes)}</strong> estimated{status.scope === 'account' ? ' for your account' : ' data'}</> : 'Usage not checked yet'}
-          {view.progressPercent !== null ? <> · <span>{view.progressPercent}% of app safety budget</span></>
-            : status && !status.inventory_complete && status.estimated_bytes !== null ? ' · check incomplete' : null}</span>
+        <span>{view.progressPercent !== null ? <><strong>{view.progressPercent}%</strong> of app storage budget used</>
+          : status?.estimated_bytes != null ? <><strong>{storageSize(status.estimated_bytes)}</strong> estimated{!status.inventory_complete ? ' · check incomplete' : ''}</> : 'Usage not checked yet'}
+          {checked && <span className="storage-status-checked"> · Checked <time dateTime={checked} title={dateTime(checked, true)}>{relativeTime(checked, now)}</time></span>}</span>
         {view.progressPercent !== null && <progress max="100" value={view.progressPercent} aria-label="Estimated usage of the application safety budget" />}
       </div>
       {progress && <div className="storage-cleanup-progress">
-        <span>{storageCleanupStage(progress)}{progress.percent !== null && <> · {progress.percent}% of this stage</>}</span>
+        <span>{storageCleanupStage(progress)} · Step {progress.stage_number} of {progress.stage_count}</span>
       </div>}
       {message && <p className="storage-status-message" role={snapshot.error ? 'alert' : undefined}>{message}</p>}
     </div>
@@ -43,25 +43,26 @@ export function StorageStatusCard({ snapshot, onClean, now = Date.now() }: {
       <Icon name="refresh" size={14} />{view.actionLabel}
     </button>
     <details className="storage-status-details"><summary>Storage details</summary><div>
-      <p>{checked ? <>Checked <time dateTime={checked}>{relativeTime(checked, now)}</time> · {dateTime(checked, true)}.</> : 'Storage check pending.'}</p>
+      <dl className="storage-status-facts">
+        {status?.estimated_bytes != null && <><dt>Estimated data</dt><dd>{storageSize(status.estimated_bytes)}{status.scope === 'account' ? ' for your account' : ''}</dd></>}
+        {status?.budget_bytes != null && <><dt>App storage budget</dt><dd>{storageSize(status.budget_bytes)}</dd></>}
+        {status?.growth?.write_limit_bytes != null && <><dt>{status.scope === 'account' ? 'Account update limit' : 'Updates pause at'}</dt><dd>{storageSize(status.growth.write_limit_bytes)}</dd></>}
+        {checked && <><dt>Last checked</dt><dd><time dateTime={checked}>{dateTime(checked, true)}</time></dd></>}
+        <dt>Last cleanup</dt><dd>{lastCleanup ? <time dateTime={lastCleanup}>{dateTime(lastCleanup, true)}</time> : 'No completed cleanup yet'}</dd>
+        {lastCleanup && status && status.cleanup.reclaimed_bytes > 0 && <><dt>Space freed</dt><dd>{storageSize(status.cleanup.reclaimed_bytes)}</dd></>}
+        {status?.cleanup.estimated_reclaimable_bytes != null && <><dt>Estimated savings</dt><dd>{storageSize(status.cleanup.estimated_reclaimable_bytes)}</dd></>}
+        {progress?.percent != null && <><dt>Current step</dt><dd>{progress.percent}% checked</dd></>}
+      </dl>
       {snapshot.error && waitingMessage && <p>{waitingMessage}</p>}
       {view.status === 'paused' && <p>New updates wait for safe storage space. Saved data stays available.</p>}
-      {status?.cleanup.state === 'blocked' && message !== 'Cleanup stopped. Saved data is retained. Try again.' && <p>Cleanup could not finish. Saved data is retained.</p>}
+      {status?.cleanup.state === 'blocked' && snapshot.error && <p>Cleanup could not finish. Saved data is kept.</p>}
       {snapshot.bounded && <p>{snapshot.pauseReason === 'manual_limit'
-        ? 'Cleanup reached the safety limit for a long run. Progress is saved.'
-        : 'The automatic check reached its safety limit. Continue cleanup while this app stays open.'}</p>}
-      {status?.scope === 'account' && <p>Usage shown is only for your account. The app manages shared capacity privately.</p>}
-      {status?.budget_bytes != null && <p>App safety budget: {storageSize(status.budget_bytes)}. This is not a verified Telegram storage quota. Estimates exclude some database overhead.</p>}
-      {status?.scope === 'account' && status.growth?.write_limit_bytes != null && <p>Your account allowance: {storageSize(status.growth.write_limit_bytes)}. This is an app limit, not a verified Telegram storage quota. Shared capacity and required free space can pause updates sooner.</p>}
+        ? 'This run reached its time or request limit. Progress is saved.'
+        : 'The automatic check reached its request limit. Progress is saved.'}</p>}
+      <p>Cleanup removes cached and duplicate data. Your gifts, prices, rental history, analytics and update progress are kept.</p>
+      {status?.budget_bytes != null && <p>The budget is an app safety limit, not a confirmed Telegram quota. Estimates exclude some database overhead.{status.scope === 'account' ? ' Shared storage limits may pause updates sooner.' : ' Space is reserved for maintenance.'}</p>}
       {status?.growth && <p>{storageGrowthSummary(status.growth, status.scope, now)}</p>}
-      {status?.scope === 'app' && status.growth?.write_limit_bytes != null && <p>Updates pause at {storageSize(status.growth.write_limit_bytes)} to leave room for maintenance. Growth estimates exclude database overhead and cannot predict the platform limit.</p>}
-      {status && !status.inventory_complete && <p>Inventory is incomplete. Usage estimates may increase as the check continues.</p>}
-      {progress && <p>Stage {progress.stage_number} of {progress.stage_count}. Progress covers this stage, not time remaining. The freed amount changes only when removable data is found.</p>}
-      {status?.cleanup.estimated_reclaimable_bytes !== null && status?.cleanup.estimated_reclaimable_bytes !== undefined &&
-        <p>Estimated cleanup savings: {storageSize(status.cleanup.estimated_reclaimable_bytes)}.</p>}
-      <p>{lastCleanup ? <>Last cleanup: <time dateTime={lastCleanup}>{dateTime(lastCleanup, true)}</time>.</> : 'No completed cleanup recorded yet.'}</p>
-      {lastCleanup && status && status.cleanup.reclaimed_bytes > 0 && <p>Freed {storageSize(status.cleanup.reclaimed_bytes)}.</p>}
-      <p>Cleanup removes disposable cache and exact duplicates. Rental records, analytics, prices and sync progress are retained. It uses no Marketapp or TON requests.</p>
+      {status && !status.inventory_complete && <p>Usage is still being checked and the estimate may increase.</p>}
     </div></details>
   </section>;
 }

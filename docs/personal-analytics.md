@@ -2,7 +2,7 @@
 
 Overview can show a saved snapshot of your own Marketapp rental analytics. This is separate from the gift-price recommendation samples and public NFT history. Importing analytics does not alter portfolio membership, asking prices, recommendations, or provider request counters.
 
-The main view shows the selected report's UTC dates, capture age, rent volume before fees and rental count including extensions. **More statistics** expands daily price, average duration, extensions, spending and the period breakdown table. Chart grouping and reporting-period selection use saved data; they do not start a refresh.
+The main view shows the selected report, capture age, rent volume before fees and rental count including extensions. Exact UTC dates and capture timestamps are in **More statistics**. **More statistics** expands daily price, average duration, extensions, spending and the period breakdown table. Chart grouping and reporting-period selection use saved data; they do not start a refresh.
 
 Telegram uses one **Report period** selector and a **Refresh** button above the totals. Both **Last 30 days** and **Last 1 year** are available before their first refresh; a period with no saved report shows an empty view rather than another period's figures. Your selected period stays selected when a new capture loads.
 
@@ -28,6 +28,8 @@ Marketapp's **Rent duration** histogram is recognised separately from the daily 
 
 ## Capture and update on desktop
 
+Per-gift **Top items** and **By collection** are captured alongside the summary and charts. Overview shows both tables for the selected report period. All time retains compact gift and collection report history and combines non-overlapping windows, with separate coverage from the daily chart. Collection figures come from Marketapp's table, not the ranked gift subset. See [gift and collection rental statistics](per-gift-rental-statistics.md).
+
 1. Open **Overview → Update analytics** and open your Marketapp analytics page in a normal browser where you are signed in to Marketapp.
 2. Select **Rent**, **all collections**, the desired reporting period, and **By Day**. Daily source values are needed to build weekly, monthly, and calendar-year charts. To capture annual statistics, choose Marketapp's **1 year** reporting period before capturing. The app accepts up to 366 consecutive daily dates; this is independent of the 90-day comparison-history collection limit.
 3. Use the capture bookmarklet supplied by the dashboard. Save it as a browser bookmark, with the copied `javascript:` code as its URL, and run that bookmark on the analytics page. The browser downloads `marketapp-rent-analytics-YYYY-MM-DD.json`. Browsers may remove `javascript:` when pasting into the address bar; saving a bookmark avoids that problem.
@@ -38,6 +40,30 @@ To refresh through browser import, capture a new snapshot from the signed-in Mar
 The **Report period** selector uses separately saved snapshots, captured in the browser or refreshed in Telegram. Save both **30 days** and **1 year** to switch between their source totals. Changing chart grouping only changes the breakdown within that saved period. It does not fetch a longer period. The newest capture for each period length is available, up to eight saved lengths; exact dates and capture time are shown. A 366-day browser capture remains a distinct saved report from the 365-day wallet refresh. Older snapshots remain stored. Shorter-period distinct items and duration averages are not calculated from an annual snapshot.
 
 The source must be a Marketapp rental analytics page for the dashboard's saved wallet. Address aliases are compared by canonical mainnet TON identity. Collection-filtered captures, aggregated charts, malformed files, inconsistent totals, and mismatched wallets are rejected. An unsuccessful import leaves existing analytics in place. Manual captures are user-supplied snapshots. Telegram refresh additionally verifies the website login and page wallet/period; neither workflow is an on-chain payment attestation or ownership proof.
+
+## All time · saved history
+
+The reporting selector includes **All time**. It combines loaded saved UTC dates for the configured wallet. A newer capture replaces the values for an overlapping date; overlapping 30-day and yearly reports are never added together. Equal capture timestamps use the snapshot fingerprint as a deterministic tie-break. Totals sum exact daily volume, new rentals and extensions rather than adding rounded report tiles.
+
+Telegram dashboard requests load at most 2,000 recent daily records, 400 recent gift-report rows and 600 recent collection-report rows, in at most nine indexed archive queries. A final extra row detects whether each limit excluded history. Rows with malformed or oversized report JSON consume the same budget; oversized JSON is not transferred. Private and invited accounts use the same bounds, with account and wallet filtering before pagination. The limits bound reads, not retention: no saved history is deleted.
+
+When a limit is reached, the affected totals, chart or list show **Limited history preview**. Their figures cover only the loaded evidence and can exclude older saved dates, gifts or collections. Item and collection coverage is also limited when the daily range is truncated. Refresh updates saved reports but does not remove the display limit. The 30-day and yearly source reports are unaffected. Desktop continues to derive its view from retained snapshots.
+
+The view shows its earliest and latest saved dates, missing dates between them, and dates whose only saved capture was still in progress. Missing days are not zero-filled. Dates before the earliest saved report are unknown, so this is not a claim of complete lifetime earnings. A later report can correct a previously partial day. Calendar groups remain partial when they contain missing or unfinished dates. Long missing intervals render as a single gap; very long histories automatically use a wider grouping to keep the chart responsive.
+
+**Refresh** while All time is selected requests Marketapp's supported one-year report and merges its daily values into saved history. It cannot retrieve dates older than Marketapp supplies. Automatic startup refresh keeps its existing 30-day/yearly selection and allowance; either supported report contributes to All time when saved. Desktop adds dates through the existing browser import workflow. No new collection API or TON requests are needed to calculate All time.
+
+Failed or paused automatic refreshes retain a visible explanation. If a report was saved but its dashboard reload failed, **Reload saved data** stays available until a full read succeeds. This also applies to older imports that add historical dates without changing the latest capture timestamp. Reading job status or receiving a provider freshness response alone does not confirm that those dates have loaded.
+
+Distinct rented items, average daily rate, average duration and spending are not reconstructed from daily volume/count totals. Their report-level values remain available in the original 30-day/yearly views. All-time volume is still gross before fees and royalties, not wallet proceeds.
+
+Telegram stores one compact record per wallet/date, including capture provenance, in separate private and account-scoped tables. The snapshot write and daily merge commit atomically. Old snapshot replacement or pruning first preserves its daily dates. Normal cleanup retains these records; account deletion removes that account's daily history. Apply the additive schema's four gift/collection capture indexes before publishing the bounded reader so recent-report queries seek directly to their next page without sorting the full archive.
+
+Deployments upgrading to this feature must apply the additive schema, run `install-analytics-daily-storage.mjs --action install`, then run `--action backfill --scope private` and `--scope public` with the same explicit `--app-id` and `--owner-id`. Continue each backfill using its returned `--after` cursor until `complete` is true. This installs accounting before daily writes and copies existing dates without deleting or changing the source snapshot values. Publish the runtime and UI after the backfill. If setup is interrupted, the same commands are resumable; never reset the live storage counters.
+
+The analytics, compact-storage and source-index setup commands share an additive accounting upgrade. Either analytics or compact setup can run first on an older installation: it installs missing accounting for all known new tables while those tables are empty. Existing accounted data and counters stay unchanged. An interrupted install blocks inserts into a partially configured table until all three accounting triggers exist; rerunning either setup completes it. Nonempty unaccounted tables or missing original accounting triggers stop setup for explicit repair, without recounting or deleting data.
+
+Imports reject capture timestamps later than the trusted import clock. Legacy snapshots with inconsistent dates or future timestamps do not enter the daily archive, and their source rows remain untouched. The separate legacy owner-to-public-account copier does not yet migrate durable daily history: it refuses before changing data if that history exists. Keeping the original owner in its private scope remains supported.
 
 ## Meaning of the figures
 

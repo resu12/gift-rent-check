@@ -225,6 +225,7 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
   }
   async function getDashboard(ctx, input = {}) {
     authorize(ctx);
+    if (Object.hasOwn(input, 'startup') && typeof input.startup !== 'boolean') throw new CloudRequestError('Invalid dashboard startup option.');
     await refreshClock();
     let window;
     try {window = resolveCloudWindow(input, now());} catch (error) {throw new CloudRequestError(error.message);}
@@ -240,12 +241,14 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
     // nor erase completion evidence already captured for them.
     const {state, revision: observedStateRevision} = await repository.read();
     const comparisonState = observedStateRevision === revision.state_revision ? state : {};
-    const key = JSON.stringify(['projection-v7-verified-rental-start', source, window.timeframe, window.date_from, window.date_to, backdrop]);
+    const key = JSON.stringify(['projection-v10-gift-rental-statistics', source, window.timeframe, window.date_from, window.date_to, backdrop]);
     const cacheEnabled = Boolean(repository.dashboardSnapshot && repository.saveDashboardSnapshot && Number.isSafeInteger(revision.records_revision));
     let snapshot = null;
     if (cacheEnabled) {
-      try {snapshot = await repository.dashboardSnapshot(key, revision.records_revision, revision.bucket);} catch { /* A derived cache can be rebuilt from source events. */ }
+      try {snapshot = await repository.dashboardSnapshot(key, revision.records_revision, revision.bucket, {startup: input.startup === true});} catch { /* A derived cache can be rebuilt from source events. */ }
       if (!object(snapshot?.dashboard) || typeof snapshot.wallet_configured !== 'boolean' || !(snapshot.analytics_wallet === null || typeof snapshot.analytics_wallet === 'string')) snapshot = null;
+      const generated = Date.parse(snapshot?.dashboard?.generated_at);
+      if (snapshot && (!Number.isFinite(generated) || generated > snapshotTime || generated < snapshotTime - 86400000)) snapshot = null;
     }
     if (!snapshot) {
       const until = revision.records_revision ?? revision.state_revision;
@@ -266,7 +269,24 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       if (cacheEnabled) {try {await repository.saveDashboardSnapshot(key, revision.records_revision, revision.bucket, snapshot);} catch { /* Cache quota/failure must not hide a valid projection. */ }}
     }
     await refreshClock();
-    const result = snapshot.dashboard;
+    const preview = input.startup === true && Math.floor(Date.parse(snapshot.dashboard.generated_at) / 60000) < revision.bucket;
+    const result = preview ? copy(snapshot.dashboard) : snapshot.dashboard;
+    if (preview) {
+      // Only the same immutable source revision is eligible. Time-windowed
+      // comparisons remain explicitly dated until the client's full read.
+      // Exact expiries must nevertheless stop showing an active rental now.
+      for (const gift of result.gifts) {
+        const expiry = typeof gift.rental_until === 'string' ? Date.parse(gift.rental_until)
+          : Number(gift.rental_until_unix_seconds) * 1000;
+        if (gift.state === 'rented' && Number.isFinite(expiry) && expiry > 0 && expiry <= now()) {
+          gift.state = 'expired_pending_return'; gift.ui_state = null; gift.display_state = 'Expired, pending return';
+        }
+      }
+      const portfolio = result.gifts.filter(gift => gift.is_portfolio);
+      result.summary.rented_count = portfolio.filter(gift => gift.state === 'rented').length;
+      result.summary.uncertain_count = portfolio.filter(gift => ['unknown', 'uncertain', 'expired_pending_return'].includes(gift.state)).length;
+      result.startup_preview = {generated_at: result.generated_at};
+    }
     // A concurrent page commit may be newer than the records shown in this
     // projection. Never certify those older figures with its newer proof.
     // The captured revision token already makes the next read load that commit.
@@ -275,13 +295,15 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
       // period end. The exact records-revision cache already includes every
       // nonempty page; a matched source checkpoint can date its later EOF.
       // Fixed historical windows keep their strict observation boundaries.
-      allowRelativeListingCompletionBeyondWindow: cacheEnabled && comparisonState === state,
+      allowRelativeListingCompletionBeyondWindow: !preview && cacheEnabled && comparisonState === state,
     });
     result.capabilities = {mode: 'serverless', network_enabled: true, startup_comparison_refresh: true, marketapp_configured: Boolean(secret.trim()), ton_configured: false, owned_price_refresh: ownedPriceRefresh, owned_price_refresh_single: ownedPriceRefresh, owned_status_refresh: ownedPriceRefresh, personal_gift_refresh: ownedPriceRefresh, marketapp_login_test: true, marketapp_analytics_refresh: true, wallet_configured: snapshot.wallet_configured, csrf_token: '', marketapp_limits: budget(state), supported_jobs: ['prices', 'rental_prices', 'collect']};
     const wallet = snapshot.analytics_wallet;
     result.personal_analytics = wallet && repository.latestPersonalAnalytics ? await repository.latestPersonalAnalytics(wallet) : null;
     result.personal_analytics_snapshots = wallet && repository.personalAnalyticsSnapshots ? await repository.personalAnalyticsSnapshots(wallet) : [];
-    result.update_token = revision.token;
+    result.personal_analytics_all_time = wallet && repository.personalAnalyticsAllTime ? await repository.personalAnalyticsAllTime(wallet) : null;
+    if (preview) delete result.update_token;
+    else result.update_token = revision.token;
     return result;
   }
   async function getJobs(ctx) {
@@ -614,6 +636,7 @@ export function createCloudEngine({repository, fetch: request, ownerTelegramId, 
     let snapshot;
     try {snapshot = normalizePersonalAnalytics(input.snapshot, wallet);} catch (error) {throw new CloudRequestError(error.message);}
     await refreshClock();
+    if (Date.parse(snapshot.captured_at) > now()) throw new CloudRequestError('The analytics capture time is in the future. Check your device clock and capture the report again.');
     await repository.importPersonalAnalytics(snapshot, input.snapshot, iso(now()));
     return {personal_analytics: snapshot};
   }

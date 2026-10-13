@@ -50,7 +50,7 @@ const selection: PricingSelection = { source: 'listings', timeframe: '24h' };
 const fixture = (revision: string) => ({ generated_at: revision } as Dashboard);
 const job = (state: Job['state'], progress: Job['progress'] = {}) => ({ id: 1, state, progress } as Job);
 
-function setup(options: { initialJobs?: Job[]; selection?: PricingSelection; revisions?: boolean } = {}) {
+function setup(options: { initialJobs?: Job[]; selection?: PricingSelection; revisions?: boolean; startup?: () => Promise<Dashboard> } = {}) {
   const clock = fakeClock();
   const reads: { selection: PricingSelection; signal: AbortSignal; result: ReturnType<typeof deferred<Dashboard>> }[] = [];
   const jobReads: AbortSignal[] = [];
@@ -62,6 +62,7 @@ function setup(options: { initialJobs?: Job[]; selection?: PricingSelection; rev
   const state = { dashboard: null as Dashboard | null, jobs: [] as Job[], loading: false, error: null as string | null };
   const published: Dashboard[] = [];
   const adapter: DashboardAdapter = {
+    ...(options.startup ? {getStartupDashboard: options.startup} : {}),
     ...(options.revisions ? { async getUpdateToken(signal?: AbortSignal) {
       tokenReads.push(signal!);
       if (tokenFailure) throw tokenFailure;
@@ -560,4 +561,127 @@ test('manual Retry and a final collection commit bypass a failed dashboard backo
     assert.equal(run.state.dashboard?.update_token, 'v2');
     run.poller.dispose();
   }
+});
+
+test('checked analytics reload rejects a failed dashboard read and can recover with unchanged capture dates', async () => {
+  const run = setup({ revisions: true });
+  const initial = run.poller.reload(); await flush();
+  run.reads[0].result.resolve(snapshot('unchanged-capture')); await initial;
+  const failed = assert.rejects(run.poller.reloadDashboardChecked(), /Could not reload saved dashboard data/);
+  await flush(); run.reads[1].result.reject(new Error('Read failed')); await failed;
+  assert.equal(run.state.dashboard?.generated_at, 'unchanged-capture');
+  const recovery = run.poller.reloadDashboardChecked(); await flush();
+  run.reads[2].result.resolve(snapshot('unchanged-capture')); await recovery;
+  assert.equal(run.state.error, null);
+  assert.equal(run.tokenReads.length, 0, 'confirmation forces a complete dashboard read');
+  run.poller.dispose();
+});
+
+test('checked analytics reload accepts saved data even when the independent jobs read fails', async () => {
+  const run = setup(); run.failJobs(new Error('Jobs unavailable'));
+  const checked = run.poller.reloadDashboardChecked(); await flush();
+  run.reads[0].result.resolve(fixture('saved-history')); await checked;
+  assert.equal(run.state.dashboard?.generated_at, 'saved-history');
+  assert.equal(run.state.error, 'Jobs unavailable', 'the separate jobs failure remains visible');
+  run.poller.dispose();
+});
+
+test('checked analytics reload rejects a failed trailing read despite the preceding response succeeding', async () => {
+  const run = setup({ revisions: true });
+  const inFlight = run.poller.reload(); await flush();
+  const failed = assert.rejects(run.poller.reloadDashboardChecked(), /Could not reload saved dashboard data/);
+  run.reads[0].result.resolve(snapshot('before-import')); await flush();
+  assert.equal(run.reads.length, 2);
+  run.reads[1].result.reject(new Error('Imported history read failed'));
+  await Promise.all([inFlight, failed]);
+  assert.equal(run.state.dashboard?.generated_at, 'before-import');
+  run.poller.dispose();
+});
+
+test('a queued unchanged-revision probe cannot acknowledge a failed checked full read', async () => {
+  const run = setup({ revisions: true });
+  const initial = run.poller.reload(); await flush();
+  const failed = assert.rejects(run.poller.reloadDashboardChecked(), /Could not reload saved dashboard data/);
+  run.reads[0].result.resolve(snapshot('v1')); await flush();
+  run.setJobs([job('running')]);
+  await run.clock.advance(15000); // Job activation queues a lightweight dashboard probe.
+  run.reads[1].result.reject(new Error('History unavailable')); await Promise.all([initial, failed]);
+  assert.equal(run.tokenReads.length, 1);
+  assert.equal(run.state.dashboard?.update_token, 'v1');
+  run.poller.dispose();
+});
+
+test('disposing rejects checked analytics reads immediately even if the adapter ignores abort', async () => {
+  const run = setup();
+  const interrupted = assert.rejects(run.poller.reloadDashboardChecked(), /dashboard changed/);
+  await flush(); run.poller.dispose(); await interrupted;
+  await assert.rejects(run.poller.reloadDashboardChecked(), /dashboard changed/);
+  run.reads[0].result.resolve(fixture('late-history')); await flush();
+  assert.equal(run.published.length, 0);
+  assert.equal(run.clock.timerCount, 0);
+});
+
+
+test('startup publishes saved data before rebuilding but only the full read consumes the update token', async () => {
+  const saved = {...fixture('saved'), startup_preview:{generated_at:'2026-10-13T00:00:00Z'},update_token:'v1'};
+  let startups=0;
+  const f=setup({revisions:true,startup:async()=>{startups++;return saved;}});
+  const initial=f.poller.reload(); await flush();
+  assert.equal(f.state.dashboard,saved); assert.equal(f.state.loading,true); assert.equal(f.reads.length,1);
+  f.reads[0].result.resolve({...fixture('current'),update_token:'v1'}); await initial;
+  assert.equal(f.state.dashboard!.generated_at,'current'); assert.equal(f.state.loading,false);
+  await f.clock.advance(15000); assert.equal(f.reads.length,1); assert.equal(startups,1);
+  f.poller.dispose();
+});
+
+test('a current startup response avoids the second full read', async () => {
+  const f=setup({startup:async()=>fixture('current')});
+  await f.poller.reload(); assert.equal(f.reads.length,0); assert.equal(f.state.dashboard!.generated_at,'current');
+  f.poller.dispose();
+});
+
+test('dashboard-only reloads force saved data without hiding independent jobs errors', async () => {
+  const f = setup({ revisions: true });
+  const initial = f.poller.reload(); await flush();
+  f.reads[0].result.resolve({ ...fixture('initial'), update_token: 'v1' }); await initial;
+  f.failJobs(new Error('Progress temporarily unavailable'));
+  const failedProgress = f.poller.reload(); await flush();
+  f.reads[1].result.resolve({ ...fixture('before commit'), update_token: 'v1' }); await failedProgress;
+  const jobsBefore = f.jobReads.length;
+  const committed = f.poller.reloadDashboard(); await flush();
+  assert.equal(f.reads.length, 3, 'a commit forces saved-data loading despite an unchanged revision');
+  f.reads[2].result.resolve({ ...fixture('after commit'), update_token: 'v1' }); await committed;
+  assert.equal(f.state.dashboard!.generated_at, 'after commit');
+  assert.equal(f.state.error, 'Progress temporarily unavailable');
+  assert.equal(f.jobReads.length, jobsBefore, 'job polling remains independent');
+  f.poller.dispose();
+});
+
+test('failed revalidation preserves the preview and cannot acknowledge a checked mutation reload', async () => {
+  const saved={...fixture('saved'),startup_preview:{generated_at:'2026-10-13T00:00:00Z'}};
+  const f=setup({startup:async()=>saved});
+  const checked=assert.rejects(f.poller.reloadDashboardChecked(),/Could not reload/); await flush();
+  f.reads[0].result.reject(new Error('Read unavailable')); await checked;
+  assert.equal(f.state.dashboard,saved); assert.equal(f.state.error,'Read unavailable');
+  const retry=f.poller.reloadDashboardChecked(); await flush();
+  f.reads[1].result.resolve(fixture('current')); await retry;
+  assert.equal(f.state.dashboard!.generated_at,'current'); assert.equal(f.state.error,null);
+  f.poller.dispose();
+});
+
+test('disposing during a startup read cannot publish that account or launch a follow-up read', async () => {
+  const pending=deferred<Dashboard>(),f=setup({startup:()=>pending.promise});
+  const initial=f.poller.reload(); await flush(); f.poller.dispose();
+  pending.resolve({...fixture('old-account'),startup_preview:{generated_at:'2026-10-13T00:00:00Z'}}); await initial;
+  assert.equal(f.state.dashboard,null); assert.equal(f.reads.length,0);
+});
+
+
+test('an unexpected preview from the normal endpoint never confirms a checked full read', async () => {
+  const saved={...fixture('saved'),startup_preview:{generated_at:'2026-10-13T00:00:00Z'}};
+  const f=setup({startup:async()=>saved});
+  const checked=assert.rejects(f.poller.reloadDashboardChecked(),/Could not reload/);await flush();
+  f.reads[0].result.resolve(saved);await checked;
+  assert.equal(f.state.dashboard,saved);assert.match(f.state.error!,/could not be confirmed/);
+  f.poller.dispose();
 });

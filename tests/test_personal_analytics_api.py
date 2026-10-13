@@ -52,12 +52,16 @@ def test_import_is_offline_wallet_scoped_and_survives_app_restart(app, tmp_path,
     with TestClient(app) as client:
         assert client.get("/api/dashboard").json()["personal_analytics"] is None
         assert client.get("/api/dashboard").json()["personal_analytics_snapshots"] == []
+        assert client.get("/api/dashboard").json()["personal_analytics_all_time"] is None
         response = post(client, app, capture())
         assert response.status_code == 200
         saved = client.get("/api/dashboard").json()
         assert saved["personal_analytics"]["summary"]["rent_volume"] == "0.3"
         assert saved["personal_analytics"]["summary"]["rentals"] == 3
         assert saved["personal_analytics_snapshots"] == [saved["personal_analytics"]]
+        assert saved["personal_analytics_all_time"]["summary"]["rent_volume"] == "0.3"
+        assert saved["personal_analytics_all_time"]["summary"]["rentals"] == 3
+        assert saved["personal_analytics_all_time"]["coverage"] == {"observed_days": 2, "missing_days": 0, "partial_days": 1}
         assert saved["summary"]["portfolio_count"] == 0
         assert saved["capabilities"]["marketapp_limits"]["used_24h"] == 0
         assert saved["capabilities"]["network_enabled"] is False
@@ -65,6 +69,7 @@ def test_import_is_offline_wallet_scoped_and_survives_app_restart(app, tmp_path,
                            start_worker=False, credential_store=SessionOnlyCredentialStore())
     with TestClient(restarted) as client:
         assert client.get("/api/dashboard").json()["personal_analytics"]["fingerprint"] == response.json()["fingerprint"]
+        assert client.get("/api/dashboard").json()["personal_analytics_all_time"] == saved["personal_analytics_all_time"]
 
 
 def test_mutation_requires_same_origin_and_csrf(app):
@@ -146,3 +151,50 @@ def test_dashboard_offers_latest_saved_month_and_annual_periods(app):
         assert saved["personal_analytics_snapshots"] == [month, year]
         assert saved["personal_analytics"] == month
         assert old_month not in saved["personal_analytics_snapshots"]
+
+
+def test_dashboard_retains_top_items_when_new_period_report_omits_them(app, monkeypatch):
+    def no_provider(*args, **kwargs):
+        pytest.fail("Top items must use saved personal analytics without provider requests")
+    monkeypatch.setattr("marketapp_rent.api.ApiClient.get", no_provider)
+    monkeypatch.setattr("marketapp_rent.ton_api.TonClient.get", no_provider)
+    item = "0:" + "33" * 32
+    first = json.loads(capture())
+    first["top_items"] = {"status": "available", "items": [{
+        "name": "Heart Locket #1767", "item_url": f"/nft/{preferred_address(item)}/",
+        "rentals": "5", "rented_days": "53", "volume": "19.15", "price_per_day": "0.36"}]}
+    with TestClient(app) as client:
+        assert post(client, app, json.dumps(first)).status_code == 200
+        saved = client.get("/api/dashboard").json()
+        assert saved["personal_analytics"]["top_items"]["items"][0]["volume"] == "19.15"
+        assert saved["personal_analytics_snapshots"][0]["top_items"]["items"][0]["item_key"] == item
+        assert saved["personal_analytics_all_time"]["top_items"]["items"][0]["rentals"] == 5
+        assert post(client, app, capture(captured_at="2026-10-08T19:00:00Z")).status_code == 200
+        updated = client.get("/api/dashboard").json()
+        assert updated["personal_analytics"]["top_items"]["status"] == "missing"
+        remembered = updated["personal_analytics_all_time"]["top_items"]["items"][0]
+        assert remembered["volume"] == "19.15" and remembered["rentals"] == 5
+        assert remembered["coverage"]["periods"][0]["captured_at"] == "2026-10-08T18:00:00.000Z"
+
+
+def test_dashboard_keeps_collection_analytics_separate_and_retains_missing_rows(app, monkeypatch):
+    def no_provider(*args, **kwargs):
+        pytest.fail("By collection must use saved personal analytics without provider requests")
+    monkeypatch.setattr("marketapp_rent.api.ApiClient.get", no_provider)
+    monkeypatch.setattr("marketapp_rent.ton_api.TonClient.get", no_provider)
+    first = json.loads(capture())
+    first["by_collection"] = {"status": "available", "items": [{
+        "name": "Heart Locket", "rentals": "17", "volume": "35.27", "price_per_day": "0.31"}]}
+    with TestClient(app) as client:
+        assert post(client, app, json.dumps(first)).status_code == 200
+        saved = client.get("/api/dashboard").json()
+        assert saved["personal_analytics"]["by_collection"]["items"][0]["volume"] == "35.27"
+        assert saved["personal_analytics_snapshots"][0]["by_collection"]["items"][0]["collection_key"] == "name:heart locket"
+        assert saved["personal_analytics_all_time"]["by_collection"]["items"][0]["rentals"] == 17
+        assert saved["personal_analytics"]["top_items"]["status"] == "missing"
+        assert post(client, app, capture(captured_at="2026-10-08T19:00:00Z")).status_code == 200
+        updated = client.get("/api/dashboard").json()
+        assert updated["personal_analytics"]["by_collection"]["status"] == "missing"
+        remembered = updated["personal_analytics_all_time"]["by_collection"]["items"][0]
+        assert remembered["volume"] == "35.27" and remembered["rentals"] == 17
+        assert remembered["coverage"]["periods"][0]["captured_at"] == "2026-10-08T18:00:00.000Z"

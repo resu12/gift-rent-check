@@ -4,6 +4,7 @@ import {createHash} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {createCloudRepository} from '../tgcloud/lib/cloud-repository.js';
 import {createGiftRefreshEngine} from '../tgcloud/lib/gift-refresh-engine.js';
+import {createOwnedPriceEngine} from '../tgcloud/lib/owned-price-engine.js';
 import {createMarketappWebsiteSession} from '../tgcloud/lib/marketapp-website-session.js';
 import {createMarketappRememberedSessionBox} from '../tgcloud/lib/marketapp-remembered-session-box.js';
 import {buildCloudDashboard} from '../tgcloud/lib/cloud-pricing.js';
@@ -104,6 +105,73 @@ test('without remembered login TON refreshes the saved portfolio without an acti
   const f=fixture(t,{remembered:false}),started=await begin(f);assert.equal(started.provider,'toncenter');assert.equal(started.fallback_reason,'no_login');
   const done=await complete(f,started);assert.equal(done.run.state,'complete');assert.equal(done.run.updated,2);assert.equal(done.run.status_updated,2);assert.equal(f.requests.length,0);assert.equal(f.tonRequests.length,3);
   const records=await f.records();assert.equal(records.filter(row=>row.kind==='portfolio').length,2);assert.equal(records.filter(row=>row.kind==='owned_status').length,2);
+});
+
+test('comparison observations arriving during scope reads do not block an unchanged gift portfolio',async t=>{
+  const f=fixture(t,{remembered:false}),visit=f.repository.visitOwnedScopeRecords;let reads=0;
+  f.repository.visitOwnedScopeRecords=async(...args)=>{
+    const result=await visit(...args);reads++;
+    const saved=await f.repository.read();await f.repository.append(saved.revision,{key:`comparison-during-scope:${reads}`,state:saved.state,job:null,
+      observed_at:new Date(f.now()).toISOString(),records:[{kind:'listing',record:{nft_address:nft(9000+reads),collection_address:collection,price_per_day:'0.1'}}]});
+    return result;
+  };
+  const started=await begin(f);assert.equal(started.run.state,'running');assert.equal(started.run.total,2);assert.equal(reads,2);
+  f.repository.visitOwnedScopeRecords=visit;
+  assert.equal((await complete(f,started)).run.state,'complete');
+});
+
+test('a collection conflict arriving during scope loading still rejects a changed gift portfolio',async t=>{
+  const f=fixture(t,{remembered:false}),visit=f.repository.visitOwnedScopeRecords;let reads=0;
+  f.repository.visitOwnedScopeRecords=async(...args)=>{
+    const result=await visit(...args);reads++;
+    const saved=await f.repository.read();await f.repository.append(saved.revision,{key:`comparison-changing-scope:${reads}`,state:saved.state,job:null,
+      observed_at:new Date(f.now()).toISOString(),records:[{kind:'listing',record:{nft_address:reads===1?nft(0):nft(9000),collection_address:nft(9000),price_per_day:'0.1'}}]});
+    return result;
+  };
+  await assert.rejects(begin(f),error=>error.code==='OWNED_PRICE_BUSY');
+  assert.equal((await f.repository.read()).state.gift_refresh,undefined);assert.equal(f.requests.length,0);assert.equal(f.tonRequests.length,0);
+});
+
+test('an expired old TON run does not block a newer website refresh with a different fallback subset',async t=>{
+  const f=fixture(t,{pages:[syntheticGiftsHead({count:2,more:false})]});await f.ready;
+  const oldEngine=createOwnedPriceEngine({repository:f.repository,ownerTelegramId:owner,clock:f.clock,fetch:async()=>assert.fail('Start must not fetch')});
+  const old=await oldEngine.start(ctx,{session_id:'old-expired-portfolio-session'});f.advance(180000);
+  const saved=await f.repository.read();Object.assign(saved.state.owned_prices.run,{stage:'after',reason:'provider_wait',lease:'old-expired-lease',lease_until:f.now()-1000});
+  await f.repository.append(saved.revision,{key:'expired-ton-provider-wait',state:saved.state,job:null,records:[],observed_at:new Date(f.now()).toISOString()});
+  const website=await next(f,await begin(f)),initialized=await next(f,website),state=(await f.repository.read()).state;
+  assert.equal(initialized.run.state,'running');assert.ok(state.gift_refresh.run.ton_run_id>old.run.id);assert.equal(state.owned_prices.run.total,1);
+  assert.equal(state.owned_prices.previous_run.reason,'duration_limit');assert.equal((await complete(f,initialized)).run.state,'complete');
+});
+
+test('standalone TON starts cannot take over the gap between website completion and fallback initialization',async t=>{
+  const f=fixture(t,{pages:[syntheticGiftsHead({count:2,more:false})]}),website=await next(f,await begin(f));
+  const other=createOwnedPriceEngine({repository:f.repository,ownerTelegramId:owner,clock:f.clock,fetch:async()=>assert.fail('Start must not fetch')});
+  await assert.rejects(other.start(ctx,{session_id:'competing-ton-portfolio-session'}),error=>error.code==='OWNED_PRICE_BUSY');
+  await assert.rejects(other.start(ctx,{session_id:'competing-ton-single-gift-session',nft_address:nft(1)}),error=>error.code==='OWNED_PRICE_BUSY');
+  assert.equal((await complete(f,website)).run.state,'complete');
+});
+
+test('fallback initialization reuses an unchanged scope validation only within its own step',async t=>{
+  const f=fixture(t,{pages:[syntheticGiftsHead({count:2,more:false})]}),website=await next(f,await begin(f));
+  const saved=await f.repository.read();await f.repository.append(saved.revision,{key:'comparison-before-fallback',state:saved.state,job:null,observed_at:new Date(f.now()).toISOString(),
+    records:[{kind:'listing',record:{nft_address:nft(9000),collection_address:collection}}]});
+  const visit=f.repository.visitOwnedScopeRecords;let reads=0;
+  f.repository.visitOwnedScopeRecords=async(...args)=>{reads++;return visit(...args);};
+  const initialized=await next(f,website);assert.equal(initialized.run.state,'running');
+  assert.equal(reads,2,'one wrapper validation plus the inner engine scope preparation; the final append reuses that same revision');
+  reads=0;await next(f,initialized);assert.equal(reads,1,'the next invocation validates the scope again');
+});
+
+test('scope memoization does not hide a collection conflict arriving during a website response',async t=>{
+  let f;f=fixture(t,{count:1,fetchEdit:async url=>{
+    const saved=await f.repository.read();await f.repository.append(saved.revision,{key:'conflict-during-website',state:saved.state,job:null,observed_at:new Date(f.now()).toISOString(),
+      records:[{kind:'listing',record:{nft_address:nft(0),collection_address:nft(9000)}}]});
+    return response(url,syntheticGiftsHead({count:1,more:false,cardOptions:{state:'for_rent'}}).body);
+  }});
+  const started=await begin(f),saved=await f.repository.read();await f.repository.append(saved.revision,{key:'comparison-before-website',state:saved.state,job:null,observed_at:new Date(f.now()).toISOString(),
+    records:[{kind:'listing',record:{nft_address:nft(9001),collection_address:collection}}]});
+  await assert.rejects(next(f,started),error=>error.code==='OWNED_PRICE_SCOPE_CHANGED');
+  assert.equal((await f.records()).filter(row=>row.kind==='personal_gift').length,0);assert.equal(f.requests.length,1);
 });
 
 test('rented personal gifts receive targeted TON expiry without replacing their personal asking prices',async t=>{

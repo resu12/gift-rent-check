@@ -3,7 +3,7 @@ import test from 'node:test';
 import { createHash } from 'node:crypto';
 import { ACTIVITY_FRESHNESS_MINUTES, ACTIVITY_GIFT_CHECK_MINUTES, activityFreshnessRows } from './activityFreshness.ts';
 import type { ActivityComparisonEvidence, ActivityComparisonSourceEvidence } from './activityFreshness.ts';
-import type { Dashboard, Gift, Job, PersonalRentalAnalytics } from './types.ts';
+import type { Dashboard, Gift, Job, PersonalRentalAnalytics, PersonalRentalAnalyticsAllTime } from './types.ts';
 import { canonicalMainnetAddress, friendlyMainnetAddress } from '../serverless/walletIdentity.ts';
 import type { OwnedPriceSnapshot } from './ownedPriceRefresh.ts';
 
@@ -116,7 +116,7 @@ test('the rows are independent and a loaded dashboard or successful unrelated jo
     pricing: { generated_at: when(), observed_to: when(), fresh_peer_count: 100 },
     runs: [{ finished_at: when(), state: 'complete' }],
   }), null, [job('collect'), job('refresh')]);
-  assert.deepEqual(rows.map(row => row.id), ['gifts', 'prices', 'listings', 'rentals', 'analytics-30']);
+  assert.deepEqual(rows.map(row => row.id), ['gifts', 'prices', 'listings', 'rentals', 'analytics-30', 'analytics-all_time']);
   assert.ok(rows.every(row => row.tone === 'older' && row.updatedAt === null));
   assert.equal(get(rows, 'listings').coverage, 'Coverage not confirmed');
 });
@@ -592,6 +592,29 @@ test('a failed startup without a run is visible beside nine-hour-old screenshot 
   }
 });
 
+test('a busy refresh keeps saved data freshness and never marks either gift row as failed', () => {
+  for (const age of [0, 9 * 3600000]) {
+    const data = dashboard([gift('1', { status_observed_at: when(age), status_checked_at: when(age),
+      price_observed_at: when(age), price_checked_at: when(age) })]);
+    const baseline = activityFreshnessRows(data, [], { now });
+    for (const snapshot of [{ phase: 'waiting' as const, run: null, canStop: false, canRefresh: true },
+      refresh({ state: 'running', checked: 1, updated: 1, total: 1 }, { phase: 'waiting', error: null })]) {
+      const rows = checkedRows(data, snapshot);
+      for (const id of ['gifts', 'prices']) {
+        assert.deepEqual(get(rows, id), get(baseline, id));
+        assert.equal(get(rows, id).updatedAt, when(age));
+        assert.equal(get(rows, id).refreshFailure, undefined);
+      }
+    }
+  }
+  const empty = dashboard([gift('1', { status_observed_at: null, status_checked_at: null,
+    price_per_day: null, price_observed_at: null, price_checked_at: null })]);
+  for (const row of checkedRows(empty, { phase: 'waiting', run: null, canStop: false, canRefresh: true })) {
+    if (!['gifts', 'prices'].includes(row.id)) continue;
+    assert.equal(row.state, 'missing'); assert.equal(row.updatedAt, null); assert.equal(row.refreshFailure, undefined);
+  }
+});
+
 test('a failed startup with no saved values cannot invent an earlier successful check or update', () => {
   const empty = dashboard([gift('1', { status_observed_at: null, status_checked_at: null,
     price_per_day: null, price_observed_at: null, price_checked_at: null })]);
@@ -649,5 +672,100 @@ test('a later successful scoped refresh clears the transient failure without cha
     assert.equal(get(successful, id).checkPresentation?.status, 'Checked');
     assert.equal(get(successful, id).updatedAt, when(9 * 3600000));
     assert.equal(get(successful, id).state, 'older', 'successful checks do not renew retained numeric/status evidence');
+  }
+});
+
+function savedHistory(changes: Partial<PersonalRentalAnalyticsAllTime> = {}): PersonalRentalAnalyticsAllTime {
+  const source = report();
+  return { ...source, source_url: null, report_kind: 'all_time', fingerprint: 'saved-history',
+    daily: source.daily.map(point => ({ ...point, captured_at: source.captured_at, partial: point.date === source.period_end })),
+    coverage: { observed_days: 30, missing_days: 0, partial_days: 1 }, ...changes };
+}
+
+test('Status exposes a failed automatic analytics refresh without changing the saved capture date', () => {
+  const data = dashboard([], { personal_analytics: report(30, 60000), personal_analytics_snapshots: [report(365, 60000)],
+    personal_analytics_all_time: savedHistory({ captured_at: when(60000) }) });
+  const rows = activityFreshnessRows(data, [], { now, analyticsStartup: {
+    phase: 'unavailable', periodDays: 30, busy: false, reason: 'refresh_failed', outcomeAt: when(),
+  } });
+  for (const id of ['analytics-30', 'analytics-all_time']) {
+    const item = get(rows, id);
+    assert.equal(item.status, 'Refresh failed'); assert.equal(item.tone, 'older'); assert.equal(item.updating, false);
+    assert.equal(item.updatedAt, when(60000)); assert.match(item.refreshNotice!.message, /Automatic refresh did not finish/);
+    assert.equal(item.refreshNotice?.tone, 'error');
+  }
+  assert.equal(get(rows, 'analytics-365').status, 'Fresh');
+  assert.equal(get(rows, 'analytics-365').refreshNotice, undefined);
+  const recovered = activityFreshnessRows({ ...data, personal_analytics: report() }, [], { now, analyticsStartup: {
+    phase: 'unavailable', periodDays: 30, busy: false, reason: 'refresh_failed', outcomeAt: when(30000),
+  } });
+  assert.equal(get(recovered, 'analytics-30').status, 'Fresh');
+  assert.equal(get(recovered, 'analytics-30').refreshNotice, undefined);
+});
+
+test('analytics pauses, connection requirements and storage failures have explicit Status messages', () => {
+  const data = dashboard([], { personal_analytics: report(30, 60000) });
+  for (const [snapshot, label, message] of [
+    [{ phase: 'limited', reason: 'request_limit' }, 'Paused', /paused/],
+    [{ phase: 'busy', reason: 'active_refresh' }, 'Waiting', /Another refresh/],
+    [{ phase: 'unavailable', reason: 'no_login' }, 'Login required', /Connect Marketapp/],
+    [{ phase: 'unavailable', reason: 'wallet_missing' }, 'Wallet required', /wallet/],
+    [{ phase: 'unavailable', reason: 'refresh_failed', storagePaused: true }, 'Refresh failed', /Clean up storage/],
+  ] as const) {
+    const rows = activityFreshnessRows(data, [], { now, analyticsStartup: { ...snapshot, periodDays: 30, busy: false, outcomeAt: when() } });
+    for (const id of ['analytics-30', 'analytics-all_time']) {
+      const item = get(rows, id);
+      assert.equal(item.status, label); assert.equal(item.tone, 'older'); assert.equal(item.updating, false);
+      assert.match(item.refreshNotice!.message, message);
+    }
+  }
+});
+
+test('All time appears with archive-only data, explicit gaps and a typed View selection', () => {
+  const full = savedHistory(), history = savedHistory({ daily: full.daily.filter((_, i) => i !== 10),
+    coverage: { observed_days: 29, missing_days: 1, partial_days: 1 } });
+  const item = get(activityFreshnessRows(dashboard([], { personal_analytics_all_time: history }), [], { now }), 'analytics-all_time');
+  assert.equal(item.analyticsSelection, 'all_time'); assert.equal(item.status, 'Gaps in history');
+  assert.equal(item.state, 'incomplete'); assert.equal(item.updatedAt, when());
+  assert.equal(item.coverage, '29 days saved · 1 day missing · 1 partial day');
+  assert.match(item.detail, /Missing days are unknown, not zero/);
+  assert.match(item.detail, /keeps earlier saved days/);
+  const malformed = savedHistory({ coverage: { observed_days: 31, missing_days: 0, partial_days: 1 } });
+  const invalid = get(activityFreshnessRows(dashboard([], { personal_analytics_all_time: malformed }), [], { now }), 'analytics-all_time');
+  assert.equal(invalid.status, 'Coverage unavailable'); assert.equal(invalid.updatedAt, null);
+  const foreign = get(activityFreshnessRows(dashboard([], { personal_analytics_all_time: savedHistory({ wallet: address('e') }) }), [], { now }), 'analytics-all_time');
+  assert.equal(foreign.coverage, 'No saved history'); assert.equal(foreign.updatedAt, null);
+});
+
+test('active analytics without a saved report appears in Status and updates All time too', () => {
+  const rows = activityFreshnessRows(dashboard(), [], { now, analyticsStartup: { phase: 'updating', periodDays: 365, busy: true } });
+  assert.equal(get(rows, 'analytics-365').updating, true); assert.equal(get(rows, 'analytics-365').analyticsSelection, 365);
+  assert.equal(get(rows, 'analytics-all_time').updating, true);
+  assert.equal(get(rows, 'analytics-30').updating, false);
+});
+
+test('All time reload failure clears only after a successful full read following that refresh', () => {
+  const data = dashboard([], { personal_analytics_all_time: savedHistory() });
+  const analyticsStartup = { phase: 'saved' as const, periodDays: 30 as const, busy: false,
+    capturedAt: when(60000), outcomeAt: when(30000), reloadFailed: true };
+  const before = get(activityFreshnessRows(data, [], { now, analyticsStartup, analyticsReloadedAt: when(60000) }), 'analytics-all_time');
+  assert.equal(before.status, 'Reload needed'); assert.match(before.refreshNotice!.message, /Reload saved data/);
+  const after = get(activityFreshnessRows(data, [], { now, analyticsStartup, analyticsReloadedAt: when() }), 'analytics-all_time');
+  assert.equal(after.status, 'Saved history'); assert.equal(after.refreshNotice, undefined);
+  assert.equal(after.updatedAt, before.updatedAt);
+});
+
+test('a newer successful analytics capture clears obsolete startup connection and pause notices', () => {
+  const older = dashboard([], { personal_analytics: report(30, 60000), personal_analytics_all_time: savedHistory({ captured_at: when(60000) }) });
+  const newer = dashboard([], { personal_analytics: report(), personal_analytics_all_time: savedHistory() });
+  for (const result of [{ phase: 'unavailable', reason: 'no_login' }, { phase: 'limited', reason: 'request_limit' },
+    { phase: 'busy', reason: 'active_refresh' }] as const) {
+    const options = { now, analyticsStartup: { ...result, periodDays: 30 as const, busy: false, outcomeAt: when(30000) } };
+    for (const id of ['analytics-30', 'analytics-all_time']) {
+      assert.ok(get(activityFreshnessRows(older, [], options), id).refreshNotice);
+      const after = get(activityFreshnessRows(newer, [], options), id);
+      assert.equal(after.refreshNotice, undefined);
+      assert.equal(after.status, id === 'analytics-30' ? 'Fresh' : 'Saved history');
+    }
   }
 });

@@ -52,7 +52,7 @@ export function observedPriceChanges(points) {
 // representations prevent page overlaps and repeated transaction hashes from
 // fabricating extra rentals. Price and duration failures affect metrics only.
 export function recordedGiftRentals(rows, nft, now, collection = null) {
-  const groups = new Map(), seen = new Set(), reasons = {}, rejected = [], accepted = [];
+  const groups = new Map(), seen = new Map(), reasons = {}, rejected = [], accepted = [];
   let observed = null;
   const reject = (reason, when = null, count = 1) => {reasons[reason] = (reasons[reason] || 0) + count; rejected.push({reason, when, count});};
   for (const row of rows) {
@@ -61,14 +61,19 @@ export function recordedGiftRentals(rows, nft, now, collection = null) {
     const item = row.item, representation = canonicalJSON(item);
     // Imported fingerprint fields are linkage evidence, not trusted content
     // identity. A shared fingerprint must never conceal a changed variant.
-    if (seen.has(representation)) continue;
-    seen.add(representation);
+    if (seen.has(representation)) {const capture = seen.get(representation); capture.observed_at = Math.max(capture.observed_at, instant(row.observed_at)); continue;}
+    const capture = {observed_at: instant(row.observed_at)};
+    seen.set(representation, capture);
     const dated = Number.isSafeInteger(item?.ts) && item.ts > 0 && item.ts <= 253402300799 ? item.ts * 1000 : null;
     if (!object(item) || addressKey(item.address) !== nft || dated === null || dated > now || !addressKey(item.collection_address) || !addressKey(item.src) || !addressKey(item.dst) || typeof item.name !== 'string' || typeof item.price !== 'string' || typeof item.price_nano !== 'string' || !['GRAM', 'TON', 'USDT'].includes(item.currency) || (Object.hasOwn(item, 'duration') && !Number.isSafeInteger(item.duration)) || (Object.hasOwn(item, 'is_extend') && typeof item.is_extend !== 'boolean') || (Object.hasOwn(item, 'tx_hash') && item.tx_hash !== null && typeof item.tx_hash !== 'string')) {reject('malformed_history', dated); continue;}
     const normalized = {...item, address: nft, collection_address: addressKey(item.collection_address), src: addressKey(item.src), dst: addressKey(item.dst)};
     const key = canonicalJSON([nft, item.ts, normalized.src, normalized.dst]);
     if (!groups.has(key)) groups.set(key, new Map());
-    groups.get(key).set(canonicalJSON(normalized), {item, when: item.ts * 1000});
+    const variants = groups.get(key), signature = canonicalJSON(normalized), previous = variants.get(signature);
+    if (previous) {
+      previous.capture.observed_at = Math.max(previous.capture.observed_at, capture.observed_at);
+      seen.set(representation, previous.capture);
+    } else variants.set(signature, {item, when: item.ts * 1000, capture});
   }
   for (const variants of groups.values()) {
     if (variants.size !== 1) {reject('ambiguous_history_variants', variants.values().next().value.when, variants.size); continue;}
@@ -88,16 +93,57 @@ export function recordedGiftRentals(rows, nft, now, collection = null) {
     else if (amount) daily = multiply(amount, 86400n, BigInt(item.duration));
     if (amount && daily) accepted.push({...row, amount, daily});
   }
-  return {rows: accepted, rejected, observed_at: observed === null ? null : iso(observed), excluded_counts: reasons};
+  const acceptedObserved = accepted.reduce((latest, row) => Math.max(latest ?? -Infinity, row.capture.observed_at), null);
+  return {rows: accepted, rejected, observed_at: observed === null ? null : iso(observed), accepted_observed_at: acceptedObserved === null ? null : iso(acceptedObserved), excluded_counts: reasons};
+}
+
+// One validated rental sample supplies both independent dashboard projections.
+// TON evidence supplements start counts only; it never invents payment data.
+export function prepareGiftRentalFacts({gift, history = [], verifiedRentalStarts = [], verifiedRentalObservedAt = null, now}) {
+  const rental = recordedGiftRentals(history, addressKey(gift.nft_address), now, addressKey(gift.collection_address));
+  const recordedStarts = new Set(rental.rows.map(row => row.when));
+  const verifiedStarts = [...new Set(verifiedRentalStarts.map(instant).filter(when => when !== null && when > 0 && when <= now))];
+  rental.verified_starts_without_history = verifiedStarts.filter(when => !recordedStarts.has(when));
+  const verifiedObserved = instant(verifiedRentalObservedAt);
+  rental.verified_observed_at = verifiedStarts.length && verifiedObserved !== null && verifiedObserved <= now ? iso(verifiedObserved) : null;
+  return rental;
+}
+
+export function buildGiftRentalStatistics({gift, history = [], verifiedRentalStarts = [], verifiedRentalObservedAt = null, rentalFacts = null, now}) {
+  const result = {version: 1, semantics_version: 'saved-gift-rental-statistics-v1', coverage: 'not_applicable', observed_at: null,
+    first_rental_at: null, last_rental_at: null, observed_rentals: null, recorded_rentals: null, verified_rentals_without_history: null,
+    recorded_volume: null, average_daily_rate: null, rental_days: null, excluded_counts: {}};
+  if (!gift.is_portfolio || gift.collection_conflict || !addressKey(gift.nft_address) || !addressKey(gift.collection_address)) return result;
+  const rental = rentalFacts ?? prepareGiftRentalFacts({gift, history, verifiedRentalStarts, verifiedRentalObservedAt, now});
+  const starts = [...new Set([...rental.rows.map(row => row.when), ...rental.verified_starts_without_history])].sort((a, b) => a - b);
+  result.coverage = starts.length ? 'partial' : 'no_history';
+  result.excluded_counts = {...rental.excluded_counts};
+  if (!starts.length) return result;
+  const observed = [rental.accepted_observed_at, rental.verified_observed_at].map(instant).filter(value => value !== null);
+  result.observed_at = observed.length ? iso(Math.max(...observed)) : null;
+  result.first_rental_at = iso(starts[0]); result.last_rental_at = iso(starts.at(-1));
+  result.observed_rentals = starts.length;
+  result.verified_rentals_without_history = rental.verified_starts_without_history.length;
+  if (rental.rows.length) {
+    const total = rental.rows.reduce((sum, row) => plus(sum, row.amount), rational(0n));
+    const seconds = rental.rows.reduce((duration, row) => duration + BigInt(row.item.duration), 0n);
+    result.recorded_rentals = rental.rows.length;
+    result.recorded_volume = exactMonetaryText(total);
+    result.rental_days = decimalText(rational(seconds, 86400n));
+    result.average_daily_rate = decimalText(multiply(total, 86400n, seconds));
+  }
+  return result;
 }
 
 function periodStats(history, from, to) {
-  const result = {window_from: instantText(from), window_to: instantText(to), recorded_rentals: null, recorded_volume: null, average_daily_rate: null, rental_days: null, excluded_counts: {}, coverage: 'observed_sample'};
+  const result = {window_from: instantText(from), window_to: instantText(to), recorded_rentals: null, observed_rentals: null, verified_rentals_without_history: null, recorded_volume: null, average_daily_rate: null, rental_days: null, excluded_counts: {}, coverage: 'observed_sample'};
   if (to <= from) return result;
   const inside = when => when !== null && BigInt(when) * 1000n >= from && BigInt(when) * 1000n < to;
   const rows = history.rows.filter(row => inside(row.when));
   for (const row of history.rejected) if (inside(row.when)) result.excluded_counts[row.reason] = (result.excluded_counts[row.reason] || 0) + row.count;
   result.recorded_rentals = rows.length;
+  result.verified_rentals_without_history=history.verified_starts_without_history.filter(inside).length;
+  result.observed_rentals=new Set(rows.map(row=>row.when)).size+result.verified_rentals_without_history;
   const total = rows.reduce((sum, row) => plus(sum, row.amount), rational(0n)), seconds = rows.reduce((duration, row) => duration + BigInt(row.item.duration), 0n);
   result.recorded_volume = exactMonetaryText(total);
   result.rental_days = decimalText(rational(seconds, 86400n));
@@ -129,10 +175,10 @@ function comparisons(history, series, index, now) {
   });
 }
 
-export function buildGiftPriceTracking({gift, wallet, listings = [], ownedPrices = [], personalGifts = [], history = [], now}) {
+export function buildGiftPriceTracking({gift, wallet, listings = [], ownedPrices = [], personalGifts = [], history = [], verifiedRentalStarts = [], rentalFacts = null, now}) {
   const nft = addressKey(gift.nft_address), warnings = [
-    'Changes were first observed between saved checks; the actual change time is unknown. Marketapp account, TON configured and Marketapp listing prices are never combined.',
-    'Performance uses only recorded, unambiguous GRAM rental starts. It is not wallet proceeds, net income, occupancy, or proof that a price change caused a result.',
+    'Changes were first observed between saved checks; the actual change time is unknown. Each source has its own timeline; Marketapp account, TON configured and Marketapp listing prices are never compared across sources.',
+    'Rental counts combine saved history and independently verified TON starts, deduplicated by gift and start time. Volume and rates use only unambiguous GRAM payment history; verified starts alone do not establish payment amounts.',
     'Before/after periods have equal elapsed lengths and exclude the unchecked price-change gap. Ready describes elapsed time, never complete history coverage.',
     'Recorded volume uses whole reported rental payments and rental days sum full durations for starts in the period; neither is apportioned to the period.',
   ];
@@ -161,21 +207,41 @@ export function buildGiftPriceTracking({gift, wallet, listings = [], ownedPrices
       observed_at:point.observed_at,scope:owner,
       price:point.row.currency==='GRAM'&&typeof point.row.price_per_day==='string'&&/^(?:0|[1-9]\d{0,35})(?:\.\d{1,9})?$/.test(point.row.price_per_day)?decimal(point.row.price_per_day):null,
     }));
-  const tonSeries = observedPriceChanges(ton);
-  const accountSeries=observedPriceChanges(account);
-  const source = accountSeries.observation_count?'Marketapp account':tonSeries.observation_count ? 'TON contract' : 'Marketapp listing', series = accountSeries.observation_count?accountSeries:tonSeries.observation_count ? tonSeries : observedPriceChanges(market);
-  if (!series.observation_count) return result;
-  if (series.barrier_count) warnings.push('Invalid, conflicting or changed owner/contract evidence interrupts the timeline; the next valid observation starts a new baseline.');
-  if(source==='Marketapp account')warnings.push('Account asking prices are authenticated personal-page observations; they do not establish on-chain ownership or completed price changes.');
-  if (source==='Marketapp listing'&&ton.length && !tonSeries.observation_count) warnings.push('No verified TON configured-price observation was eligible; this timeline uses saved Marketapp listings.');
-  const rental = recordedGiftRentals(history, nft, now, collection);
+  const timelines = [
+    {source: 'Marketapp account', series: observedPriceChanges(account)},
+    {source: 'TON contract', series: observedPriceChanges(ton)},
+    {source: 'Marketapp listing', series: observedPriceChanges(market)},
+  ];
+  const preferred = timelines.find(timeline => timeline.series.observation_count);
+  if (!preferred) return result;
+  const {source, series} = preferred;
+  // A newly connected source may have only a baseline. Keep prior changes
+  // from every independent timeline instead of replacing them with an empty
+  // preferred timeline. At most five candidates per source can reach the
+  // global latest five; keep original indexes for their performance bounds.
+  const candidates = timelines.flatMap((timeline, priority) => timeline.series.changes.slice(-5).map((change, localIndex) => ({
+    ...timeline, priority, change,
+    index: timeline.series.changes.length - Math.min(5, timeline.series.changes.length) + localIndex,
+    order: instantOrder(change.current.observed_at),
+  })));
+  candidates.sort((a, b) => a.order > b.order ? -1 : a.order < b.order ? 1 : a.priority - b.priority);
+  const selected = candidates.slice(0, 5), displayedSources = new Set([source, ...selected.map(value => value.source)]);
+  for (const timeline of timelines) if (displayedSources.has(timeline.source) && timeline.series.barrier_count)
+    warnings.push(`${timeline.source}: invalid, conflicting or changed owner/contract evidence interrupts this timeline; the next valid observation starts a new baseline.`);
+  if(displayedSources.has('Marketapp account'))warnings.push('Account asking prices are authenticated personal-page observations; they do not establish on-chain ownership or completed price changes.');
+  if (displayedSources.has('Marketapp listing')&&ton.length && !timelines[1].series.observation_count) warnings.push('No verified TON configured-price observation was eligible; listing changes use saved Marketapp listings.');
+  const rental = rentalFacts ?? prepareGiftRentalFacts({gift, history, verifiedRentalStarts, now});
+  // These dates come from the dashboard's full NFT/owner/holder/hash/stability
+  // validator, never from seeded display fields or a website Rented label.
+  // An extension preserves its original start. Later history for that exact
+  // start replaces the supplemental count without estimating any payment.
   if (rental.observed_at === null) warnings.push('No saved rental history exists for this gift; zero recorded starts does not establish that it was never rented.');
   if (rental.rejected.some(row => row.when === null)) warnings.push('Some malformed history has no valid event date and cannot be assigned to a comparison period.');
-  Object.assign(result, {source, observation_count: series.observation_count, change_count: series.changes.length, last_observed_at: instantText(instantOrder(series.latest.observed_at)), baseline_price_per_day: decimalText(series.baseline.price), baseline_observed_at: instantText(instantOrder(series.baseline.observed_at)), coverage: 'observed_sample'});
-  result.changes = series.changes.slice(-5).map((change, localIndex) => {
+  Object.assign(result, {source, observation_count: series.observation_count, change_count: timelines.reduce((total, timeline) => total + timeline.series.changes.length, 0), last_observed_at: instantText(instantOrder(series.latest.observed_at)), baseline_price_per_day: decimalText(series.baseline.price), baseline_observed_at: instantText(instantOrder(series.baseline.observed_at)), coverage: 'observed_sample'});
+  result.changes = selected.map(({source, series, change, index}) => {
     const observed_at = instantText(instantOrder(change.current.observed_at)), previous_observed_at = instantText(instantOrder(change.previous.observed_at));
     const delta = plus(change.current.price, multiply(change.previous.price, -1n));
-    return {id: canonicalJSON([nft, source, observed_at]), observed_at, previous_observed_at, from_price_per_day: decimalText(change.previous.price), to_price_per_day: decimalText(change.current.price), delta_per_day: decimalText(delta), percent_change: change.previous.price.n === 0n ? null : decimalText(multiply(delta, 100n * change.previous.price.d, change.previous.price.n)), comparisons: comparisons(rental, series, series.changes.length - Math.min(5, series.changes.length) + localIndex, instantOrder(now))};
-  }).reverse();
+    return {id: canonicalJSON([nft, source, observed_at]), source, source_last_observed_at: instantText(instantOrder(series.latest.observed_at)), observed_at, previous_observed_at, from_price_per_day: decimalText(change.previous.price), to_price_per_day: decimalText(change.current.price), delta_per_day: decimalText(delta), percent_change: change.previous.price.n === 0n ? null : decimalText(multiply(delta, 100n * change.previous.price.d, change.previous.price.n)), comparisons: comparisons(rental, series, index, instantOrder(now))};
+  });
   return result;
 }

@@ -8,8 +8,10 @@ import type { CloudRetryMetadata } from './cloudTransport.ts';
 const failures = {
   rate_limited: { code: 'MA-LIMIT', message: 'Wait at least one minute between refreshes; at most five are allowed per hour.' },
   expired: { code: 'MA-EXPIRED', message: 'This wallet approval expired or was already used. Start a new refresh.' },
-  access_denied: { code: 'MA-ACCESS', message: 'Open this private Mini App with the approved Telegram account.' },
-  wallet_required: { code: 'MA-ADDRESS', message: 'Save a valid TON mainnet wallet address before refreshing analytics.' },
+  access_denied: { code: 'MA-ACCESS', message: 'Open this Mini App with your approved Telegram account.' },
+  wallet_required: { code: 'MA-ADDRESS', message: 'Connect and verify your TON mainnet wallet before refreshing analytics.' },
+  account_changed: { code: 'MA-ACCOUNT-CHANGED', message: 'Your account or wallet changed. Reopen Marketapp connection before continuing.' },
+  not_enabled: { code: 'MA-UNAVAILABLE', message: 'Personal Marketapp login is not enabled for this account yet.' },
   invalid_input: { code: 'MA-REQUEST', message: 'The refresh request could not be accepted. Start a new refresh.' },
   auth_rejected: { code: 'MA-LOGIN', message: 'Marketapp did not accept the wallet login. Start a new refresh and check the selected account.' },
   page_changed: { code: 'MA-PAGE', message: 'Marketapp’s analytics page could not be read safely. You can still import a browser snapshot.' },
@@ -44,6 +46,9 @@ const refreshFailureCodes: Record<string, MarketappAnalyticsRefreshFailure> = {
     MARKETAPP_REFRESH_PAGE_CHANGED: 'page_changed', MARKETAPP_REFRESH_FAILED: 'update_failed',
     MARKETAPP_REFRESH_RECONNECT_REQUIRED: 'reconnect_required',
     STORAGE_CAPACITY_PAUSED: 'storage_capacity', STORAGE_FULL: 'storage_capacity',
+    PUBLIC_ACCESS_DENIED: 'access_denied', PUBLIC_ACCOUNT_DELETED: 'account_changed', PUBLIC_ACCOUNT_CHANGED: 'account_changed',
+    PUBLIC_WALLET_CHANGED: 'account_changed', PUBLIC_WALLET_REQUIRED: 'wallet_required',
+    PUBLIC_ANALYTICS_DISABLED: 'not_enabled', PUBLIC_STORAGE_LIMIT: 'storage_capacity',
 };
 function transportFailure(error: unknown, stage: 'start' | 'update'): MarketappAnalyticsRefreshFailure {
   const code = error && typeof error === 'object' && 'code' in error ? error.code : null;

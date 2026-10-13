@@ -1,6 +1,8 @@
 // One atomic ledger per provider. It survives key changes and account deletion.
 import {hex, hmacSha256, keyBytes} from './public-credential-box.js';
 import {utf8Bytes} from './personal-analytics.js';
+import {marketappAnalyticsUrl} from './marketapp-analytics-refresh.js';
+import {marketappGiftsUrl} from './marketapp-gifts-page.js';
 const DAY = 86400000;
 const MAX_TIME = 8640000000000000;
 const MAX_ATTEMPTS = 5000;
@@ -127,6 +129,47 @@ export function createPublicProviderFetch({fetch, budget, repository, userId, cr
     await repository.ensureAccount();
     const response=await fetch(url,{...options,redirect:'error'});
     await budget.throttle(provider,response);
+    return response;
+  };
+}
+
+// Website traffic is reserved by the durable Marketapp website gate before
+// reaching this adapter. Never reuse an API token or accept a browser URL.
+export function createPublicWebsiteFetch({fetch,repository,userId,wallet,accountGeneration,walletRevision}) {
+  const home='https://marketapp.org/', auth=home+'auth/checkTonProofAuth/';
+  const reports=[marketappAnalyticsUrl(wallet,30),marketappAnalyticsUrl(wallet,365)], gifts=marketappGiftsUrl();
+  async function current() {
+    await repository.ensureAccount();
+    const account=await repository.publicAccount();
+    if(!account||String(account.user_id)!==String(userId)||account.status!=='active'||account.generation!==accountGeneration
+        ||account.wallet!==wallet||!account.wallet_verified_at||account.wallet_revision!==walletRevision) {
+      const error=new Error('Website account changed');error.code='PUBLIC_WALLET_CHANGED';throw error;
+    }
+  }
+  return async(url,options={})=>{
+    let giftRoute=url===gifts;
+    if(typeof url==='string'&&url.startsWith(gifts+'&cursor=')) {
+      try {giftRoute=marketappGiftsUrl(decodeURIComponent(url.slice(gifts.length+8)))===url;} catch {giftRoute=false;}
+    }
+    const get=options.method==='GET'&&(url===home||reports.includes(url)||giftRoute), post=options.method==='POST'&&url===auth;
+    if(!get&&!post||get&&options.body!==undefined||post&&(typeof options.body!=='string'||utf8Bytes(options.body).length>65536))
+      throw new Error('Website route is not allowed');
+    const source=options.headers??{},entries=typeof source.entries==='function'?Array.from(source.entries()):Array.isArray(source)?source:Object.entries(source);
+    const headers={};
+    for(const entry of entries) {
+      if(!Array.isArray(entry)||entry.length!==2||typeof entry[0]!=='string'||typeof entry[1]!=='string')throw new Error('Website headers are not allowed');
+      const name=entry[0].toLowerCase(),value=entry[1];
+      if(!['accept','content-type','cookie','origin','referer','x-requested-with'].includes(name)||Object.hasOwn(headers,name)||/[\r\n]/.test(value))throw new Error('Website headers are not allowed');
+      headers[name]=value;
+    }
+    if(url===home&&headers.cookie!==undefined||url!==home&&!/^session=[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{1,4096}$/.test(headers.cookie??'')
+        ||headers.origin!==undefined&&headers.origin!=='https://marketapp.org'||headers.referer!==undefined&&headers.referer!==home
+        ||headers['x-requested-with']!==undefined&&(!giftRoute||headers['x-requested-with']!=='XMLHttpRequest')
+        ||post&&(headers['content-type']!=='application/json'||headers.origin!=='https://marketapp.org'||headers.referer!==home))
+      throw new Error('Website credentials cannot cross origins');
+    await current();
+    const response=await fetch(url,{...options,headers,redirect:'manual'});
+    await current();
     return response;
   };
 }

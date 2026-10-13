@@ -26,6 +26,7 @@ def test_export_preserves_membership_and_filters_comparison_history(store, tmp_p
     assert gifts[0]["label"] == "Keep my label"
     assert gifts[0]["membership_sources"] == ["user_declared"]
     assert "pricing" not in gifts[0] and "rental_history" not in gifts[0]
+    assert "rental_statistics" not in gifts[0]
     events = [json.loads(r["record"]["source_json"]) for r in records if r["kind"] == "history"]
     assert {r["address"] for r in events} == {addr(10), addr(11)}
     assert len([r for r in records if r["kind"] == "listing"]) == 2

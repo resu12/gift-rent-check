@@ -22,6 +22,26 @@ export const personalRentalAnalytics = table('personal_rental_analytics', {
   rawSnapshot: text('raw_snapshot').notNull(),
   normalizedJson: text('normalized_json').notNull(),
 }, t => ({walletIndex: index('personal_rental_analytics_wallet_idx').on(t.wallet, t.capturedAt)}));
+// One newest observation per UTC date survives rolling snapshot retention.
+export const personalAnalyticsDaily = table('personal_analytics_daily', {
+  rowId: text('row_id').primaryKey(), wallet: text('wallet').notNull(), date: text('date').notNull(),
+  capturedAt: text('captured_at').notNull(), fingerprint: text('fingerprint').notNull(),
+  rentVolume: text('rent_volume').notNull(), newRentals: integer('new_rentals').notNull(), extensions: integer('extensions').notNull(),
+}, t => ({walletIndex: index('personal_analytics_daily_wallet_idx').on(t.wallet, t.date)}));
+// Compact per-gift report intervals survive rolling report cleanup. Missing
+// gifts in a later Top items table never erase an earlier observation.
+export const personalAnalyticsItemReports = table('personal_analytics_item_reports', {
+  rowId: text('row_id').primaryKey(), wallet: text('wallet').notNull(), itemKey: text('item_key').notNull(),
+  periodStart: text('period_start').notNull(), periodEnd: text('period_end').notNull(),
+  capturedAt: text('captured_at').notNull(), fingerprint: text('fingerprint').notNull(), itemJson: text('item_json').notNull(),
+}, t => ({walletIndex: index('personal_analytics_items_wallet_idx').on(t.wallet, t.rowId),
+  captureIndex: index('personal_analytics_items_capture_idx').on(t.wallet, t.capturedAt, t.rowId)}));
+export const personalAnalyticsCollectionReports = table('personal_analytics_collection_reports', {
+  rowId: text('row_id').primaryKey(), wallet: text('wallet').notNull(), collectionKey: text('collection_key').notNull(),
+  periodStart: text('period_start').notNull(), periodEnd: text('period_end').notNull(),
+  capturedAt: text('captured_at').notNull(), fingerprint: text('fingerprint').notNull(), itemJson: text('item_json').notNull(),
+}, t => ({walletIndex: index('personal_analytics_collections_wallet_idx').on(t.wallet, t.rowId),
+  captureIndex: index('personal_analytics_collections_capture_idx').on(t.wallet, t.capturedAt, t.rowId)}));
 // Short-lived compatibility/refresh attempts contain no cookie, account proof or
 // signature. They remain independent of collection and personal snapshots.
 export const marketappLoginAttempts = table('marketapp_login_attempts', {
@@ -125,6 +145,23 @@ export const publicPersonalRentalAnalytics = table('public_personal_rental_analy
   wallet: text('wallet').notNull(), capturedAt: text('captured_at').notNull(), importedAt: text('imported_at').notNull(),
   rawSnapshot: text('raw_snapshot').notNull(), normalizedJson: text('normalized_json').notNull(),
 }, t => ({walletIndex: index('public_analytics_wallet_idx').on(t.userId, t.wallet, t.capturedAt)}));
+export const publicPersonalAnalyticsDaily = table('public_personal_analytics_daily', {
+  rowId: text('row_id').primaryKey(), userId: text('user_id').notNull(), wallet: text('wallet').notNull(), date: text('date').notNull(),
+  capturedAt: text('captured_at').notNull(), fingerprint: text('fingerprint').notNull(),
+  rentVolume: text('rent_volume').notNull(), newRentals: integer('new_rentals').notNull(), extensions: integer('extensions').notNull(),
+}, t => ({walletIndex: index('public_analytics_daily_wallet_idx').on(t.userId, t.wallet, t.date)}));
+export const publicPersonalAnalyticsItemReports = table('public_personal_analytics_item_reports', {
+  rowId: text('row_id').primaryKey(), userId: text('user_id').notNull(), wallet: text('wallet').notNull(), itemKey: text('item_key').notNull(),
+  periodStart: text('period_start').notNull(), periodEnd: text('period_end').notNull(),
+  capturedAt: text('captured_at').notNull(), fingerprint: text('fingerprint').notNull(), itemJson: text('item_json').notNull(),
+}, t => ({walletIndex: index('public_analytics_items_wallet_idx').on(t.userId, t.wallet, t.rowId),
+  captureIndex: index('public_analytics_items_capture_idx').on(t.userId, t.wallet, t.capturedAt, t.rowId)}));
+export const publicPersonalAnalyticsCollectionReports = table('public_personal_analytics_collection_reports', {
+  rowId: text('row_id').primaryKey(), userId: text('user_id').notNull(), wallet: text('wallet').notNull(), collectionKey: text('collection_key').notNull(),
+  periodStart: text('period_start').notNull(), periodEnd: text('period_end').notNull(),
+  capturedAt: text('captured_at').notNull(), fingerprint: text('fingerprint').notNull(), itemJson: text('item_json').notNull(),
+}, t => ({walletIndex: index('public_analytics_collections_wallet_idx').on(t.userId, t.wallet, t.rowId),
+  captureIndex: index('public_analytics_collections_capture_idx').on(t.userId, t.wallet, t.capturedAt, t.rowId)}));
 export const publicMarketappLoginAttempts = table('public_marketapp_login_attempts', {
   rowId: text('row_id').primaryKey(), userId: text('user_id').notNull(), attemptId: text('attempt_id').notNull(),
   ownerId: text('owner_id').notNull(), wallet: text('wallet').notNull(), createdAt: integer('created_at').notNull(),
@@ -209,6 +246,16 @@ export const serviceRecordOccurrences = table('service_record_occurrences', {
 }, t => ({sequenceIndex: index('service_record_occurrences_sequence_idx').on(t.scope, t.sequence, t.ordinal),
   payloadIndex: index('service_record_occurrences_payload_idx').on(t.payloadId),
   eventIndex: index('service_record_occurrences_event_idx').on(t.scope, t.eventKey)}));
+// Disposable event selectors, never a copy of financial or portfolio data.
+// Administrative installation adds seek indexes only after bounded backfill.
+export const serviceRecordInlineEvents = table('service_record_inline_events', {
+  rowId: text('row_id').primaryKey(), scope: text('scope').notNull(), generation: integer('generation').notNull(),
+  sequence: integer('sequence').notNull(), hasSeed: integer('has_seed').notNull(),
+});
 export const giftRefreshRuns = table('gift_refresh_runs', {
   runId: integer('run_id').primaryKey(), summaryJson: text('summary_json').notNull(), sourceSequence: integer('source_sequence').notNull(),
 });
+export const publicGiftRefreshRuns = table('public_gift_refresh_runs', {
+  rowId: text('row_id').primaryKey(), userId: text('user_id').notNull(), runId: integer('run_id').notNull(),
+  summaryJson: text('summary_json').notNull(), sourceSequence: integer('source_sequence').notNull(),
+}, t => ({runIndex: index('public_gift_runs_idx').on(t.userId, t.runId)}));

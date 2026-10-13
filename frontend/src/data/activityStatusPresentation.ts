@@ -19,7 +19,7 @@ export function activityStatusPresentation(row: ActivityFreshnessRow, now: numbe
   const tone = primaryCheck?.tone ?? row.tone;
   const status = pending ? row.updating ? 'Updating' : 'Starting' : primaryCheck?.status ?? row.status;
   const timestamp = activityStatusTimestamp(row.refreshFailure ? row.updatedAt : primaryCheck ? primaryCheck.checkedAt : row.updatedAt, now);
-  const timeSubject = row.refreshFailure ? 'Saved data' : primaryCheck ? 'Checked' : 'Updated';
+  const timeSubject = row.refreshFailure ? 'Saved data' : primaryCheck ? 'Checked' : row.id === 'analytics-all_time' ? 'Latest capture' : 'Updated';
   const age = timestamp ? relativeTime(timestamp, now) : null;
   const time = age ? primaryCheck && !row.refreshFailure ? age : `${timeSubject} ${age}`
     : primaryCheck && !row.refreshFailure ? 'No check date' : 'No saved update';
@@ -34,9 +34,9 @@ export function activityStatusPresentation(row: ActivityFreshnessRow, now: numbe
     const counts = /^(\d+) of (\d+) collections checked(?: · (\d+) unresolved)?/.exec(row.coverage);
     coverage = counts ? `${counts[1]}/${counts[2]} collections${counts[3] ? ` · ${counts[3]} unresolved` : ''}`
       : row.coverage === 'Coverage not confirmed' ? 'Coverage unknown' : row.coverage;
-  } else if (row.id.startsWith('analytics-')) coverage = '';
+  } else if (row.id.startsWith('analytics-') && row.id !== 'analytics-all_time') coverage = '';
   const notice = row.refreshFailure ? { message: row.refreshFailure, tone: 'error' as const }
-    : feedback && feedback.tone !== 'pending' && !(pending && feedback.tone === 'success') ? feedback : undefined;
+    : row.refreshNotice ?? (feedback && feedback.tone !== 'pending' && !(pending && feedback.tone === 'success') ? feedback : undefined);
   return { tone, status, pending, timestamp, time, timeDescription: age ? `${timeSubject} ${age}` : time,
     coverage, coverageWarning: row.availabilityWarning === true, notice };
 }

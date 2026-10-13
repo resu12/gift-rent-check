@@ -4,6 +4,7 @@ import {readFileSync} from 'node:fs';
 import {createPublicDatabase} from './fixtures/public-database.mjs';
 import {createPublicRepository,verifiedTelegramUserId,PublicAccountError,PublicCredentialChangedError,PublicStorageLimitError,migrateLegacyOwner} from '../tgcloud/lib/public-repository.js';
 import {createCloudRepository} from '../tgcloud/lib/cloud-repository.js';
+import {personalAnalyticsDailyTriggers} from '../tgcloud/lib/personal-analytics.js';
 
 const at=Date.parse('2026-10-10T12:00:00Z');
 const state=name=>({version:2,next_job_id:2,attempts:[at],next_allowed_at:at+1000,
@@ -212,14 +213,17 @@ test('account and service storage quotas refuse atomic appends without advancing
 });
 
 test('personal captures replace obsolete same-period snapshots beyond ten refreshes and retain idempotency',async t=>{
-  const f=createPublicDatabase(t),repo=f.repository(101);
+  const f=createPublicDatabase(t),repo=f.repository(101),wallet=`0:${'11'.repeat(32)}`;
+  for(const trigger of personalAnalyticsDailyTriggers({publicScope:true}))f.database.exec(trigger.sql);
   let latest;
   for(let i=0;i<24;i++) {
-    latest={...snapshot(`n${i}`,`fp${i}`),captured_at:new Date(at+i*1000).toISOString()};
+    latest={...snapshot(`n${i}`,i.toString(16).padStart(64,'0'),wallet),captured_at:new Date(at+i*1000).toISOString(),
+      top_items:{status:'missing',scope:'marketapp_top_items',items:[]},by_collection:{status:'missing',scope:'marketapp_by_collection',items:[]},
+      daily:[{date:'2026-10-10',rent_volume:'0.17',new_rentals:1,extensions:0,rentals:1}]};
     assert.equal(await repo.importPersonalAnalytics(latest,'raw',new Date(at+i*1000).toISOString()),true);
   }
   assert.equal(f.database.prepare('SELECT count(*) AS n FROM public_personal_rental_analytics').get().n,1);
-  assert.equal((await repo.latestPersonalAnalytics('same-wallet')).name,'n23');
+  assert.equal((await repo.latestPersonalAnalytics(wallet)).name,'n23');
   assert.equal(await repo.importPersonalAnalytics(latest,'raw',new Date(at).toISOString()),false);
 });
 
@@ -382,4 +386,22 @@ test('clear racing activation cannot delete an active completed account',async t
   await assert.rejects(migrateLegacyOwner(db,'101',{mode:'clear',confirmOwnerId:'101'}),/inaccessible partial/);
   assert.equal(raced,true);assert.equal(f.database.prepare('SELECT status FROM public_accounts WHERE user_id=?').get('101').status,'active');
   assert.equal(f.database.prepare('SELECT count(*) AS n FROM public_cloud_events WHERE user_id=?').get('101').n,1);
+});
+
+
+test('startup cache reuse keeps exact source revision, age and tenant/generation fences',async t=>{
+  const f=createPublicDatabase(t),a=f.repository(101,{dashboardCache:true}),b=f.repository(202,{dashboardCache:true});
+  await a.ensureAccount();await b.ensureAccount();
+  await a.saveDashboardSnapshot('startup',0,100,{owner:'alpha'});
+  await b.saveDashboardSnapshot('startup',0,100,{owner:'beta'});
+  assert.equal(await a.dashboardSnapshot('startup',0,110),null);
+  assert.deepEqual(await a.dashboardSnapshot('startup',0,110,{startup:true}),{owner:'alpha'});
+  assert.deepEqual(await b.dashboardSnapshot('startup',0,110,{startup:true}),{owner:'beta'});
+  assert.equal(await a.dashboardSnapshot('startup',1,110,{startup:true}),null);
+  assert.equal(await a.dashboardSnapshot('startup',0,99,{startup:true}),null);
+  assert.equal(await a.dashboardSnapshot('startup',0,1541,{startup:true}),null);
+  const old=f.repository(101,{dashboardCache:true});await old.publicAccount();
+  await a.deleteAccountData();await a.reactivateAccount();
+  await assert.rejects(old.dashboardSnapshot('startup',0,110,{startup:true}),PublicAccountError);
+  assert.equal(await f.repository(101,{dashboardCache:true}).dashboardSnapshot('startup',0,110,{startup:true}),null);
 });

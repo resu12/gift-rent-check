@@ -42,11 +42,11 @@ export function createDashboardCache(db,{storageAdmission=null}={}) {
           || typeof row.analytics_updated !== 'string') throw new Error('Dashboard revision unavailable');
       return row;
     },
-    async dashboardSnapshot(key, revision, bucket) {
+    async dashboardSnapshot(key, revision, bucket, {startup = false} = {}) {
       const row = await db.get(`SELECT snapshot_json FROM dashboard_projection_cache
-        WHERE selection_key=:key AND records_revision=:revision AND time_bucket=:bucket
+        WHERE selection_key=:key AND records_revision=:revision AND time_bucket BETWEEN :minimum_bucket AND :bucket
           AND length(CAST(snapshot_json AS BLOB))<=:limit`,
-        {':key': 'm:' + key, ':revision': revision, ':bucket': bucket, ':limit': 1024});
+        {':key': 'm:' + key, ':revision': revision, ':bucket': bucket, ':minimum_bucket': startup ? bucket - 1440 : bucket, ':limit': 1024});
       if (!row) return null;
       const manifest = JSON.parse(row.snapshot_json);
       if (manifest.version !== 2 || !/^[0-9a-f]{64}$/.test(manifest.hash) || !Number.isSafeInteger(manifest.parts) || manifest.parts < 1 || manifest.parts > 18

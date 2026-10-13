@@ -57,9 +57,30 @@ export interface GiftRentalHistory {
   excluded_counts: Record<string, number>;
 }
 
+export interface GiftRentalStatistics {
+  version: 1;
+  semantics_version: 'saved-gift-rental-statistics-v1';
+  coverage: 'partial' | 'no_history' | 'not_applicable';
+  observed_at: string | null;
+  first_rental_at: string | null;
+  last_rental_at: string | null;
+  observed_rentals: number | null;
+  recorded_rentals: number | null;
+  verified_rentals_without_history: number | null;
+  /** Eligible GRAM payments before fees; not attributed wallet income. */
+  recorded_volume: string | null;
+  average_daily_rate: string | null;
+  rental_days: string | null;
+  excluded_counts: Record<string, number>;
+}
+
 export interface PriceTrackingPeriod {
   window_from: string;
   window_to: string;
+  /** Distinct rental start times from eligible history and verified TON evidence. */
+  observed_rentals?: number | null;
+  /** These starts contribute to observed_rentals, never recorded payments or rates. */
+  verified_rentals_without_history?: number | null;
   recorded_rentals: number | null;
   recorded_volume: string | null;
   average_daily_rate: string | null;
@@ -77,8 +98,13 @@ export interface PriceTrackingComparison {
   after: PriceTrackingPeriod;
 }
 
+export type PriceTrackingSource = 'TON contract' | 'Marketapp listing' | 'Marketapp account';
+
 export interface ObservedPriceChange {
   id: string;
+  /** Each change is calculated within this source, independently of other timelines. */
+  source?: PriceTrackingSource;
+  source_last_observed_at?: string | null;
   observed_at: string;
   previous_observed_at: string;
   from_price_per_day: string;
@@ -91,7 +117,8 @@ export interface ObservedPriceChange {
 export interface GiftPriceTrackingData {
   version: 1;
   semantics_version: 'observed-price-performance-v1';
-  source: 'TON contract' | 'Marketapp listing' | 'Marketapp account' | null;
+  /** Preferred source for the baseline and latest check; individual changes may use another source. */
+  source: PriceTrackingSource | null;
   unit: 'GRAM/day';
   observation_count: number;
   change_count: number;
@@ -99,7 +126,7 @@ export interface GiftPriceTrackingData {
   baseline_price_per_day: string | null;
   baseline_observed_at: string | null;
   coverage: 'observed_sample' | 'no_observations';
-  /** Newest first; the projection includes up to five changes. */
+  /** Newest first across independently observed sources; the projection includes up to five changes. */
   changes: ObservedPriceChange[];
   warnings: string[];
 }
@@ -134,6 +161,7 @@ export interface Gift {
   trait_uncertainties?: string[];
   pricing?: GiftPricing | null;
   rental_history?: GiftRentalHistory;
+  rental_statistics?: GiftRentalStatistics;
   price_tracking?: GiftPriceTrackingData;
   rental_until: string | number | null;
   rental_until_unix_seconds?: number | string | null;
@@ -213,6 +241,45 @@ export interface Capabilities {
 
 export type DataRecord = Record<string, unknown>;
 
+export interface SavedAnalyticsCoverage {
+  observed_days: number; missing_days: number; partial_days: number;
+  periods: { period_start: string; period_end: string; captured_at: string }[];
+}
+
+export interface MarketappTopItem {
+  item_key: string;
+  name: string;
+  item_url: string;
+  rentals: number;
+  rented_days: string;
+  volume: string;
+  price_per_day: string | null;
+  captured_at?: string;
+  coverage?: SavedAnalyticsCoverage;
+}
+export interface MarketappTopItems {
+  status: 'available' | 'missing';
+  scope: 'marketapp_top_items' | 'saved_non_overlapping_reports';
+  incomplete?: boolean;
+  items: MarketappTopItem[];
+}
+
+export interface MarketappCollection {
+  collection_key: string;
+  name: string;
+  rentals: number;
+  volume: string;
+  price_per_day: string | null;
+  captured_at?: string;
+  coverage?: SavedAnalyticsCoverage;
+}
+export interface MarketappCollections {
+  status: 'available' | 'missing';
+  scope: 'marketapp_by_collection' | 'saved_non_overlapping_reports';
+  incomplete?: boolean;
+  items: MarketappCollection[];
+}
+
 export interface PersonalRentalAnalytics {
   version: 1;
   source: 'marketapp_personal_rent_page';
@@ -236,11 +303,25 @@ export interface PersonalRentalAnalytics {
     spent_on_rent: string | null;
     spending_rentals: number | null;
   };
-  daily: { date: string; rent_volume: string; new_rentals: number; extensions: number; rentals: number }[];
+  daily: { date: string; rent_volume: string; new_rentals: number; extensions: number; rentals: number; partial?: boolean }[];
   fingerprint: string;
+  top_items?: MarketappTopItems;
+  by_collection?: MarketappCollections;
 }
 
+/** Deduplicated saved daily evidence; this does not claim lifetime provider coverage. */
+export interface PersonalRentalAnalyticsAllTime extends Omit<PersonalRentalAnalytics, 'source_url' | 'daily'> {
+  report_kind: 'all_time';
+  source_url: null;
+  daily: (PersonalRentalAnalytics['daily'][number] & { captured_at: string; partial: boolean })[];
+  coverage: { observed_days: number; missing_days: number; partial_days: number };
+  read_coverage?: { daily_limited: boolean; items_limited: boolean; collections_limited: boolean };
+}
+export type PersonalRentalAnalyticsReport = PersonalRentalAnalytics | PersonalRentalAnalyticsAllTime;
+
 export interface Dashboard {
+  /** Dated saved projection; a full read must follow before acknowledging updates. */
+  startup_preview?: { generated_at: string };
   /** Revision of the committed snapshot and time-dependent calculation window. */
   update_token?: string;
   wallet: string | null;
@@ -257,6 +338,7 @@ export interface Dashboard {
   data_freshness?: ActivityComparisonEvidence;
   personal_analytics?: PersonalRentalAnalytics | null;
   personal_analytics_snapshots?: PersonalRentalAnalytics[];
+  personal_analytics_all_time?: PersonalRentalAnalyticsAllTime | null;
 }
 
 export interface Job {
@@ -437,6 +519,7 @@ export interface DashboardAdapter {
   subscribe?(listener: (event: { job?: Job; error?: string; savedDataChanged?: boolean }) => void): () => void;
   exportCsv?(dashboard: Dashboard, selection: PricingSelection): void;
   getDashboard(selection: PricingSelection, signal?: AbortSignal): Promise<Dashboard>;
+  getStartupDashboard?(selection: PricingSelection, signal?: AbortSignal): Promise<Dashboard>;
   getUpdateToken?(signal?: AbortSignal): Promise<string>;
   getJobs(signal?: AbortSignal): Promise<Job[]>;
   startJob(kind: JobKind, csrf: string, selection?: PricingSelection, options?: JobStartOptions): Promise<Job>;
