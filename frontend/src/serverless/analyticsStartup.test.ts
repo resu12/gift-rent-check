@@ -10,6 +10,7 @@ import { createLocalDashboardAdapter } from '../data/local.ts';
 
 const time = Date.parse('2026-10-11T12:00:00Z');
 const captured = new Date(time).toISOString();
+const startedAt = new Date(time + 1100).toISOString();
 const context = (changes: Partial<AnalyticsStartupContext> = {}): AnalyticsStartupContext => ({
   identity: 'wallet:0:false', enabled: true, periodDays: 365, capturedAt: null, ...changes,
 });
@@ -136,6 +137,9 @@ test('fresh analytics skip reload unless another page saved a different snapshot
   for (const previous of [captured, '2026-10-10T12:00:00Z', null]) {
     const h = setup(async () => result({ state: 'fresh' })); h.gate.dashboardLoaded(context({ capturedAt: previous })); h.gate.giftsChanged(true); h.start(); await tick();
     assert.equal(h.reloads, previous === captured ? 0 : 1); assert.equal(h.gate.getSnapshot().phase, 'fresh');
+    assert.equal(h.gate.getSnapshot().outcomeAt, startedAt, 'attempt order uses this response time, not the older saved capture');
+    assert.equal(h.gate.getSnapshot().reloadedAt, previous === captured ? undefined : startedAt,
+      'a fresh response alone does not prove imported history was reloaded');
   }
 });
 
@@ -184,10 +188,11 @@ test('overview status remains compact and conveys the safe fallback', () => {
 test('startup preserves confirmed capture while the dashboard reload is pending and after it finishes', async () => {
   const reloading = deferred<void>(), h = setup(undefined, () => reloading.promise);
   h.gate.dashboardLoaded(context()); h.gate.giftsChanged(true); h.start(); await tick();
-  assert.deepEqual(h.gate.getSnapshot(), { phase: 'saved', busy: true, periodDays: 365, capturedAt: captured, outcomeAt: captured });
+  assert.deepEqual(h.gate.getSnapshot(), { phase: 'saved', busy: true, periodDays: 365, capturedAt: captured, outcomeAt: startedAt });
   assert.equal(analyticsStartupStatus(h.gate.getSnapshot())?.label, 'Loading report…');
-  reloading.resolve(); await tick();
-  assert.deepEqual(h.gate.getSnapshot(), { phase: 'saved', busy: false, periodDays: 365, capturedAt: captured, outcomeAt: captured });
+  h.advance(2000); reloading.resolve(); await tick();
+  assert.deepEqual(h.gate.getSnapshot(), { phase: 'saved', busy: false, periodDays: 365, capturedAt: captured,
+    outcomeAt: startedAt, reloadedAt: new Date(time + 3100).toISOString() });
   assert.equal(h.calls.length, 1);
 });
 
@@ -195,7 +200,7 @@ test('startup reload failure preserves a confirmed saved or fresh result instead
   for (const state of ['saved', 'fresh'] as const) {
     const h = setup(async () => result({ state }), async () => { throw new Error('Private reload error'); });
     h.gate.dashboardLoaded(context()); h.gate.giftsChanged(true); h.start(); await tick();
-    assert.deepEqual(h.gate.getSnapshot(), { phase: state, busy: false, periodDays: 365, capturedAt: captured, reloadFailed: true, outcomeAt: captured });
+    assert.deepEqual(h.gate.getSnapshot(), { phase: state, busy: false, periodDays: 365, capturedAt: captured, reloadFailed: true, outcomeAt: startedAt });
     assert.equal(analyticsStartupStatus(h.gate.getSnapshot())?.label, 'Reload needed');
     assert.equal(h.reloads, 1); assert.equal(h.calls.length, 1); assert.equal(JSON.stringify(h.gate.getSnapshot()).includes('Private'), false);
   }
@@ -204,8 +209,9 @@ test('startup reload failure preserves a confirmed saved or fresh result instead
 test('hiding after a confirmed save retains the saved report metadata without retrying the mutation', async () => {
   const reloading = deferred<void>(), h = setup(undefined, () => reloading.promise);
   h.gate.dashboardLoaded(context()); h.gate.giftsChanged(true); h.start(); await tick(); h.hide(true);
-  assert.deepEqual(h.gate.getSnapshot(), { phase: 'saved', busy: false, periodDays: 365, capturedAt: captured, reloadFailed: true, outcomeAt: captured });
+  assert.deepEqual(h.gate.getSnapshot(), { phase: 'saved', busy: false, periodDays: 365, capturedAt: captured, reloadFailed: true, outcomeAt: startedAt });
   reloading.resolve(); await tick(); h.hide(false); assert.equal(h.calls.length, 1);
+  assert.equal(h.gate.getSnapshot().reloadedAt, undefined, 'an interrupted read cannot confirm saved history');
 });
 
 test('Telegram startup adapter sends only the reporting period; desktop has no automatic endpoint', async () => {

@@ -6,6 +6,8 @@ New accounts use compact storage once its atomic triggers are installed. The own
 
 Compact scopes skip the old reference-compaction phases described below. They still clean disposable caches and expired metadata. Record publication, run archiving, superseded-state retirement and byte counters commit together. This prevents the repeated full-state growth that previously required long cleanup scans.
 
+Gift-refresh preparation reads compact evidence in pages of at most 800 records and 1 MiB (with the existing single-record exception), then filters the decoded page for owned gifts. Applying the gift filter before the SQL limit made sparse market-history searches exceed the hosted query-work limit. Pagination now advances through pages with no matches while preserving collection-conflict evidence, account boundaries and the captured record revision. This change requires no data deletion or schema migration.
+
 The development reset retained API credentials, wallet bindings, portfolio/trait metadata, personal analytics and provider request budgets. It cleared comparison/owned-price observations and old scan state. Event payload before the reset was 454,615,573 bytes, including 311,260,073 bytes of repeated state/job copies. After bounded disposal, total measured application payload was 3,744,369 bytes; after rebuilding the dashboard cache it was about 4.9 MB. This is a development reset result, not a claim that arbitrary production history compresses by the same amount.
 
 Status also supports scoped daily storage-growth measurements. At most 31 samples are kept. Runway estimates need three sampled dates spanning 48 hours, with a recent final sample. They refer to the application write guard; physical provider quota remains unverified. Older open clients do not receive the new fields unless they request `growth:true`.
@@ -28,7 +30,7 @@ This measures application payload, not SQLite file size or Telegram's verified p
 
 Accounting metadata itself is bounded and covered by the reserve. Normal status reads use small counters rather than rescanning history. A missing accounting baseline fails closed; it never appears green.
 
-Reservations exclude discarded provider response copies. Comparison and TON collection retain conservative checkpoint and normalized-record headroom; analytics still reserves both its source snapshot and normalized report. Final writes enforce live byte limits atomically, so a smaller estimate cannot bypass capacity checks. Bounded wire responses and normalized record limits remain enforced independently of an unused JSON-wrapped response copy.
+Reservations exclude discarded provider response copies. Comparison and TON collection retain conservative checkpoint and normalized-record headroom; analytics reserves its source snapshot, normalized report and possible daily-history growth. Daily-history rows are measured by the same transactional counters and retained during normal cleanup. Final writes enforce live byte limits atomically, so a smaller estimate cannot bypass capacity checks. Bounded wire responses and normalized record limits remain enforced independently of an unused JSON-wrapped response copy.
 
 Invited dashboard caches leave at least 4 MiB of the account cap for collection work. If a reservation still fails, the repository can delete at most 128 of that account's disposable projection-cache rows and retry admission once. Every delete and retry retains the active account/credential checks; concurrent reservations still count. Unique records, analytics and saved progress are not eligible for this recovery. Jobs whose exact reservation exceeds the remaining space still stop safely.
 
@@ -79,9 +81,36 @@ Then install the four source-protection triggers and lookup index:
 node serverless/tools/install-storage-accounting.mjs --app-id YOUR_APP_ID --owner-id YOUR_OWNER_ID --source-index true
 ```
 
-For an existing 81-trigger deployment, this command upgrades accounting to 84 triggers only while the new pin table is empty, then installs source protection. It never resets the initialized counter. Backfill runs through bounded maintenance after publication; indexed cleanup fails closed until a scope is complete and all four source triggers remain present.
+For an existing 81-trigger deployment, this command now installs accounting for all known additive tables, bringing it to 102 triggers, then installs source protection. The additive schema must already exist, and any table missing accounting must be empty. Analytics and compact-storage setup use the same upgrade path, so neither requires the other to run first. Inserts into each pending table are blocked until all three accounting operations are installed; interrupted setup can resume without resetting counters. Existing accounted tables may keep their data. Nonempty unaccounted tables, missing original accounting triggers or active source-pin writers without accounting require explicit repair. Backfill runs through bounded maintenance after publication; indexed cleanup fails closed until a scope is complete and all four source triggers remain present.
 
 Then publish the validated backend and frontend. Complete an initial bounded cleanup and verify source evidence, current checkpoint and request usage remain unchanged. Never treat reclaimed logical bytes as proof of a larger platform quota.
+
+## Indexed dashboard history reads
+
+The optional `service_record_inline_events` selector stores only event identifiers, account generation and whether an event contains portfolio/settings data. It lets dashboard reads skip normalized marker-only events without copying or removing saved history. Six transactional triggers maintain the selector; the installer creates its two seek indexes only after backfill completes. Runtime readers verify all eight exact definitions before using it and otherwise retain the existing bounded scan. Account deletion removes the account's selector rows, and accounting includes their actual payload bytes.
+
+Install the additive table **before publishing the new runtime**: quota fallback and account deletion refer to it. Read-only history still works on an older schema, but that fallback does not make an unmigrated schema suitable for new writes. On an existing deployment, inspect the schema dry run and apply only the additive change:
+
+```powershell
+node serverless/tools/manage.mjs --action publish-schema --app-id YOUR_APP_ID
+node serverless/tools/manage.mjs --action migrate-check --app-id YOUR_APP_ID
+node serverless/tools/manage.mjs --action migrate-safe --app-id YOUR_APP_ID
+node serverless/tools/install-inline-record-index.mjs --app-id YOUR_APP_ID --owner-id YOUR_OWNER_ID
+```
+
+If the command returns `complete: false`, pass its opaque `cursor` unchanged to the next invocation:
+
+```powershell
+node serverless/tools/install-inline-record-index.mjs --app-id YOUR_APP_ID --owner-id YOUR_OWNER_ID --cursor RETURNED_CURSOR
+```
+
+Setup uploads only the seven required helper modules (under 64 KiB per pass), rather than the entire backend. Its classifier and trigger definitions are generated from the runtime functions and checked for exact SQL parity. If Telegram rate-limits setup, wait for its retry interval and resume from the last successful cursor; replaying a partially completed batch is safe.
+
+Each invocation makes at most eight hosted batches. A batch runs up to eight passes and stops starting another pass after 4.5 seconds. Each pass examines at most 25 source events and targets at most 1 MiB of source JSON; a single larger legacy event advances alone. An already-running database statement completes before the batch returns. The installer first adds accounting for empty unaccounted additive tables, then installs the six maintenance triggers and scans private followed by public events. Concurrent event writes remain covered during backfill. It never rewrites events, resets accounting, deletes saved data, or requests Marketapp/TON data. Output contains only progress metadata. Its temporary owner-only endpoint omits unrelated deployed endpoints and enforces the host module limit; no administrative module is published.
+
+Revision 122 published the startup improvements on 13 October 2026 after the additive table and index setup completed. Verification confirmed all eight selector definitions, all 117 accounting definitions, matching global/scope totals, unchanged frozen source counts and bounded evidence hashes, and retained analytics archives. The private selector held 84 relevant events out of 6,656 captured events; the invited account held two out of four. The release also fixes Telegram SDK loading so the startup timeout can run, and separates final gift-data reloads from collection-progress requests. Validation passed 859 frontend tests, 1,220 backend tests (two intentional skips), 14 focused migration tests, TypeScript, the production build and preflight. Live verification matched six changed backend modules and all 32 static files, returned 194 dashboard gifts with saved analytics, and rejected unauthorized access. Verification made no provider requests or database writes.
+
+Continue until `complete: true` and `definitions: 8`, then publish the validated runtime and frontend. Re-running the completed command verifies the installation without resetting it. If a request fails with an uncertain result, rerun from the last returned cursor (or omit the cursor to safely recheck earlier rows); the command does not automatically retry an uncertain write. Unexpected trigger/index definitions stop setup for explicit investigation. Preserve the two administrator-managed indexes during future schema changes; if any required definition is missing or changed, reads safely fall back to scanning until repaired.
 
 ## Storage efficiency review — 11 October 2026
 

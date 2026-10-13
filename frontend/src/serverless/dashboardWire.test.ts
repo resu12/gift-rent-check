@@ -96,3 +96,25 @@ test('adapter rejects malformed compact responses and still fences account-gener
   response=encodeDashboardWire(adapterFixture(6));await assert.rejects(adapter.getDashboard(selection),/account changed/);
   assert.equal(seen.length,1,'malformed and stale compact responses are never accepted as dashboard updates');
 });
+
+test('startup previews use the compact authenticated dashboard path with the same account checks',async()=>{
+  const source={...adapterFixture(),startup_preview:{generated_at:'2026-10-13T00:00:00Z'}},requests:Record<string,unknown>[]=[];
+  let response:unknown=encodeDashboardWire(source);
+  const adapter=createCloudDashboardAdapter(mockTransport((name,input)=>{assert.equal(name,'getDashboard');requests.push(input);return response;}));
+  const selection={source:'rentals' as const,timeframe:'30d' as const};
+  assert.deepEqual((await adapter.getStartupDashboard!(selection)).startup_preview,source.startup_preview);
+  assert.equal(requests[0].startup,true);assert.equal(requests[0].response_format,DASHBOARD_WIRE_FORMAT);
+  response=encodeDashboardWire({...adapterFixture(6),startup_preview:source.startup_preview});
+  await assert.rejects(adapter.getStartupDashboard!(selection),/account changed/);
+  response=encodeDashboardWire({...source,startup_preview:{generated_at:'not a date'}});
+  await assert.rejects(adapter.getStartupDashboard!(selection),/unexpected saved dashboard/);
+});
+
+
+test('an aborted startup transport cannot advance account context or notify loaded data',async()=>{
+  const seen:Dashboard[]=[], controller=new AbortController();
+  const adapter=createCloudDashboardAdapter(mockTransport(()=>{controller.abort();return encodeDashboardWire(adapterFixture(9));}),{onDashboardLoaded:data=>seen.push(data)});
+  const selection={source:'rentals' as const,timeframe:'30d' as const};
+  await assert.rejects(adapter.getStartupDashboard!(selection,controller.signal),{name:'AbortError'});
+  assert.equal(seen.length,0);
+});

@@ -1,5 +1,5 @@
 import type { Job, JobKind } from './types.ts';
-import type { OwnedPriceSnapshot } from './ownedPriceRefresh.ts';
+import { ownedPriceStatusText, type OwnedPriceSnapshot } from './ownedPriceRefresh.ts';
 
 export interface SyncProgress {
   completed: number | null;
@@ -261,6 +261,8 @@ export function presentOwnedPriceSync(snapshot: OwnedPriceSnapshot, options: {st
     if (snapshot.cacheHit) message = 'Your gifts were checked recently.';
     const failures = combined ? statusUnresolved : unresolved;
     if (failures !== null && failures > 0) message += ` ${number(failures)} could not be updated.`;
+  } else if (snapshot.phase === 'waiting') {
+    state = 'waiting'; message = ownedPriceStatusText(snapshot);
   } else if (snapshot.phase === 'unavailable') {
     state = 'failed'; message = combined ? 'The gift check could not finish. Saved evidence is still available.' : 'The price check could not finish. Your saved prices are still available.';
   } else if (snapshot.phase === 'partial') {
@@ -289,12 +291,14 @@ export function presentOwnedPriceSync(snapshot: OwnedPriceSnapshot, options: {st
   // Checked gifts and completed supplemental work are distinct. Never imply
   // a remaining one percent when the server is still confirming the result.
   if (finalizing) workload = { ...workload, percent: null, indeterminate: true, label: 'Finishing gift checks…' };
+  else if (snapshot.phase === 'waiting' && !run) workload = { ...workload, percent: null, indeterminate: false, label: 'Waiting for the current gift check' };
+  else if (snapshot.phase === 'waiting' && run && run.total > 0 && run.checked === run.total) workload = { ...workload, percent: null, indeterminate: false, label: 'Gift data saved · Waiting for the current check' };
   else if (snapshot.provider && run && run.total > 0 && run.checked === run.total
     && (snapshot.phase === 'partial' || snapshot.phase === 'unavailable')) {
     workload = { ...workload, percent: null, indeterminate: false, label: 'Gift data saved · Check incomplete' };
   }
   return {
-    title: supplemental && snapshot.phase === 'checking' ? 'Checking additional gift details' : run?.scope === 'gift' ? ['paused', 'complete', 'failed'].includes(state) ? 'Selected gift' : 'Checking selected gift' : combined ? ['paused', 'complete', 'failed'].includes(state) ? 'Your gifts' : 'Updating your gifts' : ['paused', 'complete', 'failed'].includes(state) ? 'Your gift prices' : 'Updating your gift prices', objective: run?.scope === 'gift' ? 'Checking only the selected gift through TON.' : combined ? 'Checking rental status and daily prices for gifts you already own.' : 'Checking daily prices for gifts you already own.', state, stateLabel: labels[state], message,
+    title: snapshot.phase === 'waiting' ? 'Gift check waiting' : supplemental && snapshot.phase === 'checking' ? 'Checking additional gift details' : run?.scope === 'gift' ? ['paused', 'complete', 'failed'].includes(state) ? 'Selected gift' : 'Checking selected gift' : combined ? ['paused', 'complete', 'failed'].includes(state) ? 'Your gifts' : 'Updating your gifts' : ['paused', 'complete', 'failed'].includes(state) ? 'Your gift prices' : 'Updating your gift prices', objective: run?.scope === 'gift' ? 'Checking only the selected gift through TON.' : combined ? 'Checking rental status and daily prices for gifts you already own.' : 'Checking daily prices for gifts you already own.', state, stateLabel: labels[state], message,
     progress: workload,
     actionLabel: null, rawReason: run?.reason ?? null, cacheNote: null, availableAt: null,
   };

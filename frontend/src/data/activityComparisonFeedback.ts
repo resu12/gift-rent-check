@@ -7,6 +7,13 @@ export interface ComparisonActionFeedback {
   tone: 'pending' | 'success' | 'warning' | 'error';
 }
 
+export interface ComparisonActionState {
+  context: string;
+  rowId: string;
+  jobId?: number;
+  feedback: ComparisonActionFeedback;
+}
+
 export interface ComparisonAllowanceFeedback {
   message: string;
   tone: 'warning';
@@ -44,6 +51,28 @@ export function comparisonActionFeedback(job: Job, now = Date.now()): Comparison
   if (view.state === 'stopping') return { message: 'Finishing the current request and saving progress…', tone: 'pending' };
   if (view.state === 'waiting') return { message: messageText(compactJobMessage(job, view, now)), tone: 'pending' };
   return { message: 'Update started · checking comparison prices…', tone: 'pending' };
+}
+
+/** Once an action has a job, polled saved state is authoritative. A hidden app
+ * can miss driver events, so its old "started" message must not keep Continue
+ * disabled after a saved completion or pause has arrived.
+ */
+export function currentComparisonActionFeedback(
+  action: ComparisonActionState | null, context: string, rowId: string,
+  jobs: Job[], accountGeneration?: number, now = Date.now(),
+): ComparisonActionFeedback | undefined {
+  if (!action || action.context !== context || action.rowId !== rowId) return undefined;
+  if (accountGeneration !== undefined && (!Number.isSafeInteger(accountGeneration) || accountGeneration < 0)) return undefined;
+  // Pending launch and rejected actions have no saved job yet.
+  if (action.jobId === undefined) return action.feedback;
+  const scoped = jobs.filter(job => accountGeneration === undefined || job.account_generation === accountGeneration);
+  const job = scoped.find(job => job.id === action.jobId && (job.kind === 'collect'
+    || job.kind === (rowId === 'rentals' ? 'rental_prices' : 'prices')));
+  if (!job) return undefined;
+  // Historical results must not describe a newer scan started in another client.
+  if (scoped.some(candidate => candidate.kind === job.kind && candidate.id > job.id)
+    && job.state !== 'running' && job.state !== 'queued') return undefined;
+  return comparisonActionFeedback(job, now);
 }
 
 /** A current allowance snapshot takes precedence over old saved pause reasons.

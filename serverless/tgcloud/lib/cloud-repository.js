@@ -9,13 +9,53 @@ import {utf8Size} from './bounded-response.js';
 import {ownedScopeRecordFilter} from './owned-price-engine.js';
 import {canonicalJSON} from './cloud-pricing-core.js';
 import {sha256} from './ton-price-decoder.js';
-import {utf8Bytes} from './personal-analytics.js';
+import {utf8Bytes,personalAnalyticsDailyReserve,buildPersonalAnalyticsAllTime,upgradePersonalAnalyticsTopItems} from './personal-analytics.js';
 
 // The opt-in layout keeps immutable observations separate from the latest
 // operational checkpoint. Payload identity includes every source field; it
 // must never erase a contradictory variant or a filtered listing query.
 export const NORMALIZED_RECORD_KINDS = Object.freeze(['listing','history','metadata','ownership','collection','attribute','owned_price','owned_status','personal_gift']);
 export const RESET_EVIDENCE_KINDS = Object.freeze(['listing','history','owned_price','owned_status','personal_gift']);
+// An optional, rebuildable selector avoids paging marker-only events twice.
+// Keep the classifier identical to the marker exclusion in the reader: a
+// present (even null) marker is disposable only for known kinds without record.
+export function inlineRecordEventSelect(table,alias='e') {
+  if(!['cloud_events','public_cloud_events'].includes(table)||!['e','NEW'].includes(alias))throw new Error('Invalid inline record index source');
+  const publicScope=table==='public_cloud_events',source=`${alias}.records_json`,scope=publicScope?`'public:'||${alias}.user_id`:"'private'",
+    generation=publicScope?`COALESCE((SELECT generation FROM public_accounts WHERE user_id=${alias}.user_id),-1)`:'0',
+    marker=`CASE WHEN j.type='object' THEN COALESCE(json_type(j.value,'$.__normalized_record_v1') IS NOT NULL
+      AND json_type(j.value,'$.record') IS NULL AND json_extract(j.value,'$.kind') IN(${NORMALIZED_RECORD_KINDS.map(kind=>`'${kind}'`).join(',')}),0) ELSE 0 END`,
+    test=predicate=>`CASE WHEN json_valid(${source}) THEN CASE WHEN json_type(${source})='array'
+      THEN EXISTS(SELECT 1 FROM json_each(${source}) j WHERE ${predicate}) ELSE 1 END ELSE 1 END`,
+    inline=test(`NOT(${marker})`),seed=test("CASE WHEN j.type='object' THEN json_extract(j.value,'$.kind') IN('settings','portfolio','gift') ELSE 0 END");
+  return {scope,generation,inline,seed,select:`SELECT json_array(${scope},${generation},${alias}.sequence),${scope},${generation},${alias}.sequence,${seed}`};
+}
+export function inlineRecordIndexDefinitions() {
+  const triggers=['cloud_events','public_cloud_events'].flatMap(table=>['insert','update','delete'].map(operation=>{
+    const name=`record_inline_index_v1_${table}_${operation}`,source=inlineRecordEventSelect(table,'NEW'),
+      oldScope=table==='public_cloud_events'?"'public:'||OLD.user_id":"'private'",
+      cleanup=`DELETE FROM service_record_inline_events WHERE scope=${oldScope} AND sequence=OLD.sequence;`,
+      write=`INSERT INTO service_record_inline_events(row_id,scope,generation,sequence,has_seed)
+      ${source.select} WHERE ${source.inline}
+      ON CONFLICT(row_id) DO UPDATE SET has_seed=excluded.has_seed;`;
+    return {type:'trigger',name,table,sql:`CREATE TRIGGER ${name} AFTER ${operation==='insert'?'INSERT':operation==='delete'?'DELETE':`UPDATE OF records_json,sequence${table==='public_cloud_events'?',user_id':''}`} ON ${table} BEGIN
+      ${operation==='insert'?'':cleanup}
+      ${operation==='delete'?'':write}
+      END`};
+  }));
+  return [...triggers,...[['record_inline_events_v1_idx',''],['record_seed_events_v1_idx',' WHERE has_seed=1']].map(([name,condition])=>({type:'index',name,table:'service_record_inline_events',
+    sql:`CREATE INDEX ${name} ON service_record_inline_events(scope,generation,sequence)${condition}`}))];
+}
+async function inlineRecordIndexReady(get,publicScope) {
+  const definitions=inlineRecordIndexDefinitions(),parameters={},clauses=definitions.map((entry,index)=>{
+    for(const key of ['name','type','sql'])parameters[`:${key}${index}`]=entry[key];
+    return `(name=:name${index} AND type=:type${index} AND sql=:sql${index})`;
+  });
+  // Indexes are the final installation step, after the backfill and all six
+  // mutation triggers. A missing/changed definition always uses the old path.
+  try{return (await get(`SELECT count(*) AS ready FROM sqlite_master WHERE (${clauses.join(' OR ')})${publicScope?' AND :tenant IS NOT NULL AND :account_generation>=0':''}`,parameters))?.ready===definitions.length;}
+  catch{return false;}
+}
 export const NORMALIZED_RECORD_TRIGGER_NAMES = Object.freeze(['normalized_records_v1_private_insert','normalized_records_v1_public_insert']);
 export const NORMALIZED_RECORD_READY_SQL = `(SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN(${NORMALIZED_RECORD_TRIGGER_NAMES.map(name=>`'${name}'`).join(',')}))=2`;
 export function compactStorageGuard(table,where='1') {
@@ -82,35 +122,31 @@ export function decodeNormalizedRecord(row) {
 // the original event order. SQL never parses source_json or nested evidence.
 export async function visitCompactRecordPages({get,all,table,where='1',parameters={},scope,generation=0,until,floor=0,visitor,selection='all',filter=null}) {
   if(!['cloud_events','public_cloud_events'].includes(table)||!Number.isSafeInteger(floor)||floor<0||floor>until)throw new Error('Saved records changed; reload saved data');
-  const prefix=normalizedRecordPrefix(scope,generation),kindSelection=selection==='seeds'?"AND json_extract(j.value,'$.kind') IN('settings','portfolio','gift')"
-    :selection==='settings'?"AND json_extract(j.value,'$.kind')='settings'":'';
-  const expired=RESET_EVIDENCE_KINDS.map(kind=>`'${kind}'`).join(',');
+  if(filter&&typeof filter.matches!=='function')throw new Error('Invalid compact record filter');
+  const prefix=normalizedRecordPrefix(scope,generation),indexed=await inlineRecordIndexReady(get,table==='public_cloud_events'),seeds=selection!=='all';
   const inlineQuery=`
       SELECT e.sequence,CAST(j.key AS INTEGER) AS ordinal,j.value AS document,NULL AS envelope_json
-      FROM ${table} e,json_each(e.records_json) j
+      FROM ${indexed?`service_record_inline_events i INDEXED BY ${seeds?'record_seed_events_v1_idx':'record_inline_events_v1_idx'}
+      CROSS JOIN ${table} e ON e.sequence=i.sequence CROSS JOIN json_each(e.records_json) j`:`${table} e,json_each(e.records_json) j`}
       WHERE ${where} AND e.sequence>=:record_after AND e.sequence<=:record_until AND e.records_json<>'[]'
+      ${indexed?`AND i.scope=:inline_scope AND i.generation=:inline_generation AND i.sequence>=:record_after AND i.sequence<=:record_until${seeds?' AND i.has_seed=1':''}`:''}
       AND (e.sequence>:record_after OR e.sequence=:record_after AND CAST(j.key AS INTEGER)>:record_ordinal)
-      AND (json_type(j.value,'$.__normalized_record_v1') IS NULL OR json_type(j.value,'$.record') IS NOT NULL
-        OR COALESCE(json_extract(j.value,'$.kind'),'') NOT IN(${NORMALIZED_RECORD_KINDS.map(kind=>`'${kind}'`).join(',')}))
-      AND (e.sequence>=:record_floor OR COALESCE(json_extract(j.value,'$.kind'),'') NOT IN(${expired})) ${kindSelection}
-      AND ${filter?filter.sql.replace(/\brecords_json\b/g,'json_array(json(j.value))'):'1'}
       ORDER BY e.sequence,CAST(j.key AS INTEGER) LIMIT 800`;
   const observationQuery=`
       SELECT o.sequence,o.ordinal,p.document,o.envelope_json FROM service_record_occurrences o
       JOIN service_record_payloads p ON p.payload_id=o.payload_id AND p.scope=o.scope
       WHERE o.scope=:record_scope AND o.occurrence_id LIKE :record_prefix
-      AND (o.sequence>=:record_floor OR COALESCE(json_extract(p.document,'$.kind'),'') NOT IN(${expired}))
       AND o.sequence>=:record_after AND o.sequence<=:record_until
       AND (o.sequence>:record_after OR o.sequence=:record_after AND o.ordinal>:record_ordinal)
-      AND ${filter?filter.sql.replace(/\brecords_json\b/g,'json_array(json(p.document))'):'1'}
       AND EXISTS(SELECT 1 FROM ${table} e WHERE e.sequence=o.sequence AND ${where})
       ORDER BY o.sequence,o.ordinal LIMIT 800`;
   const streams=[{query:inlineQuery,normalized:false,sequence:-1,ordinal:-1,rows:[],offset:0,done:false},
     {query:observationQuery,normalized:true,sequence:-1,ordinal:-1,rows:[],offset:0,done:selection!=='all'}];
   async function fill(stream) {
     if(stream.done||stream.offset<stream.rows.length)return;
-    const args={...parameters,...filter?.parameters,':record_until':until,':record_after':stream.sequence,':record_ordinal':stream.ordinal,':record_floor':floor};
+    const args={...parameters,':record_until':until,':record_after':stream.sequence,':record_ordinal':stream.ordinal};
     if(stream.normalized)Object.assign(args,{':record_scope':scope,':record_prefix':prefix+'%'});
+    else if(indexed)Object.assign(args,{':inline_scope':scope,':inline_generation':generation});
     const rows=await all(`WITH candidates AS (${stream.query}),
       pending AS (SELECT *,length(CAST(document AS BLOB))+COALESCE(length(CAST(envelope_json AS BLOB)),0) AS bytes FROM candidates), bounded AS (
       SELECT *,SUM(bytes) OVER(ORDER BY sequence,ordinal) AS total_bytes FROM pending
@@ -132,8 +168,19 @@ export async function visitCompactRecordPages({get,all,table,where='1',parameter
       return b.sequence<a.sequence||b.sequence===a.sequence&&b.ordinal<a.ordinal?next:first;
     });
     const row=stream.rows[stream.offset++];
+    const record=decodeNormalizedRecord(row);
+    // Page raw inline entries as well as normalized observations. Filtering
+    // sparse seeds or markers before LIMIT scanned the complete remaining
+    // history on the final empty page and hit the hosted query budget.
+    if(!stream.normalized&&record&&typeof record==='object'&&Object.hasOwn(record,'__normalized_record_v1')&&!Object.hasOwn(record,'record')&&NORMALIZED_RECORD_KINDS.includes(record.kind))continue;
+    if(row.sequence<floor&&RESET_EVIDENCE_KINDS.includes(record?.kind))continue;
+    if(selection==='seeds'&&!['settings','portfolio','gift'].includes(record?.kind)||selection==='settings'&&record?.kind!=='settings')continue;
+    // Advance the raw stream even when no candidate matches. A selective
+    // filter in the SQL WHERE clause can inspect the entire rental history
+    // before reaching LIMIT, exceeding the hosted query execution budget.
+    if(filter&&!filter.matches(record))continue;
     if(batch.length&&(bytes+row.bytes>1048576||batch.length>=800)){await visitor(batch);batch=[];bytes=0;}
-    batch.push(decodeNormalizedRecord(row));bytes+=row.bytes;
+    batch.push(record);bytes+=row.bytes;
   }
   if(batch.length)await visitor(batch);
   // A reset during the traversal invalidates this captured snapshot. Public
@@ -469,7 +516,7 @@ export function createCloudRepository(db, {dashboardCache = false, credentialFen
     },
     async importPersonalAnalytics(snapshot, raw, importedAt, storageToken = null) {
       const normalized=JSON.stringify(snapshot),bytes=utf8Size(raw)+utf8Size(normalized)+utf8Size(snapshot.fingerprint)
-        +utf8Size(snapshot.wallet)+utf8Size(snapshot.captured_at)+utf8Size(importedAt),
+        +utf8Size(snapshot.wallet)+utf8Size(snapshot.captured_at)+utf8Size(importedAt)+personalAnalyticsDailyReserve(snapshot),
         admission=storageAdmission?.fence(bytes,storageToken)??{sql:'1',parameters:{}};
       const result = await db.run(`INSERT OR IGNORE INTO personal_rental_analytics
         (fingerprint,wallet,captured_at,imported_at,raw_snapshot,normalized_json)
@@ -544,7 +591,7 @@ export function createCloudRepository(db, {dashboardCache = false, credentialFen
     },
     async importPersonalAnalyticsFenced(snapshot, raw, importedAt, owner, fence, cookieVersion = null, storageToken = null) {
       const normalized=JSON.stringify(snapshot),bytes=utf8Size(raw)+utf8Size(normalized)+utf8Size(snapshot.fingerprint)
-        +utf8Size(snapshot.wallet)+utf8Size(snapshot.captured_at)+utf8Size(importedAt),
+        +utf8Size(snapshot.wallet)+utf8Size(snapshot.captured_at)+utf8Size(importedAt)+personalAnalyticsDailyReserve(snapshot),
         admission=storageAdmission?.fence(bytes,storageToken)??{sql:'1',parameters:{}};
       const insert = `INSERT OR IGNORE INTO personal_rental_analytics
         (fingerprint,wallet,captured_at,imported_at,raw_snapshot,normalized_json)
@@ -581,9 +628,10 @@ export function createCloudRepository(db, {dashboardCache = false, credentialFen
       return row?.valid === 1;
     },
     async latestPersonalAnalytics(wallet) {
-      const row = await db.get(`SELECT normalized_json FROM personal_rental_analytics
+      const row = await db.get(`SELECT normalized_json,CASE WHEN json_valid(normalized_json) AND (json_type(normalized_json,'$.top_items') IS NULL OR json_type(normalized_json,'$.by_collection') IS NULL)
+          AND length(CAST(raw_snapshot AS BLOB))<=262144 THEN raw_snapshot ELSE NULL END AS raw_snapshot FROM personal_rental_analytics
         WHERE wallet=:wallet ORDER BY captured_at DESC,fingerprint DESC LIMIT 1`, {':wallet': wallet});
-      return row ? JSON.parse(row.normalized_json) : null;
+      return row ? upgradePersonalAnalyticsTopItems(row) : null;
     },
     async analyticsWalletRecords() {
       // Status recovery needs only the saved wallet settings. Avoid returning
@@ -627,7 +675,46 @@ export function createCloudRepository(db, {dashboardCache = false, credentialFen
         FROM periods WHERE period_days BETWEEN 1 AND 366
       ) SELECT normalized_json FROM ranked WHERE ordinal=1
         ORDER BY captured_at DESC,fingerprint DESC LIMIT 8`, {':wallet': wallet});
-      return rows.map(row => JSON.parse(row.normalized_json));
+      const result=[];
+      for(const row of rows) {
+        const saved=upgradePersonalAnalyticsTopItems(row);
+        if(saved&&(!Object.hasOwn(saved,'top_items')||!Object.hasOwn(saved,'by_collection'))) {
+          // Legacy source reads are separate, bounded 256 KiB requests. The
+          // normal eight-report result stays within its original 1 MiB cap.
+          const raw=await db.get(`SELECT raw_snapshot FROM personal_rental_analytics WHERE wallet=:wallet AND fingerprint=:fingerprint
+            AND length(CAST(raw_snapshot AS BLOB))<=262144`,{':wallet':wallet,':fingerprint':saved.fingerprint});
+          result.push(upgradePersonalAnalyticsTopItems({...row,raw_snapshot:raw?.raw_snapshot}));
+        }else result.push(saved);
+      }
+      return result;
+    },
+    async personalAnalyticsAllTime(wallet) {
+      const observations=[];let after='';
+      for(;;) {
+        let rows;
+        try {rows=await db.all(`SELECT wallet,date,captured_at,fingerprint,rent_volume,new_rentals,extensions
+          FROM personal_analytics_daily WHERE wallet=:wallet AND date>:after ORDER BY date LIMIT 500`,{':wallet':wallet,':after':after});}
+        catch(error) {if(/no such table.*personal_analytics_daily/i.test(String(error?.message)))return null;throw error;}
+        if(!rows.length)break;
+        observations.push(...rows);after=rows.at(-1).date;
+      }
+      const itemReports=[];after='';
+      for(;;) {
+        let rows;
+        try {rows=await db.all(`SELECT row_id,wallet,item_key,period_start,period_end,captured_at,fingerprint,item_json
+          FROM personal_analytics_item_reports WHERE wallet=:wallet AND row_id>:after AND length(CAST(item_json AS BLOB))<=4096 ORDER BY row_id LIMIT 200`,{':wallet':wallet,':after':after});}
+        catch(error){if(/no such table.*personal_analytics_item_reports/i.test(String(error?.message)))break;throw error;}
+        if(!rows.length)break;itemReports.push(...rows);after=rows.at(-1).row_id;
+      }
+      const collectionReports=[];after='';
+      for(;;) {
+        let rows;
+        try {rows=await db.all(`SELECT row_id,wallet,collection_key,period_start,period_end,captured_at,fingerprint,item_json
+          FROM personal_analytics_collection_reports WHERE wallet=:wallet AND row_id>:after AND length(CAST(item_json AS BLOB))<=4096 ORDER BY row_id LIMIT 200`,{':wallet':wallet,':after':after});}
+        catch(error){if(/no such table.*personal_analytics_collection_reports/i.test(String(error?.message)))break;throw error;}
+        if(!rows.length)break;collectionReports.push(...rows);after=rows.at(-1).row_id;
+      }
+      return buildPersonalAnalyticsAllTime(observations,wallet,Date.now(),itemReports,collectionReports);
     },
     async reserveMarketappLoginAttempt(attempt, limits) {
       // Reservation and rate checks are one statement, including failed GETs.

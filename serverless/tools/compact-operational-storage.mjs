@@ -88,7 +88,13 @@ export function compactOperationalStorageTriggers() {
         LIMIT -1 OFFSET ${COMPACT_TERMINAL_JOB_LIMIT})
         AND job_id IS NOT json_extract(NEW.state_json,'$.job.id');
       END`};
-  });
+  }).concat({name:COMPACT_OPERATIONAL_TRIGGER_NAMES[2],table:'public_cloud_events',sql:`CREATE TRIGGER ${COMPACT_OPERATIONAL_TRIGGER_NAMES[2]} AFTER INSERT ON public_cloud_events
+    WHEN json_valid(NEW.state_json) BEGIN
+    ${['$.gift_refresh.previous_run','$.gift_refresh.run'].map(path=>`INSERT INTO public_gift_refresh_runs(row_id,user_id,run_id,summary_json,source_sequence)
+      SELECT json_array(NEW.user_id,'gift-run',${idAt(path)}),NEW.user_id,${idAt(path)},${summary(path,giftKeys)},NEW.sequence
+      WHERE ${validRun(path)} ON CONFLICT(row_id) DO UPDATE SET summary_json=excluded.summary_json,source_sequence=excluded.source_sequence
+      WHERE excluded.source_sequence>=public_gift_refresh_runs.source_sequence;`).join('\n')}
+    END`});
 }
 
 export async function installCompactOperationalStorage(db) {

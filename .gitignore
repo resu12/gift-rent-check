@@ -50,3 +50,8 @@ serverless/.private-config-*
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Encrypted administrative backups and recovery keys remain private.
+*.grc-backup.enc
+*.grc-backup.manifest.json
+*.grc-backup.key

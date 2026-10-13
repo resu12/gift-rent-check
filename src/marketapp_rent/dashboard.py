@@ -30,7 +30,7 @@ from .discovery_config import DiscoverySettings
 from .discovery_store import DiscoveryStore
 from .reports import _cell
 from .storage import Store
-from .personal_analytics import PersonalAnalyticsError, import_snapshot, snapshot_options
+from .personal_analytics import PersonalAnalyticsError, all_time_snapshot, import_snapshot, snapshot_options
 
 
 class JobRequest(BaseModel):
@@ -430,6 +430,7 @@ def create_app(settings, discovery_settings=None, *, wallet=None, review_path=No
         analytics_snapshots = snapshot_options(jobs.path, selected_wallet) if selected_wallet else []
         result["personal_analytics_snapshots"] = analytics_snapshots
         result["personal_analytics"] = analytics_snapshots[0] if analytics_snapshots else None
+        result["personal_analytics_all_time"] = all_time_snapshot(jobs.path, selected_wallet) if selected_wallet else None
         result["update_token"] = update_token
         return result
 

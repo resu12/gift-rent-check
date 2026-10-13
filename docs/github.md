@@ -36,11 +36,11 @@ GitHub Actions checks Python 3.12, Node 24 tests, and both frontend builds on pu
 
 ## Release preparation
 
-The current application version is **0.4.0**. [Release notes](releases/v0.4.0.md) are ready for a GitHub release; [CHANGELOG.md](../CHANGELOG.md) contains the full history. Mark the GitHub release as a **pre-release** while the hosted service remains an invitation-only development beta. A source release does not enable public registration.
+The current application version is **0.5.0**. [Release notes](releases/v0.5.0.md) are ready for a GitHub release; [CHANGELOG.md](../CHANGELOG.md) contains the full history. Mark the GitHub release as a **pre-release** while the hosted service remains an invitation-only development beta. A source release does not enable public registration.
 
 Keep `pyproject.toml`, `src/marketapp_rent/__init__.py`, `frontend/package.json`, and `serverless/package.json` on the same application version. Dependency and database schema versions are separate; a UI release does not change them. Add a dated changelog entry, run the fresh-clone checks above, and review the committed paths before pushing. Generated bundles and private operational data must remain ignored.
 
-Preparing a release commit locally does not publish a GitHub release or deploy the app. After pushing the prepared commit and checking GitHub Actions, use the matching `v0.4.0` release tag. Do not attach local databases, deployment snapshots, generated credentials or analytics captures as release assets. Existing Telegram installations need the explicit storage upgrade sequence in the release notes; development resets are destructive, separately selected operations.
+Preparing a release commit locally does not publish a GitHub release or deploy the app. After pushing the prepared commit and checking GitHub Actions, use the matching `v0.5.0` release tag. Do not attach local databases, deployment snapshots, generated credentials or analytics captures as release assets. Existing Telegram installations need the explicit storage upgrade sequence in the release notes; development resets are destructive, separately selected operations.
 
 ## First GitHub push
 

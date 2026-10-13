@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { publicAccountStep, publicAccountError, readPublicAccount, readPublicApiKeyCheck, validPublicApiKey } from './publicAccount.ts';
+import { createPublicAccountReader, publicAccountSettingsScope, publicAccountStep, publicAccountError, readPublicAccount, readPublicApiKeyCheck, validPublicApiKey } from './publicAccount.ts';
 import type { PublicAccountStatus } from './publicAccount.ts';
 import { createCloudDashboardAdapter } from './cloudAdapter.ts';
 import { createCloudTransport } from './cloudTransport.ts';
@@ -38,6 +38,52 @@ test('onboarding requires both server-verified wallet and a saved key; empty pub
   assert.equal(publicAccountStep(readPublicAccount(deleted)), 'deleted');
   assert.throws(() => readPublicAccount({ ...account(), deleted: true }));
   assert.throws(() => readPublicAccount({ ...account(false), deleted: 'yes' }));
+});
+
+test('settings scope detects another session changing wallet, key availability, or account without reloading on ordinary polls', () => {
+  const dashboard = { wallet: address, capabilities: { public_account: true, account_generation: 1,
+    wallet_configured: true, marketapp_configured: true } } as Dashboard;
+  const original = publicAccountSettingsScope(dashboard);
+  assert.equal(publicAccountSettingsScope({ ...dashboard, capabilities: { ...dashboard.capabilities, csrf_token: 'new-read-token' } }), original);
+  for (const changed of [
+    { ...dashboard, capabilities: { ...dashboard.capabilities, account_generation: 2 } },
+    { ...dashboard, capabilities: { ...dashboard.capabilities, wallet_configured: false } },
+    { ...dashboard, capabilities: { ...dashboard.capabilities, marketapp_configured: false } },
+    { ...dashboard, wallet: `0:${'34'.repeat(32)}` },
+  ]) assert.notEqual(publicAccountSettingsScope(changed), original);
+  assert.equal(publicAccountSettingsScope(null), undefined);
+  assert.equal(publicAccountSettingsScope(undefined), undefined);
+});
+
+test('superseded account reads cannot restore an old wallet or hide a failed current read', async () => {
+  const requests: { resolve(value: PublicAccountStatus): void; reject(problem: unknown): void; signal?: AbortSignal }[] = [];
+  const accepted: PublicAccountStatus[] = [], errors: unknown[] = [];
+  const reader = createPublicAccountReader({ get(signal) { return new Promise<PublicAccountStatus>((resolve, reject) => requests.push({ resolve, reject, signal })); } },
+    value => accepted.push(value), problem => errors.push(problem));
+  const oldRead = reader.reload(), currentRead = reader.reload();
+  assert.equal(requests[0].signal?.aborted, true);
+  requests[1].resolve(account(false)); await currentRead;
+  requests[0].resolve(account()); await oldRead;
+  assert.deepEqual(accepted, [account(false)]);
+  assert.deepEqual(errors, []);
+  const staleError = reader.reload(), latestError = reader.reload();
+  requests[3].reject('current error'); await latestError;
+  requests[2].reject('old error'); await staleError;
+  assert.deepEqual(errors, ['current error']);
+});
+
+test('scope disposal and starting a mutation both invalidate any earlier account read', async () => {
+  const requests: { resolve(value: PublicAccountStatus): void; signal?: AbortSignal }[] = [];
+  const accepted: PublicAccountStatus[] = [], errors: unknown[] = [];
+  const reader = createPublicAccountReader({ get(signal) { return new Promise<PublicAccountStatus>(resolve => requests.push({ resolve, signal })); } },
+    value => accepted.push(value), problem => errors.push(problem));
+  const oldRead = reader.reload(); reader.invalidate();
+  assert.equal(requests[0].signal?.aborted, true);
+  requests[0].resolve(account()); await oldRead;
+  assert.equal(accepted.length, 0);
+  const nextRead = reader.reload(); requests[1].resolve({ ...account(false), account_generation: 2 }); await nextRead;
+  assert.equal(accepted[0].account_generation, 2);
+  assert.deepEqual(errors, []);
 });
 
 test('policy links are optional HTTPS URLs without credentials and unsafe links cannot enter UI state', () => {

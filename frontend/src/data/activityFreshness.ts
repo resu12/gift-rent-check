@@ -1,5 +1,7 @@
 import type { Dashboard, DataRecord, Gift, Job, PersonalRentalAnalytics } from './types.ts';
 import { analyticsFreshnessPresentation } from './analyticsFreshness.ts';
+import type { AnalyticsStartupSnapshot } from '../serverless/analyticsStartup.ts';
+import type { AnalyticsReportSelection } from './analyticsReports.ts';
 import { canonicalMainnetAddress } from '../serverless/walletIdentity.ts';
 import { TIMEFRAME_OPTIONS } from './pricingSelection.ts';
 import type { OwnedPriceSnapshot } from './ownedPriceRefresh.ts';
@@ -56,11 +58,16 @@ export interface ActivityFreshnessRow {
   availabilityWarning?: boolean;
   /** Fixed local feedback for this opening's failed portfolio refresh, independent of saved evidence. */
   refreshFailure?: string;
+  /** Current refresh outcome, without changing the saved data's capture date. */
+  refreshNotice?: { message: string; tone: 'warning' | 'error' };
+  analyticsSelection?: AnalyticsReportSelection;
 }
 export interface ActivityFreshnessOptions {
   now?: number;
   comparisonEvidence?: ActivityComparisonEvidence | null;
   giftRefresh?: OwnedPriceSnapshot | null;
+  analyticsStartup?: AnalyticsStartupSnapshot;
+  analyticsReloadedAt?: string | null;
 }
 
 const minute = 60000;
@@ -155,8 +162,11 @@ function refreshCheck(groups: Gift[][], now: number, evidence: { checked: number
   dashboard: Dashboard, refresh?: OwnedPriceSnapshot | null) {
   const total = groups.length, checked = evidence.filter(item => item.checked !== null).length;
   const stamps = stampRange(evidence.map(item => item.checked));
-  const run = refresh?.run, start = instant(run?.started_at, now), finish = instant(run?.completed_at, now);
-  const failedPortfolioRefresh = (refresh?.scope ?? run?.scope) !== 'gift' && (refresh?.phase === 'unavailable' || run?.state === 'failed' || Boolean(refresh?.error));
+  // A concurrent request did not fail or finish a check. Keep the saved
+  // evidence's own coverage and dates; its waiting notice is shown separately.
+  const waiting = refresh?.phase === 'waiting';
+  const run = waiting ? undefined : refresh?.run, start = instant(run?.started_at, now), finish = instant(run?.completed_at, now);
+  const failedPortfolioRefresh = !waiting && (refresh?.scope ?? run?.scope) !== 'gift' && (refresh?.phase === 'unavailable' || run?.state === 'failed' || Boolean(refresh?.error));
   if (failedPortfolioRefresh) return {
     checkStatus: !total || !checked ? null : `Saved check coverage · ${checked}/${total} checked`,
     checkedAt: stamps.updatedAt,
@@ -267,7 +277,7 @@ function comparisonRow(kind: 'listings' | 'rentals', evidence: ActivityCompariso
         : 'Comparison data is more than an hour old.')
       + (validWatermarks && fitsDisplayed && oldestThrough !== null ? ` Rental history checked through ${dateTime(iso(oldestThrough)!, true)}.` : ''), freshnessMinutes, updating });
 }
-function analyticsRows(dashboard: Dashboard, now: number): ActivityFreshnessRow[] {
+function analyticsRows(dashboard: Dashboard, now: number, options: ActivityFreshnessOptions): ActivityFreshnessRow[] {
   const snapshots = [...(dashboard.personal_analytics_snapshots || []), ...(dashboard.personal_analytics ? [dashboard.personal_analytics] : [])];
   const reports = new Map<number, PersonalRentalAnalytics>();
   for (const snapshot of snapshots) {
@@ -276,22 +286,65 @@ function analyticsRows(dashboard: Dashboard, now: number): ActivityFreshnessRow[
     const days = snapshot.daily.length, prior = reports.get(days);
     if (!prior || (instant(snapshot.captured_at, now) ?? -1) > (instant(prior.captured_at, now) ?? -1)) reports.set(days, snapshot);
   }
-  const days = reports.size ? [...reports.keys()].sort((a, b) => a - b) : [30];
-  return days.map(length => {
+  const days = new Set(reports.size ? reports.keys() : [30]);
+  if (options.analyticsStartup?.periodDays) days.add(options.analyticsStartup.periodDays);
+  const startupFor = (selection: AnalyticsReportSelection, captured: number | null) => {
+    const startup = selection === 'all_time' || options.analyticsStartup?.periodDays === selection ? options.analyticsStartup : undefined;
+    const attempted = instant(startup?.outcomeAt, now);
+    // A later source capture supersedes this opening's old terminal pause or
+    // connection failure. A plain dashboard read never proves a refresh worked.
+    return startup && !startup.busy && ['limited', 'busy', 'unavailable'].includes(startup.phase)
+      && captured !== null && attempted !== null && captured > attempted ? undefined : startup;
+  };
+  const decorate = (item: ActivityFreshnessRow, selection: AnalyticsReportSelection,
+    presentation: ReturnType<typeof analyticsFreshnessPresentation>, startup?: AnalyticsStartupSnapshot): ActivityFreshnessRow => {
+    const message = presentation.tone !== 'working' ? presentation.message : undefined;
+    const failed = Boolean(message && startup?.phase === 'unavailable' && startup.reason === 'refresh_failed' && presentation.tone === 'warning');
+    const status = presentation.needsReload ? 'Reload needed' : failed ? 'Refresh failed'
+      : message && startup?.phase === 'limited' ? 'Paused' : message && startup?.phase === 'busy' ? 'Waiting'
+        : message && startup?.reason === 'no_login' ? 'Login required' : message && startup?.reason === 'wallet_missing' ? 'Wallet required' : item.status;
+    return { ...item, analyticsSelection: selection, updating: presentation.tone === 'working', status,
+      ...(message ? { refreshNotice: { message, tone: failed ? 'error' : 'warning' }, tone: 'older' as const } : {}),
+    };
+  };
+  const rows = [...days].sort((a, b) => a - b).map(length => {
     const report = reports.get(length) ?? null;
     const captured = instant(report?.captured_at, now);
-    const presentation = analyticsFreshnessPresentation(report, length, { now, refreshable: true });
+    const validDates = analyticsFreshnessPresentation(report, length, { now, refreshable: true }).label !== 'Date unavailable';
+    const startup = startupFor(length, validDates ? captured : null);
+    const presentation = analyticsFreshnessPresentation(report, length, { now, refreshable: true, startup });
     const state = presentation.tone === 'recent' && captured !== null ? 'fresh' : !report ? 'missing' : 'older';
     const period = length === 365 ? '1 year' : `${length} days`;
     const dates = report && /^\d{4}-\d{2}-\d{2}$/.test(report.period_start) && /^\d{4}-\d{2}-\d{2}$/.test(report.period_end)
       ? ` Report covers ${report.period_start} to ${report.period_end} (UTC).` : '';
-    return row({ id: `analytics-${length}`, label: `Analytics · ${period}`, state,
+    return decorate(row({ id: `analytics-${length}`, label: `Analytics · ${period}`, state,
       updatedAt: iso(captured), oldestUpdatedAt: iso(captured), coverage: report ? `${period} report` : 'No saved report',
       detail: (state === 'fresh' ? 'Personal revenue and rental totals refreshed within 15 minutes.'
         : !report ? 'Connect Marketapp and refresh analytics.' : presentation.label === 'Date unavailable'
           ? 'The saved reporting dates need checking.' : 'Refresh to update personal revenue and rental totals.') + dates,
-      freshnessMinutes: ACTIVITY_FRESHNESS_MINUTES.analytics, updating: false });
+      freshnessMinutes: ACTIVITY_FRESHNESS_MINUTES.analytics, updating: false }), length, presentation, startup);
   });
+  const savedHistory = dashboard.personal_analytics_all_time;
+  const history = savedHistory && (!dashboard.wallet || identity(savedHistory.wallet) === identity(dashboard.wallet)) ? savedHistory : null;
+  if (history || dashboard.capabilities.marketapp_analytics_refresh) {
+    const base = analyticsFreshnessPresentation(history, 'all_time', { now, refreshable: true });
+    const valid = history && base.label === 'Saved history';
+    const startup = startupFor('all_time', valid ? instant(history.captured_at, now) : null);
+    const presentation = analyticsFreshnessPresentation(history, 'all_time', { now, refreshable: true,
+      startup, historyReloadedAt: options.analyticsReloadedAt });
+    const coverage = valid ? `${history.coverage.observed_days} days saved`
+      + (history.coverage.missing_days ? ` · ${history.coverage.missing_days} ${history.coverage.missing_days === 1 ? 'day' : 'days'} missing` : '')
+      + (history.coverage.partial_days ? ` · ${history.coverage.partial_days} partial ${history.coverage.partial_days === 1 ? 'day' : 'days'}` : '')
+      : history ? 'Coverage not confirmed' : 'No saved history';
+    const item = row({ id: 'analytics-all_time', label: 'Analytics · All time',
+      state: !history ? 'missing' : valid && history.coverage.missing_days ? 'incomplete' : 'older',
+      updatedAt: valid ? iso(instant(history.captured_at, now)) : null, oldestUpdatedAt: null, coverage,
+      detail: valid ? `Saved history covers ${history.period_start} to ${history.period_end} (UTC). Overlapping dates count once. Missing days are unknown, not zero. Refresh uses the supported one-year report and keeps earlier saved days.`
+        : history ? 'The dates in this saved history could not be confirmed.' : 'Connect Marketapp and refresh analytics to begin saved history.',
+      freshnessMinutes: ACTIVITY_FRESHNESS_MINUTES.analytics, updating: false });
+    rows.push(decorate({ ...item, status: valid ? history.coverage.missing_days ? 'Gaps in history' : 'Saved history' : history ? 'Coverage unavailable' : 'Not updated' }, 'all_time', presentation, startup));
+  }
+  return rows;
 }
 
 /** Source-specific saved evidence only. Loading the dashboard or finishing an unrelated job proves no freshness. */
@@ -304,5 +357,5 @@ export function activityFreshnessRows(dashboard: Dashboard, jobs: Job[] = [], op
   return [giftRow(groups, now, 'gifts', active(['refresh', 'discover']), dashboard, options.giftRefresh),
     giftRow(groups, now, 'prices', active(['refresh']), dashboard, options.giftRefresh),
     comparisonRow('listings', comparisons?.listings, now, active(['prices', 'collect']), dashboard.pricing),
-    comparisonRow('rentals', comparisons?.rentals, now, active(['rental_prices', 'collect']), dashboard.pricing), ...analyticsRows(dashboard, now)];
+    comparisonRow('rentals', comparisons?.rentals, now, active(['rental_prices', 'collect']), dashboard.pricing), ...analyticsRows(dashboard, now, options)];
 }

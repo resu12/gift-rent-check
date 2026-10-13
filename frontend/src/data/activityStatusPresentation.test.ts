@@ -69,3 +69,11 @@ test('a started update suppresses obsolete success feedback, while current warni
   assert.deepEqual(activityStatusPresentation(row(), now, { tone: 'warning', message: 'Available again tomorrow.' }).notice,
     { tone: 'warning', message: 'Available again tomorrow.' });
 });
+
+test('analytics refresh notices remain visible and All time keeps dated coverage', () => {
+  const notice = { tone: 'error' as const, message: 'Automatic refresh did not finish. Try Refresh again.' };
+  const failed = activityStatusPresentation(row({ id: 'analytics-30', status: 'Refresh failed', refreshNotice: notice }), now);
+  assert.equal(failed.status, 'Refresh failed'); assert.equal(failed.pending, false); assert.deepEqual(failed.notice, notice);
+  const history = activityStatusPresentation(row({ id: 'analytics-all_time', status: 'Gaps in history', coverage: '29 days saved · 1 day missing' }), now);
+  assert.equal(history.coverage, '29 days saved · 1 day missing'); assert.equal(history.time, 'Latest capture 9h ago');
+});

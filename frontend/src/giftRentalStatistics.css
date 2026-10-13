@@ -1,0 +1,45 @@
+.gift-rental-overview{margin-bottom:20px;padding:16px 18px}
+.gift-rental-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.gift-rental-heading h2{display:flex;align-items:center;gap:7px;font-size:18px;font-weight:550;margin:0;color:#dce7ef}
+.gift-rental-heading h2 svg{color:#91cdbd;flex:none}
+.gift-rental-heading>span,.gift-rental-caption,.gift-rental-footer,.gift-rental-empty{font-size:12px;line-height:1.6;color:#9cb2c5}
+.gift-rental-caption{margin:5px 0 10px}
+.gift-rental-controls{display:flex;gap:12px;align-items:center;margin-bottom:12px}
+.gift-rental-search{display:flex;align-items:center;gap:8px;flex:1;min-width:0;background:#101925;border:1px solid #304052;border-radius:8px;padding:0 10px;color:#8ba5bb}
+.gift-rental-search input{background:transparent;color:#dae7f2;border:0;outline:none;min-width:0;width:100%;min-height:44px;font-size:13px}
+.gift-rental-search input:focus-visible{outline:none;box-shadow:none}
+.gift-rental-search:focus-within{outline:2px solid var(--teal);outline-offset:2px}
+.gift-rental-sort{display:flex;align-items:center;gap:8px;color:#9cb2c5;font-size:12px}
+.gift-rental-sort select{background:#192330;color:#dce7ef;border:1px solid #304052;border-radius:8px;min-height:44px;padding:8px;font-size:13px;max-width:100%}
+.gift-rental-columns,.gift-rental-row{display:grid;grid-template-columns:minmax(170px,2.1fr) repeat(3,minmax(65px,.8fr));gap:12px;align-items:center}
+.gift-rental-columns{padding:8px 0;color:#91a8bb;font-size:11px;text-align:right}
+.gift-rental-columns>span:first-child{text-align:left}
+.gift-rental-list{list-style:none;padding:0;margin:0}
+.gift-rental-list li{border-top:1px solid #293a4c}
+.gift-rental-row{border:0;background:transparent;color:#d7e5ef;padding:12px 0;border-radius:6px;width:100%;text-align:right;cursor:pointer}
+.gift-rental-row:hover{background:#22374655}
+.gift-rental-row:focus-visible,.gift-rental-sort select:focus-visible{outline:2px solid var(--teal);outline-offset:3px}
+.gift-rental-identity{display:flex;gap:10px;align-items:center;min-width:0;text-align:left}
+.gift-rental-identity>span:last-child{min-width:0}
+.gift-rental-identity strong{display:block;font-size:13px;font-weight:550;overflow-wrap:anywhere}
+.gift-rental-identity small{display:block;margin-top:3px;font-size:11px;color:#91a8bb;line-height:1.5}
+.gift-rental-avatar{width:38px;height:38px;position:relative;display:grid;place-items:center;flex:none;border-radius:8px;overflow:hidden;background:#21313e;color:#9fbdb7}
+.gift-rental-avatar img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.gift-rental-metric{min-width:0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;font-size:13px}
+.gift-rental-metric b{font-weight:550}.gift-rental-metric>small{display:none}.gift-rental-volume b{color:#91e1c3}
+.gift-rental-last{color:#a3bacd;font-size:12px}.gift-rental-footer{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-top:12px}
+.gift-rental-method{color:#a7bdce;font-size:12px;line-height:1.65;margin-top:8px}.gift-rental-method>summary{min-height:44px;align-content:center;cursor:pointer}
+.gift-rental-method p{margin:6px 0}.gift-rental-update{margin-top:2px}
+.marketapp-top-items .gift-rental-row{list-style:none}.marketapp-top-items .gift-rental-row::-webkit-details-marker{display:none}.marketapp-top-items .gift-rental-identity>span:nth-child(2){min-width:0;flex:1}.marketapp-top-items .gift-rental-identity>svg{flex:none;transition:transform .15s}.marketapp-top-items .top-item-detail[open] .gift-rental-identity>svg{transform:rotate(180deg)}
+.marketapp-collections .gift-rental-columns,.marketapp-collections .gift-rental-row{grid-template-columns:minmax(170px,2.1fr) repeat(3,minmax(75px,1fr))}
+.marketapp-collections .gift-rental-row{list-style:none}.marketapp-collections .gift-rental-row::-webkit-details-marker{display:none}.marketapp-collections .gift-rental-identity>span:nth-child(2){min-width:0;flex:1}.marketapp-collections .gift-rental-identity>svg{flex:none;transition:transform .15s}.marketapp-collections .top-item-detail[open] .gift-rental-identity>svg{transform:rotate(180deg)}
+.top-item-detail[open]>.gift-rental-row{background:#22374655}.top-item-evidence{padding:0 10px 14px;color:#a7bdce;font-size:12px;line-height:1.65;overflow-wrap:anywhere}.top-item-evidence a{display:inline-flex;gap:5px;align-items:center;min-height:44px;color:#91e1c3}.top-item-evidence ul{padding-left:20px}.top-item-evidence dl>div{display:flex;gap:12px;justify-content:space-between;margin:6px 0}.top-item-evidence dd{margin:0;color:#c7dbe8;font-variant-numeric:tabular-nums;text-align:right}.top-items-coverage{font-size:12px;line-height:1.5;color:#c8b28b;margin:0 0 10px}
+.gift-all-time h3{margin-bottom:4px}.gift-all-time p{font-size:12px;line-height:1.65;color:#a7bdce;margin:6px 0}.gift-all-time-source{margin-bottom:14px!important}
+.gift-all-time .gift-all-time-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:12px 0}
+.gift-all-time .gift-all-time-metrics>div{display:block;padding:12px;background:#192b3455;border:1px solid #304052;border-radius:8px;min-width:0}
+.app-shell .gift-all-time .gift-all-time-metrics dt{font-size:11px;color:#9cb2c5;margin-bottom:6px}.app-shell .gift-all-time .gift-all-time-metrics dd{margin:0;text-align:left;font-size:20px;color:#dce7ef;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.gift-all-time .gift-all-time-metrics>div:nth-child(2) dd{color:#91e1c3}.gift-all-time .gift-all-time-coverage{color:#e5b475}.gift-all-time-metrics dt small{display:block;font-size:10px;color:#9cb2c5}.gift-all-time .gift-all-time-capture{font-size:11px;color:#91a8bb}
+.gift-all-time-evidence{font-size:12px;line-height:1.65;color:#a7bdce}.gift-all-time-evidence>summary{min-height:44px;align-content:center;cursor:pointer}.gift-all-time-evidence ul{padding-left:18px}.gift-all-time-evidence li{margin-bottom:8px}.gift-all-time-evidence li span{display:block;color:#91a8bb}.gift-all-time-empty p:first-child{color:#dce7ef}
+@media(max-width:700px){.gift-rental-columns{display:none}.gift-rental-row{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;text-align:left}.gift-rental-identity{grid-column:1/-1}.gift-rental-metric>small{display:block;font-size:10px;line-height:1.5;color:#8fa8bc;margin-bottom:4px}.gift-rental-controls{gap:8px}.gift-rental-search{flex-basis:auto}.gift-rental-sort{flex:none}.gift-rental-sort select{max-width:155px}.gift-rental-overview{padding:14px 16px}.gift-rental-heading h2{font-size:17px}}
+@media(max-width:360px){.gift-rental-controls{flex-wrap:wrap}.gift-rental-search{flex-basis:100%}.gift-rental-sort{margin-left:auto}.gift-rental-metric{font-size:12px}}
+@media(max-width:700px){.marketapp-collections .gift-rental-row{grid-template-columns:repeat(3,minmax(0,1fr))}}

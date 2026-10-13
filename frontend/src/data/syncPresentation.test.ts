@@ -18,6 +18,20 @@ test('purpose distinguishes current owned prices, listings, actual rentals, stat
   const model = presentOwnedPriceSync(owned()); assert.equal(model.title, 'Updating your gift prices'); assert.equal(model.objective, 'Checking daily prices for gifts you already own.');
   assert.doesNotMatch(model.objective, /comparison|Marketapp|TON/);
 });
+test('a concurrent gift refresh is waiting without fake progress or a failure label', () => {
+  const pending = presentOwnedPriceSync(owned({ phase: 'waiting', run: null, canStop: false, error: null }), { rentalStatus: true });
+  assert.equal(pending.state, 'waiting'); assert.equal(pending.stateLabel, 'Waiting');
+  assert.equal(pending.title, 'Gift check waiting'); assert.match(pending.message, /saved data is kept/);
+  assert.equal(pending.progress.percent, null); assert.equal(pending.progress.indeterminate, false);
+  assert.doesNotMatch(JSON.stringify(pending), /failed|could not finish|Preparing/);
+  const saved = owned({ phase: 'waiting', provider: 'marketapp_website' });
+  saved.run = { ...saved.run!, total: 161, checked: 161, updated: 88, unresolved: 73 };
+  const waiting = presentOwnedPriceSync(saved, { rentalStatus: true });
+  assert.equal(waiting.progress.percent, null); assert.equal(waiting.progress.completed, 161);
+  assert.equal(waiting.progress.label, 'Gift data saved · Waiting for the current check');
+  assert.equal(waiting.state, 'waiting');
+});
+
 test('a shared public allowance can block collection even while the user has individual requests left', () => {
   const next='2026-10-11T12:00:00.000Z';
   const paused=job({state:'partial',reason:'The daily provider allowance was reached. Your progress is saved.',progress:{provider_budget:{rolling_24h_used:5,rolling_24h_limit:500,provider_allowance_blocked:true,available_at:next}}});

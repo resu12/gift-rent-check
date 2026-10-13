@@ -1,7 +1,7 @@
 import type { Dashboard, DashboardAdapter, Job, JobKind, PricingSelection, PersonalRentalAnalytics, MarketappLoginChallenge, MarketappLoginTestResult, MarketappAnalyticsRefreshChallenge, MarketappAnalyticsRefreshResult, MarketappAnalyticsRefreshStatus, MarketappAnalyticsStartupResult, ComparisonStartupResult } from '../data/types.ts';
 import { historyCollectionError, pricingQuery } from '../data/pricingSelection.ts';
 import { formatAmount } from '../data/helpers.ts';
-import type { CloudTransport } from './cloudTransport.ts';
+import { CloudError, type CloudEndpoint, type CloudTransport } from './cloudTransport.ts';
 import { CloudCollectionDriver, isCollecting, readJob } from './cloudDriver.ts';
 import { readPublicAccount, readPublicApiKeyCheck, validPublicApiKey } from './publicAccount.ts';
 import type { PublicWalletChallenge } from './publicAccount.ts';
@@ -51,6 +51,29 @@ export function createCloudDashboardAdapter(transport: CloudTransport, options: 
   let publicMode = false;
   let accountGeneration: number | undefined;
   let comparisonScope: string | undefined;
+  let personalEpoch = 0, personalScope: string | null = null;
+  const personalAttempts = new Map<string, number>();
+  const personalScopeChanged = () => new CloudError('PUBLIC_WALLET_CHANGED', 'Your account changed. Reopen Marketapp connection before continuing.');
+  const observePersonalScope = (wallet: string | null, verified: boolean) => {
+    const scope = JSON.stringify([publicMode, accountGeneration ?? null,
+      publicMode && !verified ? null : canonicalMainnetAddress(wallet) ?? wallet, verified]);
+    if (personalScope !== null && personalScope !== scope) personalEpoch++;
+    personalScope = scope;
+  };
+  const rememberPersonalAttempt = (id: string, epoch: number) => {
+    personalAttempts.set(id, epoch);
+    while (personalAttempts.size > 32) personalAttempts.delete(personalAttempts.keys().next().value!);
+  };
+  const personalCall = async <T>(endpoint: CloudEndpoint, input: Record<string, unknown> = {}, signal?: AbortSignal, attemptId?: string): Promise<T> => {
+    const epoch = personalEpoch;
+    if (attemptId && (personalAttempts.has(attemptId) ? personalAttempts.get(attemptId) !== epoch : publicMode)) throw personalScopeChanged();
+    const sent = accountInput(input, accountGeneration);
+    try {
+      const result = await transport.call<T>(endpoint, sent, signal);
+      if (epoch !== personalEpoch) throw personalScopeChanged();
+      return result;
+    } catch (error) { if (epoch !== personalEpoch) throw personalScopeChanged(); throw error; }
+  };
   let startupDriver: CloudCollectionDriver | null = null;
   const interruptedJobs = new Set<string>();
   const latestJobs = new Map<string, Job>();
@@ -113,9 +136,11 @@ export function createCloudDashboardAdapter(transport: CloudTransport, options: 
     interruptedJobs.add(identity);
     emit({ job: decorate(isCollecting(latest) ? { ...latest, progress: { ...latest.progress, requires_resume: false } } : latest) });
   };
-  const acceptAccount = (account: ReturnType<typeof readPublicAccount>) => {
+  const acceptAccount = (account: ReturnType<typeof readPublicAccount>, epoch = personalEpoch) => {
+    if (epoch !== personalEpoch) throw personalScopeChanged();
     if (publicMode !== account.public_mode) clearJobViews();
-    publicMode = account.public_mode; observeAccount(account.account_generation); return account;
+    publicMode = account.public_mode; observeAccount(account.account_generation);
+    observePersonalScope(account.wallet?.address ?? null, Boolean(account.wallet)); return account;
   };
 
   async function launch(endpoint: 'startJob' | 'resumeJob', input: Record<string, unknown>) {
@@ -159,6 +184,32 @@ export function createCloudDashboardAdapter(transport: CloudTransport, options: 
     } finally { launching = false; }
   }
 
+  async function readDashboard(selection: PricingSelection, signal?: AbortSignal, startup = false): Promise<Dashboard> {
+      const personalRequestEpoch = personalEpoch;
+      const response = await transport.call<Dashboard & { encoding?: string }>('getDashboard', {
+        ...selectionInput(selection), ...(startup ? { startup: true } : {}), response_format: DASHBOARD_WIRE_FORMAT,
+      }, signal);
+      if (signal?.aborted) throw new DOMException('The dashboard read was cancelled.', 'AbortError');
+      let data: Dashboard;
+      try { data = response.encoding === DASHBOARD_WIRE_FORMAT ? decodeDashboardWire(response) as Dashboard : response; }
+      catch { throw new Error('The server returned an unexpected dashboard. Reload saved data.'); }
+      if (!data || typeof data !== 'object' || !Array.isArray(data.gifts) || !data.summary || !data.capabilities || !data.gifts.every(gift => gift && typeof gift.id === 'string' && Array.isArray(gift.uncertainties)))
+        throw new Error('The server returned an unexpected dashboard. Reload saved data.');
+      if (personalRequestEpoch !== personalEpoch) throw personalScopeChanged();
+      if (data.startup_preview && (typeof data.startup_preview.generated_at !== 'string' || !Number.isFinite(Date.parse(data.startup_preview.generated_at))))
+        throw new Error('The server returned an unexpected saved dashboard. Reload saved data.');
+      publicMode = data.capabilities.public_account === true;
+      if (publicMode) observeAccount(data.capabilities.account_generation);
+      observePersonalScope(data.wallet, data.capabilities.wallet_configured === true);
+      const nextScope = `${canonicalMainnetAddress(data.wallet) ?? data.wallet ?? ''}:${publicMode}:${accountGeneration ?? ''}`;
+      if (comparisonScope !== nextScope) clearJobViews();
+      if (comparisonScope !== undefined && comparisonScope !== nextScope) { generation += 1; startupDriver?.interrupt(); }
+      comparisonScope = nextScope;
+      if (!signal?.aborted) options.onDashboardLoaded?.(data);
+      return { ...data, capabilities: { ...data.capabilities, hosting: 'serverless',
+        supported_jobs: publicMode ? [...CLOUD_JOB_KINDS, 'discover'] : CLOUD_JOB_KINDS } };
+  }
+
   return {
     mode: 'serverless',
     storageMaintenance: {
@@ -191,41 +242,52 @@ export function createCloudDashboardAdapter(transport: CloudTransport, options: 
     },
     publicAccount: {
       async get(signal) {
+        const epoch = personalEpoch;
         const account = readPublicAccount(await transport.call('getPublicAccount', {}, signal));
-        return acceptAccount(account);
+        return acceptAccount(account, epoch);
       },
       async saveKey(apiKey, signal) {
         if (!validPublicApiKey(apiKey)) throw new Error('The API key format could not be accepted.');
+        const epoch = personalEpoch;
         const account = readPublicAccount(await transport.call('saveMarketappApiKey', { api_key: apiKey }, signal));
-        emit({ savedDataChanged: true }); return acceptAccount(account);
+        const accepted = acceptAccount(account, epoch); emit({ savedDataChanged: true }); return accepted;
       },
       async removeKey(signal) {
+        const epoch = personalEpoch;
         const account = readPublicAccount(await transport.call('removeMarketappApiKey', {}, signal));
-        emit({ savedDataChanged: true }); return acceptAccount(account);
+        const accepted = acceptAccount(account, epoch); emit({ savedDataChanged: true }); return accepted;
       },
-      async testKey(signal) { return readPublicApiKeyCheck(await transport.call('testMarketappApiKey', {}, signal)); },
+      async testKey(signal) {
+        const epoch = personalEpoch;
+        const check = readPublicApiKeyCheck(await transport.call('testMarketappApiKey', {}, signal));
+        return { ...check, account: acceptAccount(check.account, epoch) };
+      },
       startWallet(signal) { return transport.call<PublicWalletChallenge>('startWalletVerification', {}, signal); },
       async finishWallet(attempt_id, account, proof, signal) {
+        const epoch = ++personalEpoch;
         const next = readPublicAccount(await transport.call('finishWalletVerification', { attempt_id,
           account: { address: account.address, chain: account.chain, walletStateInit: account.walletStateInit,
             ...(account.publicKey ? { publicKey: account.publicKey } : {}) },
           proof: { timestamp: proof.timestamp, domain: { lengthBytes: proof.domain.lengthBytes, value: proof.domain.value }, payload: proof.payload, signature: proof.signature },
         }, signal));
-        emit({ savedDataChanged: true }); return acceptAccount(next);
+        const accepted = acceptAccount(next, epoch); emit({ savedDataChanged: true }); return accepted;
       },
       async disconnectWallet(signal) {
+        const epoch = ++personalEpoch;
         generation += 1; clearJobViews(); driver?.interrupt();
         const account = readPublicAccount(await transport.call('disconnectPublicWallet', {}, signal));
-        emit({ savedDataChanged: true }); return acceptAccount(account);
+        const accepted = acceptAccount(account, epoch); emit({ savedDataChanged: true }); return accepted;
       },
       async deleteAccount(signal) {
+        const epoch = ++personalEpoch;
         generation += 1; clearJobViews(); driver?.interrupt();
         const account = readPublicAccount(await transport.call('deletePublicAccount', { confirm: true }, signal));
-        emit({ savedDataChanged: true }); return acceptAccount(account);
+        const accepted = acceptAccount(account, epoch); emit({ savedDataChanged: true }); return accepted;
       },
       async reactivate(signal) {
+        const epoch = ++personalEpoch;
         const account = readPublicAccount(await transport.call('reactivatePublicAccount', { confirm: true }, signal));
-        emit({ savedDataChanged: true }); return acceptAccount(account);
+        const accepted = acceptAccount(account, epoch); emit({ savedDataChanged: true }); return accepted;
       },
       startDiscovery() {
         if (!publicMode) return Promise.reject(new Error('Public accounts are not enabled in this app.'));
@@ -239,20 +301,25 @@ export function createCloudDashboardAdapter(transport: CloudTransport, options: 
       async cancel(attempt_id, signal) { await transport.call('cancelMarketappLoginTest', { attempt_id }, signal); },
     },
     marketappAnalyticsRefresh: {
-      getStatus(signal) { return transport.call<MarketappAnalyticsRefreshStatus>('getMarketappAnalyticsRefreshStatus', {}, signal); },
-      refreshStartup(period_days, signal) { return transport.call<MarketappAnalyticsStartupResult>('refreshStartupMarketappAnalytics', { period_days }, signal); },
-      start(period_days, signal, rememberLogin = false) { return transport.call<MarketappAnalyticsRefreshChallenge>('startMarketappAnalyticsRefresh', { period_days, ...(rememberLogin ? { remember_login: true } : {}) }, signal); },
-      refreshSaved(period_days, signal) { return transport.call<MarketappAnalyticsRefreshResult>('refreshSavedMarketappAnalytics', { period_days }, signal); },
-      disconnectSession(signal) { return transport.call<{ disconnected: true }>('disconnectMarketappAnalyticsSession', {}, signal); },
+      getStatus(signal) { return personalCall<MarketappAnalyticsRefreshStatus>('getMarketappAnalyticsRefreshStatus', {}, signal); },
+      refreshStartup(period_days, signal) { return personalCall<MarketappAnalyticsStartupResult>('refreshStartupMarketappAnalytics', { period_days }, signal); },
+      async start(period_days, signal, rememberLogin = false) {
+        const epoch = personalEpoch;
+        const challenge = await personalCall<MarketappAnalyticsRefreshChallenge>('startMarketappAnalyticsRefresh', { period_days, ...(rememberLogin ? { remember_login: true } : {}) }, signal);
+        if (typeof challenge?.attempt_id === 'string') rememberPersonalAttempt(challenge.attempt_id, epoch);
+        return challenge;
+      },
+      refreshSaved(period_days, signal) { return personalCall<MarketappAnalyticsRefreshResult>('refreshSavedMarketappAnalytics', { period_days }, signal); },
+      disconnectSession(signal) { personalEpoch++; return personalCall<{ disconnected: true }>('disconnectMarketappAnalyticsSession', {}, signal); },
       finish(challenge, account, proof, device, signal) {
-        return transport.call<MarketappAnalyticsRefreshResult>('finishMarketappAnalyticsRefresh', {
+        return personalCall<MarketappAnalyticsRefreshResult>('finishMarketappAnalyticsRefresh', {
           attempt_id: challenge.attempt_id, session_envelope: challenge.session_envelope,
           account: { address: account.address, chain: account.chain, walletStateInit: account.walletStateInit, ...(account.publicKey ? { publicKey: account.publicKey } : {}) },
           device: { platform: device.platform, appName: device.appName, appVersion: device.appVersion, maxProtocolVersion: device.maxProtocolVersion, features: device.features },
           proof: { timestamp: proof.timestamp, domain: { lengthBytes: proof.domain.lengthBytes, value: proof.domain.value }, payload: proof.payload, signature: proof.signature },
-        }, signal);
+        }, signal, challenge.attempt_id);
       },
-      async cancel(attempt_id, signal) { await transport.call('cancelMarketappAnalyticsRefresh', { attempt_id }, signal); },
+      async cancel(attempt_id, signal) { await personalCall('cancelMarketappAnalyticsRefresh', { attempt_id }, signal, attempt_id); },
     },
     async startupComparisonRefresh(selection, signal) {
       if (signal?.aborted) throw new DOMException('Refresh cancelled', 'AbortError');
@@ -341,7 +408,7 @@ export function createCloudDashboardAdapter(transport: CloudTransport, options: 
     personalAnalytics: {
       async importSnapshot(raw, _csrf) {
         if (new TextEncoder().encode(raw).length > 262144) throw new Error('The analytics snapshot exceeds 256 KiB.');
-        const response = await transport.call<{ personal_analytics: PersonalRentalAnalytics }>('importPersonalAnalytics', { snapshot: raw });
+        const response = await personalCall<{ personal_analytics: PersonalRentalAnalytics }>('importPersonalAnalytics', { snapshot: raw });
         if (!response.personal_analytics || response.personal_analytics.version !== 1 || !Array.isArray(response.personal_analytics.daily)) throw new Error('The server returned an unexpected analytics snapshot. Reload saved data.');
         emit({ savedDataChanged: true });
         return response.personal_analytics;
@@ -350,25 +417,8 @@ export function createCloudDashboardAdapter(transport: CloudTransport, options: 
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     savedDataChanged() { emit({ savedDataChanged: true }); },
     interrupt() { driver?.interrupt(); generation += 1; },
-    async getDashboard(selection, signal) {
-      const response = await transport.call<Dashboard & { encoding?: string }>('getDashboard', {
-        ...selectionInput(selection), response_format: DASHBOARD_WIRE_FORMAT,
-      }, signal);
-      let data: Dashboard;
-      try { data = response.encoding === DASHBOARD_WIRE_FORMAT ? decodeDashboardWire(response) as Dashboard : response; }
-      catch { throw new Error('The server returned an unexpected dashboard. Reload saved data.'); }
-      if (!data || typeof data !== 'object' || !Array.isArray(data.gifts) || !data.summary || !data.capabilities || !data.gifts.every(gift => gift && typeof gift.id === 'string' && Array.isArray(gift.uncertainties)))
-        throw new Error('The server returned an unexpected dashboard. Reload saved data.');
-      publicMode = data.capabilities.public_account === true;
-      if (publicMode) observeAccount(data.capabilities.account_generation);
-      const nextScope = `${canonicalMainnetAddress(data.wallet) ?? data.wallet ?? ''}:${publicMode}:${accountGeneration ?? ''}`;
-      if (comparisonScope !== nextScope) clearJobViews();
-      if (comparisonScope !== undefined && comparisonScope !== nextScope) { generation += 1; startupDriver?.interrupt(); }
-      comparisonScope = nextScope;
-      if (!signal?.aborted) options.onDashboardLoaded?.(data);
-      return { ...data, capabilities: { ...data.capabilities, hosting: 'serverless',
-        supported_jobs: publicMode ? [...CLOUD_JOB_KINDS, 'discover'] : CLOUD_JOB_KINDS } };
-    },
+    getDashboard: (selection, signal) => readDashboard(selection, signal),
+    getStartupDashboard: (selection, signal) => readDashboard(selection, signal, true),
     async getUpdateToken(signal) {
       const response = await transport.call<{ token: string }>('getDashboardRevision', {}, signal);
       if (typeof response.token !== 'string' || !response.token || response.token.length > 1024)

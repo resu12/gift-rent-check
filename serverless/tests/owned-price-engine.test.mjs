@@ -102,6 +102,17 @@ test('an active website gift refresh excludes both targeted and portfolio TON re
   t.advance(120000);const started=await start(t,'ton-after-website-deadline');assert.equal(started.run.state,'running');assert.equal(started.run.total,1);t.database.close();
 });
 
+test('an active TON-stage gift wrapper accepts only its exact trusted fallback scope and session',async()=>{
+  const t=setup(),session='wrapper-internal-ton-session';await t.seed([row(),row(address(5))],{gift_refresh:{run:{id:1,state:'running',stage:'ton',
+    deadline:t.now()+120000,ton_session_id:session,ton_targets:[nft]}}});
+  const saved=await t.repository.read(),exact=createOwnedPriceEngine({...t.deps,targetAddresses:[nft]}),wrong=createOwnedPriceEngine({...t.deps,targetAddresses:[address(5)]});
+  await assert.rejects(start(t,session),error=>error.code==='OWNED_PRICE_BUSY');
+  await assert.rejects(exact.start(ctx,{session_id:'wrong-internal-ton-session'}),error=>error.code==='OWNED_PRICE_BUSY');
+  await assert.rejects(wrong.start(ctx,{session_id:session}),error=>error.code==='OWNED_PRICE_BUSY');
+  assert.deepEqual(await t.repository.read(),saved);assert.equal(t.requests.length,0);
+  const started=await exact.start(ctx,{session_id:session});assert.equal(started.run.state,'running');assert.equal(started.run.total,1);t.database.close();
+});
+
 test('a completed website refresh does not block later targeted TON checks',async()=>{
   const t=setup();await t.seed([row()],{gift_refresh:{run:{id:1,state:'complete',stage:'website',provider:'marketapp_website',deadline:t.now()+120000}}});
   const started=await startGift(t,nft,'gift-after-website');assert.equal(started.run.state,'running');assert.equal(started.run.total,1);assert.equal(t.requests.length,0);t.database.close();

@@ -1,5 +1,5 @@
 import type { Gift } from './types.ts';
-import type { OwnedPriceSnapshot } from './ownedPriceRefresh.ts';
+import { ownedPriceStatusText, type OwnedPriceSnapshot } from './ownedPriceRefresh.ts';
 import { canonicalMainnetAddress } from '../serverless/walletIdentity.ts';
 import { formatAmount } from './helpers.ts';
 
@@ -13,6 +13,7 @@ export function quickGiftCheckBlocker(gift: Gift): string | null {
 /** Completion counts mean verified observations, never an executed price change. */
 export function quickGiftCheckFeedback(gift: Gift, snapshot: OwnedPriceSnapshot): string | null {
   if (snapshot.error) return snapshot.error;
+  if (snapshot.phase === 'waiting' && snapshot.scope === 'gift') return ownedPriceStatusText(snapshot);
   const run = snapshot.run;
   if (run?.scope !== 'gift' || canonicalMainnetAddress(run.nft_address) !== canonicalMainnetAddress(gift.nft_address)) return null;
   if (snapshot.phase === 'checking') return 'Checking this gift…';

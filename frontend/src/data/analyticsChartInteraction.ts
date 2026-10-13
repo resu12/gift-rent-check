@@ -13,16 +13,20 @@ export interface AnalyticsChartPoint {
   volume: string;
   rentals: string;
   partial: boolean;
+  gap?: boolean;
+  coverage?: string;
 }
 
 /** Display saved grouped evidence; rental totals already include extensions. */
 export function analyticsChartPoint(bucket: AnalyticsBucket): AnalyticsChartPoint {
-  const rentals = `${bucket.rentals.toLocaleString()} ${bucket.rentals === 1 ? 'rental' : 'rentals'}`;
+  const rentals = bucket.rentals === null ? 'Rental count unknown' : `${bucket.rentals.toLocaleString()} ${bucket.rentals === 1 ? 'rental' : 'rentals'}`;
   const extensions = bucket.extensions ? ` (incl. ${bucket.extensions.toLocaleString()} ${bucket.extensions === 1 ? 'extension' : 'extensions'})` : '';
   return {
     period: `${analyticsPeriod(bucket.start, bucket.end)} UTC`,
-    volume: `${formatAmount(bucket.volume, 1)} GRAM`,
+    volume: bucket.volume === null ? 'No saved data' : `${formatAmount(bucket.volume, 1)} GRAM`,
     rentals: rentals + extensions,
     partial: bucket.partial,
+    ...(bucket.gap ? { gap: true } : {}),
+    ...(bucket.coverage ? { coverage: `${bucket.coverage.observedDays} days saved${bucket.coverage.missingDays ? ` · ${bucket.coverage.missingDays} missing` : ''}${bucket.coverage.partialDays ? ` · ${bucket.coverage.partialDays} partial` : ''}` } : {}),
   };
 }

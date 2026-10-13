@@ -82,28 +82,72 @@ export async function installStorageAccounting(db,{after=0,limit=6}={}) {
   return {complete:true,after:next,trigger_count:triggers.length,total_bytes:ready.total_bytes};
 }
 
-// Additive upgrade for compact storage. New tables must remain empty until all
-// of their accounting triggers exist. Never reset a live usage baseline.
-export async function installCompactStorageAccounting(db) {
-  const additions = new Set(['service_record_payloads','service_record_occurrences','gift_refresh_runs']);
-  const all = storageAccountingTriggers(), old = all.filter(item => !additions.has(item.table));
+// Every additive installer shares this allowlist. Otherwise an older deployed
+// baseline can require analytics accounting before compact accounting, while
+// analytics setup simultaneously requires the new compact accounting triggers.
+const ACCOUNTING_ADDITIONS = new Set(['service_checkpoint_sources','service_record_payloads','service_record_occurrences','service_record_inline_events',
+  'gift_refresh_runs','public_gift_refresh_runs','personal_analytics_daily','public_personal_analytics_daily',
+  'personal_analytics_item_reports','public_personal_analytics_item_reports','personal_analytics_collection_reports','public_personal_analytics_collection_reports']);
+function additiveWriteGuard(table,triggers) {
+  const name=`storage_accounting_upgrade_v1_${table}`;
+  return {name,sql:`CREATE TRIGGER ${name} BEFORE INSERT ON ${table}
+    WHEN (SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'
+      AND name IN(${triggers.map(trigger=>`'${trigger.name}'`).join(',')}))<>3
+    BEGIN SELECT RAISE(ABORT,'Storage accounting upgrade is incomplete'); END`};
+}
+async function installAdditiveStorageAccounting(db,feature) {
+  const all = storageAccountingTriggers(), old = all.filter(item => !ACCOUNTING_ADDITIONS.has(item.table));
   const usage = await db.get('SELECT total_bytes,initialized_at FROM service_storage_usage WHERE id=1');
-  if (!usage || !Number.isSafeInteger(usage.total_bytes) || usage.total_bytes < 0 || !(usage.initialized_at > 0))
-    throw new Error('Storage accounting must be initialized before compact storage');
+  if (!usage || !Number.isSafeInteger(usage.total_bytes) || usage.total_bytes < 0
+    || !Number.isSafeInteger(usage.initialized_at) || usage.initialized_at <= 0)
+    throw new Error(`Storage accounting must be initialized before ${feature}`);
   const installed = await db.get(`SELECT COUNT(*) AS count FROM sqlite_master WHERE type='trigger'
     AND name IN(${old.map(item=>`'${item.name}'`).join(',')})`);
   if (installed?.count !== old.length) throw new Error('Storage accounting requires repair');
-  for (const table of additions) {
+  const pending=[];
+  for (const table of ACCOUNTING_ADDITIONS) {
+    const triggers=all.filter(item=>item.table===table);
     const missing = [];
-    for (const trigger of all.filter(item=>item.table===table))
+    for (const trigger of triggers)
       if (!await db.get("SELECT 1 AS present FROM sqlite_master WHERE type='trigger' AND name=:name",{':name':trigger.name})) missing.push(trigger);
     if (missing.length) {
-      if (await db.get(`SELECT 1 AS present FROM ${table} LIMIT 1`)) throw new Error('Unaccounted compact storage requires repair');
-      for (const trigger of missing) await db.run(trigger.sql);
+      if (await db.get(`SELECT 1 AS present FROM ${table} LIMIT 1`)) throw new Error('Unaccounted additive storage requires repair');
+      if (table==='service_checkpoint_sources') {
+        const active=await db.get(`SELECT COUNT(*) AS count FROM sqlite_master WHERE type='trigger'
+          AND name IN(${CHECKPOINT_SOURCE_TRIGGER_NAMES.map(name=>`'${name}'`).join(',')})`);
+        if(active?.count)throw new Error('Active source pins require accounting repair');
+      }
+      pending.push({table,triggers,missing});
     }
+  }
+  for (const {table,triggers,missing} of pending) {
+    // SQLite DDL statements commit separately in the hosted SDK. Install an
+    // insert fence first, then recheck emptiness in case a write raced the
+    // preflight. An empty table cannot change via UPDATE or DELETE. Keep this
+    // fence through interruptions until all three accounting triggers exist.
+    const guard=additiveWriteGuard(table,triggers);
+    const saved=await db.get("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=:name",{':name':guard.name});
+    if(saved && saved.sql!==guard.sql)throw new Error('Storage accounting upgrade guard requires repair');
+    if(!saved)await db.run(guard.sql);
+    if(await db.get(`SELECT 1 AS present FROM ${table} LIMIT 1`))throw new Error('Unaccounted additive storage requires repair');
+    for(const trigger of missing) {
+      if(!await db.get("SELECT 1 AS present FROM sqlite_master WHERE type='trigger' AND name=:name",{':name':trigger.name}))await db.run(trigger.sql);
+    }
+  }
+  for(const table of ACCOUNTING_ADDITIONS) {
+    const guard=additiveWriteGuard(table,all.filter(item=>item.table===table));
+    const saved=await db.get("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=:name",{':name':guard.name});
+    if(saved && saved.sql!==guard.sql)throw new Error('Storage accounting upgrade guard requires repair');
+    if(saved)await db.run(`DROP TRIGGER ${guard.name}`);
   }
   return {complete:true,trigger_count:all.length};
 }
+
+// Install all pending known additions before their writers or backfills run.
+// These entry points may run in either order and never reset live counters.
+export async function installCompactStorageAccounting(db) {return installAdditiveStorageAccounting(db,'compact storage');}
+export async function installAnalyticsStorageAccounting(db) {return installAdditiveStorageAccounting(db,'daily analytics');}
+export async function installInlineRecordStorageAccounting(db) {return installAdditiveStorageAccounting(db,'inline record indexing');}
 
 export function checkpointSourceAccountingTriggers() {
   return ['private','public'].flatMap((scope,index)=>['insert','update'].map((operation,offset)=>{
@@ -126,25 +170,8 @@ export function checkpointSourceAccountingTriggers() {
   }));
 }
 export async function installCheckpointSourceAccounting(db) {
-  const usageTriggers=storageAccountingTriggers(),pinUsageTriggers=usageTriggers.filter(trigger=>trigger.table==='service_checkpoint_sources');
-  const current=await db.get('SELECT total_bytes,initialized_at FROM service_storage_usage WHERE id=1');
-  if(!current||!Number.isSafeInteger(current.total_bytes)||current.total_bytes<0||!Number.isSafeInteger(current.initialized_at)||current.initialized_at<=0)
-    throw new Error('Storage accounting must be initialized before source indexing');
-  // Upgrade the deployed 81-trigger baseline only while the additive pin table
-  // is empty. Never recompute a live financial/history baseline during upgrade.
-  const oldTriggers=usageTriggers.filter(trigger=>trigger.table!=='service_checkpoint_sources');
-  const installed=await db.get(`SELECT COUNT(*) AS count FROM sqlite_master WHERE type='trigger'
-    AND name IN(${oldTriggers.map(trigger=>`'${trigger.name}'`).join(',')})`);
-  if(installed?.count!==oldTriggers.length)throw new Error('Storage accounting requires repair');
-  const missing=[];
-  for(const trigger of pinUsageTriggers)if(!await db.get("SELECT 1 AS present FROM sqlite_master WHERE type='trigger' AND name=:name",{':name':trigger.name}))missing.push(trigger);
-  if(missing.length) {
-    if(await db.get('SELECT 1 AS present FROM service_checkpoint_sources LIMIT 1'))throw new Error('Unaccounted source pins require repair');
-    const active=await db.get(`SELECT COUNT(*) AS count FROM sqlite_master WHERE type='trigger'
-      AND name IN(${CHECKPOINT_SOURCE_TRIGGER_NAMES.map(name=>`'${name}'`).join(',')})`);
-    if(active?.count)throw new Error('Active source pins require accounting repair');
-    for(const trigger of missing)await db.run(trigger.sql);
-  }
+  const usageTriggers=storageAccountingTriggers();
+  await installAdditiveStorageAccounting(db,'source indexing');
   if(!await db.get("SELECT 1 AS present FROM sqlite_master WHERE type='index' AND name='service_checkpoint_sources_lookup_idx'"))
     await db.run('CREATE INDEX service_checkpoint_sources_lookup_idx ON service_checkpoint_sources(scope,kind,source_sequence)');
   for(const trigger of checkpointSourceAccountingTriggers())

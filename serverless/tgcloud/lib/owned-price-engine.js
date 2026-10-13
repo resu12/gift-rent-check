@@ -92,8 +92,18 @@ export function ownedGiftScope(records) {const builder=scopeBuilder();builder.ad
 export function ownedScopeRecordFilter(identities) {
   if (!Array.isArray(identities)) throw new Error('Invalid owned scope identities');
   const values=[...new Set(identities.map(value=>{const key=address(value);if(!key)throw new Error('Invalid owned scope identity');return key;}))];
-  if (!values.length) return {sql:'0',parameters:{}};
-  if (values.length>256) return {sql:'1',parameters:{}};
+  const wanted=new Set(values);
+  // Compact storage reads bounded raw pages first. Filtering in JavaScript
+  // avoids an unbounded SQL search through unrelated market observations.
+  // Source-only rows must still reach scopeBuilder: parsing their source here
+  // could hide duplicate-key, malformed, or conflicting collection evidence.
+  const matches=envelope=>{
+    if(!wanted.size||!['metadata','ownership','listing','history'].includes(envelope?.kind)||!object(envelope.record))return false;
+    const identity=envelope.record.nft_address||envelope.record.identity;
+    return !identity||typeof identity==='string'&&wanted.has(address(identity));
+  };
+  if (!values.length) return {sql:'0',parameters:{},matches};
+  if (values.length>256) return {sql:'1',parameters:{},matches};
   const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',parameters={},keys=[];
   for (const [index,value] of values.entries()) {
     const hex=value.split(':')[1],bytes=[0,0,...hex.match(/../g).map(pair=>parseInt(pair,16))];
@@ -116,7 +126,7 @@ export function ownedScopeRecordFilter(identities) {
       CASE WHEN instr(identity,':')>0 THEN lower(substr(identity,instr(identity,':')+1))
       ELSE replace(replace(substr(identity,5,40),'-','+'),'_','/') END IN (${keys.join(',')}) LIMIT 1
   ) ELSE 1 END ELSE 1 END`;
-  return {sql,parameters};
+  return {sql,parameters,matches};
 }
 
 export async function readOwnedGiftScope(repository, revision) {
@@ -304,8 +314,14 @@ export function createOwnedPriceEngine({repository, fetch: request, ownerTelegra
     const requestedScope = requested ? 'gift' : 'portfolio';
     const result = await mutate(async (own, revision, state) => {
       const personal = state.gift_refresh?.run;
-      if (personal?.state === 'running' && personal.stage === 'website' && personal.deadline > now()) {
-        throw new OwnedPriceRequestError('A personal gift refresh is already running.', 'OWNED_PRICE_BUSY');
+      if (personal?.state === 'running' && personal.deadline > now()) {
+        // The wrapper owns the whole refresh, including the gap before its
+        // TON run is committed. Only its exact internal subset/session may
+        // initialize that run; another browser action must not occupy it.
+        const fallback=personal.stage==='ton'&&selectedTargets!==null&&input.session_id===personal.ton_session_id
+          &&Array.isArray(personal.ton_targets)&&selectedTargets.size===personal.ton_targets.length
+          &&personal.ton_targets.every(target=>selectedTargets.has(address(target)));
+        if(!fallback)throw new OwnedPriceRequestError('A personal gift refresh is already running.', 'OWNED_PRICE_BUSY');
       }
       const previous = await repository.ownedRefreshSession(input.session_id);
       // Scope is bound to the original committed session. A stale browser may

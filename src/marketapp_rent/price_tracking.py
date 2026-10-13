@@ -21,6 +21,7 @@ from .monetary import bounded_decimal
 
 
 SEMANTICS = "observed-price-performance-v1"
+RENTAL_STATISTICS_SEMANTICS = "saved-gift-rental-statistics-v1"
 _NANO = Decimal("0.000000001")
 _DAY = Decimal(86400)
 _NON_RENTAL_ACTIONS = {"return", "returned", "cancel", "cancelled", "canceled", "transfer"}
@@ -91,7 +92,9 @@ def _saved_rentals(store, wanted, current):
             if any(normalized[field] is None for field in ("collection_address", "src", "dst")):
                 raise ValueError
             key = (nft, item["ts"], normalized["src"], normalized["dst"])
-            groups[key][canonical_json(normalized)] = (item, happened)
+            variant = canonical_json(normalized)
+            prior = groups[key].get(variant)
+            groups[key][variant] = (item, happened, max(when, prior[2]) if prior else when)
         except (ValueError, TypeError, KeyError, OverflowError, OSError):
             # Identical malformed representations count once, as valid ones do.
             key = (nft, "malformed", row.get("fingerprint", row.get("source_json")))
@@ -103,7 +106,7 @@ def _saved_rentals(store, wanted, current):
                         happened = candidate
             except (AttributeError, ValueError, TypeError, OverflowError, OSError, UnboundLocalError):
                 pass
-            groups[key]["malformed"] = (None, happened)
+            groups[key]["malformed"] = (None, happened, when)
     accepted = defaultdict(list)
 
     def rejected(nft, when, reason, count=1):
@@ -116,7 +119,7 @@ def _saved_rentals(store, wanted, current):
         if len(variants) != 1:
             rejected(nft, datetime.fromtimestamp(key[1], timezone.utc), "ambiguous_history_variants", len(variants))
             continue
-        item, happened = next(iter(variants.values()))
+        item, happened, observed_at = next(iter(variants.values()))
         if item is None:
             rejected(nft, happened, "malformed_history")
             continue
@@ -144,6 +147,7 @@ def _saved_rentals(store, wanted, current):
             excluded[nft][reason] += 1
         accepted[nft].append({"when": happened, "amount": amount, "reason": reason,
                               "duration": item.get("duration"),
+                              "observed_at": observed_at,
                               "collection": _key(item["collection_address"]), "currency": item["currency"]})
     return accepted, observed, excluded
 
@@ -282,6 +286,19 @@ def _days(duration):
         return _text_decimal((Decimal(microseconds) / Decimal(86_400_000_000)).quantize(_NANO, rounding=ROUND_HALF_UP))
 
 
+def _rental_totals(eligible):
+    """Whole saved amounts and durations, with an exact terminating volume."""
+    total_amount = _sum(event["amount"] for event in eligible)
+    total_seconds = sum(event["duration"] for event in eligible)
+    daily, rental_days = None, None
+    if eligible:
+        with localcontext() as ctx:
+            ctx.prec = max(50, len(Decimal(total_amount).as_tuple().digits) + len(str(total_seconds)) + 30)
+            daily = _text_decimal((Decimal(total_amount) * _DAY / Decimal(total_seconds)).quantize(_NANO, rounding=ROUND_HALF_UP))
+            rental_days = _text_decimal((Decimal(total_seconds) / _DAY).quantize(_NANO, rounding=ROUND_HALF_UP))
+    return total_amount, daily, rental_days
+
+
 def _period(events, start, end, collection):
     excluded = Counter()
     eligible = []
@@ -297,19 +314,56 @@ def _period(events, start, end, collection):
             else:
                 eligible.append(event)
     count = len(eligible) if start < end else None
-    total_amount = _sum(event["amount"] for event in eligible)
-    total_seconds = sum(event["duration"] for event in eligible)
-    daily, rental_days = None, None
-    if eligible:
-        with localcontext() as ctx:
-            ctx.prec = max(50, len(Decimal(total_amount).as_tuple().digits) + len(str(total_seconds)) + 30)
-            daily = _text_decimal((Decimal(total_amount) * _DAY / Decimal(total_seconds)).quantize(_NANO, rounding=ROUND_HALF_UP))
-            rental_days = _text_decimal((Decimal(total_seconds) / _DAY).quantize(_NANO, rounding=ROUND_HALF_UP))
+    total_amount, daily, rental_days = _rental_totals(eligible)
     return {"window_from": _iso(start), "window_to": _iso(end), "recorded_rentals": count,
             "recorded_volume": (total_amount or "0") if count is not None else None,
             "average_daily_rate": daily,
             "rental_days": (rental_days or "0") if count is not None else None,
             "excluded_counts": dict(sorted(excluded.items())), "coverage": "observed_sample"}
+
+
+def _rental_statistics(gift, events, rejected):
+    """Summarize saved gift history independently of price-change baselines.
+
+    These are partial gift-level samples and may predate wallet ownership.
+    An empty eligible sample does not establish that a gift was never rented.
+    Current rental/seed fields are not independent verified rental evidence.
+    """
+    result = {
+        "version": 1, "semantics_version": RENTAL_STATISTICS_SEMANTICS,
+        "coverage": "not_applicable", "observed_at": None,
+        "first_rental_at": None, "last_rental_at": None,
+        "observed_rentals": None, "recorded_rentals": None,
+        "verified_rentals_without_history": None, "recorded_volume": None,
+        "average_daily_rate": None, "rental_days": None, "excluded_counts": {},
+    }
+    collection = _key(gift.get("collection_address"))
+    if (not gift.get("is_portfolio") or not _key(gift.get("nft_address"))
+        or gift.get("collection_conflict") or collection is None):
+        return result
+    excluded, eligible = Counter(rejected), []
+    for event in events:
+        # The shared parser already counted these exclusions, including
+        # malformed records whose rental timestamp could not be established.
+        if event.get("reason"):
+            continue
+        if event.get("collection") != collection:
+            excluded["collection_mismatch"] += 1
+        else:
+            eligible.append(event)
+    result.update(coverage="no_history", excluded_counts=dict(sorted(excluded.items())))
+    if not eligible:
+        return result
+    starts = {event["when"] for event in eligible}
+    total_amount, daily, rental_days = _rental_totals(eligible)
+    result.update(
+        coverage="partial", observed_at=_iso(max(event["observed_at"] for event in eligible)),
+        first_rental_at=_iso(min(starts)), last_rental_at=_iso(max(starts)),
+        observed_rentals=len(starts), recorded_rentals=len(eligible),
+        verified_rentals_without_history=0, recorded_volume=total_amount,
+        average_daily_rate=daily, rental_days=rental_days,
+    )
+    return result
 
 
 def _comparisons(changes, index, events, current, collection):
@@ -373,6 +427,7 @@ def enrich_price_tracking(store, gifts, wallet=None, *, owned_price_observations
     events, observed_history, rejected = _saved_rentals(store, wanted, current)
     for gift in gifts:
         nft = _key(gift.get("nft_address"))
+        gift["rental_statistics"] = _rental_statistics(gift, events[nft], rejected[nft])
         warnings = [
             "Only saved observations and eligible base GRAM rental records are included; coverage may be incomplete.",
             "Gift history does not establish wallet proceeds, net income, rental completion or a causal effect of changing a price.",

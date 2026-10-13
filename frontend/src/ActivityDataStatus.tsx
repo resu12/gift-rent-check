@@ -33,7 +33,7 @@ export function ActivityDataStatus({ rows, now = Date.now(), onAction, actionLab
         const view = activityStatusPresentation(row, now, feedback);
         const label = actionLabel(row);
         const actionName = `${label} ${row.label.toLowerCase()}`;
-        const disabled = view.pending || actionDisabled?.(row) === true;
+        const disabled = view.pending && !row.id.startsWith('analytics-') || actionDisabled?.(row) === true;
         const suppliedReason = actionDisabledReason?.(row);
         const disabledReason = disabled && !view.pending && suppliedReason && suppliedReason !== view.notice?.message ? suppliedReason : undefined;
         const reasonId = `${titleId}-${row.id}-reason`, noticeId = `${titleId}-${row.id}-notice`;
@@ -41,6 +41,7 @@ export function ActivityDataStatus({ rows, now = Date.now(), onAction, actionLab
         const oldest = activityStatusTimestamp(row.oldestUpdatedAt, now);
         const scopedCheck = activityStatusTimestamp(row.checkPresentation?.checkedAt, now);
         const savedCheck = activityStatusTimestamp(row.checkedAt, now);
+        const showCoverage = view.coverage && (view.tone !== 'fresh' || view.pending || view.coverageWarning || row.id === 'analytics-all_time');
         return <li key={row.id} className={`activity-data-status-row ${view.tone}`}>
           <div className="activity-data-status-main">
             <details className="activity-data-status-row-details">
@@ -55,18 +56,18 @@ export function ActivityDataStatus({ rows, now = Date.now(), onAction, actionLab
                   <span className="activity-data-status-updated" aria-label={view.timeDescription}>
                     {view.timestamp ? <time dateTime={view.timestamp} title={dateTime(view.timestamp)}>{view.time}</time> : view.time}
                   </span>
-                  {view.coverage && <span className={`activity-data-status-coverage${view.coverageWarning ? ' warning' : ''}`}><span aria-hidden="true"> · </span>{view.coverage}</span>}
+                  {showCoverage && <span className={`activity-data-status-coverage${view.coverageWarning ? ' warning' : ''}`}><span aria-hidden="true"> · </span>{view.coverage}</span>}
                   <Icon name="chevron" size={13} className="activity-data-status-expand" /><span className="sr-only">Details</span>
                 </span>
               </summary>
               <div className="activity-data-status-detail-content">
                 <dl>
-                  {row.coverage && <><dt>Coverage</dt><dd>{row.coverage}</dd></>}
-                  {row.checkStatus && <><dt>Check summary</dt><dd>{row.checkStatus}</dd></>}
-                  {scopedCheck ? <><dt>Scoped check started</dt><dd><time dateTime={scopedCheck}>{dateTime(scopedCheck)}</time></dd></>
-                    : savedCheck && <><dt>Saved check evidence</dt><dd><time dateTime={savedCheck}>{dateTime(savedCheck)}</time></dd></>}
-                  {updated && <><dt>Latest value observation</dt><dd><time dateTime={updated}>{dateTime(updated)}</time></dd></>}
-                  {oldest && oldest !== updated && <><dt>Oldest value observation</dt><dd><time dateTime={oldest}>{dateTime(oldest)}</time></dd></>}
+                  {row.coverage && <><dt>Included</dt><dd>{row.coverage}</dd></>}
+                  {row.checkStatus && <><dt>Last check</dt><dd>{row.checkStatus}</dd></>}
+                  {scopedCheck ? <><dt>Check started</dt><dd><time dateTime={scopedCheck}>{dateTime(scopedCheck)}</time></dd></>
+                    : savedCheck && <><dt>Checked</dt><dd><time dateTime={savedCheck}>{dateTime(savedCheck)}</time></dd></>}
+                  {updated && <><dt>Newest saved data</dt><dd><time dateTime={updated}>{dateTime(updated)}</time></dd></>}
+                  {oldest && oldest !== updated && <><dt>Oldest saved data</dt><dd><time dateTime={oldest}>{dateTime(oldest)}</time></dd></>}
                 </dl>
                 {row.detail && <p>{row.detail}</p>}
                 {feedback?.tone === 'pending' && <p>{feedback.message}</p>}

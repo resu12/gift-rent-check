@@ -8,7 +8,7 @@ export function ListFooter({ visibleCount, total, hasMore, loadMore, sentinelRef
   sentinelRef: Ref<HTMLDivElement>;
   noun?: string;
 }) {
-  return <div className="table-footer progressive-footer" ref={sentinelRef}>
+  return <div className={hasMore ? 'table-footer progressive-footer' : 'sr-only'} ref={sentinelRef}>
     <span role="status" aria-live="polite" aria-atomic="true">{hasMore ? `${visibleCount.toLocaleString()} of ${total.toLocaleString()} ${noun}` : total > 0 ? `All ${total.toLocaleString()} matching ${noun} shown` : `No ${noun}`}</span>
     {hasMore && <button type="button" className="button secondary small" onClick={loadMore} aria-label={`Load more ${noun}`}>Load more</button>}
   </div>;

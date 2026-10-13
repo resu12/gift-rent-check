@@ -83,6 +83,22 @@ test('owned scope keeps its requested revision when later history adds conflicts
   assert.equal((await readOwnedGiftScope(f.bounded,f.revision())).targets.length,0);
 });
 
+test('bounded compact scope matcher preserves canonical aliases, falsy fallthrough and source-only conflicts',()=>{
+  const wanted=address('matcher'),filter=ownedScopeRecordFilter([wanted]);
+  for(const identity of [wanted,wanted.toUpperCase().replace('0:','00:'),friendly(wanted),friendly(wanted,false),friendly(wanted,true,false),friendly(wanted,false,false)]) {
+    for(const key of ['nft_address','identity'])assert.equal(filter.matches({kind:'metadata',record:{[key]:identity,collection_conflict:true}}),true);
+    for(const value of ['',false,0,null])assert.equal(filter.matches({kind:'history',record:{nft_address:value,identity}}),true);
+  }
+  for(const record of [{source_json:'malformed JSON',id:wanted},{source:{address:wanted}},{source_json:`{"address":"${address('other')}","address":"${wanted}"}`},
+    {nft_address:false,identity:0,source_json:{address:wanted}},{source_json:`{"address":"${wanted}","nested":${'['.repeat(1001)}0${']'.repeat(1001)}}`}]) {
+    assert.equal(filter.matches({kind:'history',record}),true,'nested sources reach original parser unchanged');
+  }
+  assert.equal(filter.matches({kind:'metadata',record:{identity:address('unrelated')}}),false);
+  assert.equal(filter.matches({kind:'owned_price',record:{identity:wanted}}),false);
+  assert.equal(filter.matches({kind:'metadata',record:{identity:'bad',source:{address:wanted}}}),false,'truthy invalid leading identity cannot pass scopeBuilder');
+  assert.equal(ownedScopeRecordFilter([]).matches({kind:'metadata',record:{identity:wanted}}),false);
+});
+
 for(const mode of ['private','public'])test(`${mode} large portfolio scope fits the hosted shallow SQL expression limit`,async t=>{
   const f=await fixture(t,mode),identities=Array.from({length:256},(_,index)=>address('large-owned:'+index));
   const filter=ownedScopeRecordFilter(identities);let depth=0,maximum=0;

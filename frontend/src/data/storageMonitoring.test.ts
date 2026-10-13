@@ -87,12 +87,48 @@ test('hide and provider activity stop scheduled mutations; returning visible res
     async get() { calls.push('get'); return pending(); }, async step() { calls.push('step'); return status(); },
   } });
   controller.context('owner'); controller.providerBusy(true); await fake.advance(1500);
-  assert.deepEqual(calls, ['get']); await fake.advance(10000); assert.deepEqual(calls, ['get']);
+  assert.deepEqual(calls, []); await fake.advance(10000); assert.deepEqual(calls, []);
   controller.providerBusy(false); hidden = true; controller.visibilityChanged();
-  assert.equal(fake.count(), 0); await fake.advance(10000); assert.deepEqual(calls, ['get']);
+  assert.equal(fake.count(), 0); await fake.advance(10000); assert.deepEqual(calls, []);
   hidden = false; controller.visibilityChanged(); await fake.advance(2500);
-  assert.deepEqual(calls, ['get', 'get']); await fake.advance(2500);
-  assert.deepEqual(calls, ['get', 'get', 'step']); controller.dispose();
+  assert.deepEqual(calls, ['get']); await fake.advance(2500);
+  assert.deepEqual(calls, ['get', 'step']); controller.dispose();
+});
+
+test('initial automatic storage status waits for provider idle, even across repeated busy pulses', async () => {
+  const fake = clock(), calls: string[] = [];
+  const controller = createStorageMaintenanceController({ ...fake, isHidden: () => false, adapter: {
+    async get() { calls.push('get'); return status(); }, async step() { calls.push('step'); return status(); },
+  } });
+  controller.providerBusy(true); controller.context('owner'); await fake.advance(60000);
+  controller.visibilityChanged(); controller.providerBusy(true); await fake.advance(60000);
+  assert.deepEqual(calls, []); assert.equal(fake.count(), 0);
+  controller.providerBusy(false); await fake.advance(1499); assert.deepEqual(calls, []);
+  await fake.advance(1); assert.deepEqual(calls, ['get']); assert.equal(controller.getSnapshot().status?.status, 'healthy');
+  controller.dispose();
+});
+
+test('explicit saved-status check remains available during provider work without starting cleanup', async () => {
+  const fake = clock(), calls: string[] = [];
+  const controller = createStorageMaintenanceController({ ...fake, isHidden: () => false, adapter: {
+    async get() { calls.push('get'); return pending(); }, async step() { calls.push('step'); return status(); },
+  } });
+  controller.context('owner'); controller.providerBusy(true); await controller.checkNow();
+  assert.deepEqual(calls, ['get']); assert.equal(controller.getSnapshot().status?.inventory_complete, false);
+  await fake.advance(60000); await controller.cleanNow(); assert.deepEqual(calls, ['get']);
+  controller.providerBusy(false); await fake.advance(1500); assert.deepEqual(calls, ['get', 'get']);
+  await fake.advance(2500); assert.deepEqual(calls, ['get', 'get', 'step']); controller.dispose();
+});
+
+test('a scheduled pressure-status read pauses if provider work starts again before its deadline', async () => {
+  const fake = clock(); let reads = 0;
+  const controller = createStorageMaintenanceController({ ...fake, isHidden: () => false, adapter: {
+    async get() { reads++; return status(); }, async step() { return status(); },
+  } });
+  controller.context('owner'); await fake.advance(1500); assert.equal(reads, 1);
+  controller.providerBusy(true); controller.providerBusy(false); await fake.advance(1000); controller.providerBusy(true);
+  await fake.advance(10000); assert.equal(reads, 1);
+  controller.providerBusy(false); await fake.advance(1500); assert.equal(reads, 2); controller.dispose();
 });
 
 test('a settled provider action refreshes cheap counters once so new pressure cannot leave the card green', async () => {

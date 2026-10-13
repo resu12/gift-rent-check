@@ -1,8 +1,9 @@
 // Reproducible, owner-only deployment/reset administration. Never prints
 // tokens, database documents, provider responses or individual gift records.
-import {readFileSync,readdirSync} from 'node:fs';
+import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {option,requireId,validateAuthenticatedDestination,validateServerlessEnvironment} from './destination.mjs';
+import {adminModuleSources} from './admin-module-sources.mjs';
 
 try {
   const args=process.argv.slice(2),allowed=['--app-id','--owner-id','--action','--scope','--reset-id','--floor','--after','--generation'];
@@ -19,13 +20,13 @@ try {
   const {resolveToken}=await import('../node_modules/@tgcloud/cli/src/core/credentials.js');
   const token=await resolveToken();validateAuthenticatedDestination(token,appId);
   const {getFiles,runFunction}=await import('../node_modules/@tgcloud/cli/src/api/endpoints.js');
-  const deployed=await getFiles(token),modules={...deployed.canonical_modules};
-  for(const filename of readdirSync(new URL('../tgcloud/lib/',import.meta.url)).filter(name=>name.endsWith('.js')))
-    modules['lib/'+filename.slice(0,-3)]=readFileSync(new URL('../tgcloud/lib/'+filename,import.meta.url),'utf8');
+  const deployed=await getFiles(token),overrides={};
+  for(const name of ['storage-policy','checkpoint-storage','budget-reset-checkpoint-storage'])
+    overrides['lib/'+name]=readFileSync(new URL('../tgcloud/lib/'+name+'.js',import.meta.url),'utf8');
   for(const name of ['storage-accounting','compact-operational-storage','normalized-record-storage','development-storage-reset'])
-    modules['lib/admin-'+name]=readFileSync(new URL('./'+name+'.mjs',import.meta.url),'utf8')
+    overrides['lib/admin-'+name]=readFileSync(new URL('./'+name+'.mjs',import.meta.url),'utf8')
       .replaceAll("from '../tgcloud/lib/","from './").replaceAll("from './compact-operational-storage.mjs'","from './admin-compact-operational-storage.js'");
-  modules['endpoints/adminCompactStorage']=`import {db} from 'sdk';
+  const endpoint=`import {db} from 'sdk';
     import {ownerTelegramId} from '../lib/private-config.js';
     import {installCompactStorageAccounting} from '../lib/admin-storage-accounting.js';
     import {installCompactOperationalStorage} from '../lib/admin-compact-operational-storage.js';
@@ -48,6 +49,7 @@ try {
       const normalized=await db.get("SELECT (SELECT count(*) FROM service_record_payloads) AS payloads,(SELECT count(*) FROM service_record_occurrences) AS observations");
       return {usage,private:privateCounts,normalized,provider_requests:0};
     }`;
+  const modules=adminModuleSources(deployed.canonical_modules,overrides,'endpoints/adminCompactStorage',endpoint);
   const result=await runFunction(token,'endpoints/adminCompactStorage',modules,input,{initData:{user:{id:Number(owner)}}});
   if(!result?.result||typeof result.result!=='object')throw Error('Administrative result missing');
   console.log(JSON.stringify(result.result));

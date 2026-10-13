@@ -46,7 +46,7 @@ test('server-authorized cache finishes without steps or client-only freshness de
   });
   await driver.start(); await driver.start();
   assert.deepEqual(calls, [{ endpoint: 'startGiftRefresh', input: { session_id: 'opening', automatic: true } }]);
-  assert.equal(reloads, 1); assert.equal(driver.getSnapshot().cacheHit, true);
+  assert.equal(reloads, 0); assert.equal(driver.getSnapshot().cacheHit, true);
   assert.equal(ownedPriceStatusText(driver.getSnapshot()), 'Your gifts were checked recently.');
 });
 

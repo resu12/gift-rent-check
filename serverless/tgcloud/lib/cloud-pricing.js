@@ -2,7 +2,7 @@
 // monetary calculation uses BigInt fractions; source strings stay unchanged.
 import {canonicalAddress as strictAddress, addressKey as uncachedAddressKey, traitKey as uncachedTraitKey, instant as uncachedInstant, instantOrder as uncachedInstantOrder, iso, resolveCloudWindow, rational, decimal, plus, sumRationals, multiply, compare, decimalText, canonicalJSON} from './cloud-pricing-core.js';
 import {CONTRACT_VARIANTS, MARKETAPP_OPERATOR} from './ton-price-decoder.js';
-import {buildGiftPriceTracking} from './price-tracking.js';
+import {buildGiftPriceTracking, buildGiftRentalStatistics, prepareGiftRentalFacts} from './price-tracking.js';
 import {isSupplementaryExpiryFailure} from './rental-expiry-check.js';
 export {canonicalAddress, addressKey, resolveCloudWindow, validateSavedCloudWindow} from './cloud-pricing-core.js';
 
@@ -438,10 +438,11 @@ function ownedStatusProof(gift, observation, owner, now) {
   return {valid, direct};
 }
 function retainVerifiedRentalStart(gift, observations, wallet, now) {
-  if (!gift.is_portfolio || gift.collection_conflict || !observations?.length) return;
+  const empty = {starts: [], observed_at: null};
+  if (!gift.is_portfolio || gift.collection_conflict || !observations?.length) return empty;
   const tonAddress = value => {try {return strictAddress(value);} catch {return null;}};
   const owner = tonAddress(wallet);
-  if (!owner || !tonAddress(gift.nft_address) || !tonAddress(gift.collection_address)) return;
+  if (!owner || !tonAddress(gift.nft_address) || !tonAddress(gift.collection_address)) return empty;
   const groups = new Map();
   for (const observation of observations) {
     if (tonAddress(observation.row.wallet) !== owner) continue;
@@ -449,7 +450,7 @@ function retainVerifiedRentalStart(gift, observations, wallet, now) {
     if (!groups.has(order)) groups.set(order, []);
     groups.get(order).push(observation);
   }
-  let latestStart = null;
+  let latestStart = null, latestObserved = null;const verifiedStarts=new Set();
   for (const group of groups.values()) {
     // Every simultaneous observation must independently pass the complete
     // scope, holder, hash and NFT stability checks. Do not combine partial
@@ -457,6 +458,8 @@ function retainVerifiedRentalStart(gift, observations, wallet, now) {
     if (!group.every(observation => ownedStatusProof(gift, observation, owner, now).valid)) continue;
     const starts = group.map(observation => verifiedRentalStart(observation.row, observation.when));
     if (starts.includes(null) || new Set(starts).size !== 1) continue;
+    verifiedStarts.add(starts[0]);
+    latestObserved = group.reduce((latest, observation) => Math.max(latest ?? -Infinity, observation.when), latestObserved);
     if (latestStart === null || starts[0] > latestStart) latestStart = starts[0];
   }
   // This is dated evidence that a rental began, not proof that the same rental
@@ -464,6 +467,7 @@ function retainVerifiedRentalStart(gift, observations, wallet, now) {
   // fields without erasing a rental that was already independently verified.
   gift.last_verified_rental_started_at = latestStart;
   gift.last_verified_rental_start_source = latestStart ? 'verified_contract' : null;
+  return {starts: [...verifiedStarts].sort(), observed_at: latestObserved === null ? null : iso(latestObserved)};
 }
 function refreshOwnedStatus(gift, observations, wallet, now, personalObservations) {
   if (!gift.is_portfolio) return;
@@ -664,7 +668,7 @@ function createBuilder(portfolioRecords, input = {}, context = {}) {
 function projectDashboard(data, {now, selectedSource, backdrop, window, rental, traitNow, cutoff, context}) {
   const traits = new Map();
   for (const [nft, evidence] of data.evidence) traits.set(nft, traitsFor(evidence, cutoff, traitNow));
-  const gifts = [...data.gifts.values()].map(giftDefaults);
+  const gifts = [...data.gifts.values()].map(giftDefaults),verifiedRentalStartsByGift=new Map();
   const rejected = {}; let peers;
   if (rental) {const result = rentalPeers(data, traits, window, now, backdrop); peers = result.peers; Object.assign(rejected, result.rejected);}
   else peers = listingPeers(data, traits, cutoff, traitNow, window.timeframe === 'custom', backdrop, rejected);
@@ -720,7 +724,7 @@ function projectDashboard(data, {now, selectedSource, backdrop, window, rental, 
     gift.pricing = pricing;
     refreshAsking(gift, data.listings.get(nft), now);
     refreshOwnedAsking(gift, data.ownedPrices.get(nft), data.settings.wallet ?? data.settings.wallet_address);
-    retainVerifiedRentalStart(gift, data.ownedStatuses.get(nft), data.settings.wallet ?? data.settings.wallet_address, now);
+    verifiedRentalStartsByGift.set(nft,retainVerifiedRentalStart(gift, data.ownedStatuses.get(nft), data.settings.wallet ?? data.settings.wallet_address, now));
     const verifiedStatus=refreshOwnedStatus(gift, data.ownedStatuses.get(nft), data.settings.wallet ?? data.settings.wallet_address, now, data.personalGifts.get(nft));
     refreshPersonalGift(gift, data.personalGifts.get(nft), data.settings.wallet ?? data.settings.wallet_address, now, verifiedStatus);
   }
@@ -733,7 +737,10 @@ function projectDashboard(data, {now, selectedSource, backdrop, window, rental, 
   }
   for (const gift of gifts) {
     const nft = addressKey(gift.nft_address);
-    gift.price_tracking = buildGiftPriceTracking({gift, wallet: data.settings.wallet ?? data.settings.wallet_address, listings: data.listingHistory.get(nft), ownedPrices: data.ownedPrices.get(nft), personalGifts:data.personalGifts.get(nft), history: historyByGift.get(nft), now});
+    const verified = verifiedRentalStartsByGift.get(nft);
+    const rentalFacts = gift.is_portfolio && !gift.collection_conflict ? prepareGiftRentalFacts({gift, history: historyByGift.get(nft), verifiedRentalStarts: verified?.starts, verifiedRentalObservedAt: verified?.observed_at, now}) : null;
+    gift.price_tracking = buildGiftPriceTracking({gift, wallet: data.settings.wallet ?? data.settings.wallet_address, listings: data.listingHistory.get(nft), ownedPrices: data.ownedPrices.get(nft), personalGifts:data.personalGifts.get(nft), rentalFacts, now});
+    gift.rental_statistics = buildGiftRentalStatistics({gift, rentalFacts, now});
   }
   gifts.sort((a, b) => Number(!a.is_portfolio) - Number(!b.is_portfolio) || (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase()) || a.id.localeCompare(b.id));
   const portfolio = gifts.filter(g => g.is_portfolio), by = test => portfolio.filter(test).length;

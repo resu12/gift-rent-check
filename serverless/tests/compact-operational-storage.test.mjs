@@ -29,6 +29,7 @@ function fixture(t) {
     CREATE TABLE owned_refresh_sessions(session_id TEXT PRIMARY KEY,run_id INTEGER,source_sequence INTEGER);
     CREATE TABLE owned_refresh_index(id INTEGER PRIMARY KEY,sequence INTEGER);
     CREATE TABLE gift_refresh_runs(run_id INTEGER PRIMARY KEY,summary_json TEXT,source_sequence INTEGER);
+    CREATE TABLE public_gift_refresh_runs(row_id TEXT PRIMARY KEY,user_id TEXT,run_id INTEGER,summary_json TEXT,source_sequence INTEGER);
     CREATE TABLE public_owned_refresh_runs(row_id TEXT PRIMARY KEY,user_id TEXT,run_id INTEGER,summary_json TEXT,source_sequence INTEGER);
     CREATE TABLE public_owned_refresh_sessions(row_id TEXT PRIMARY KEY,user_id TEXT,session_id TEXT,run_id INTEGER,source_sequence INTEGER);
     CREATE TABLE public_owned_refresh_index(user_id TEXT PRIMARY KEY,sequence INTEGER);`);
@@ -93,6 +94,9 @@ test('public retirement, summaries, replay bindings and watermarks stay within t
   assert.equal(f.database.prepare('SELECT sequence FROM public_owned_refresh_index WHERE user_id=?').get('41').sequence,2);
   assert.equal(f.database.prepare('SELECT sequence FROM public_owned_refresh_index WHERE user_id=?').get('42').sequence,1);
   assert.equal(f.database.prepare('SELECT run_id FROM public_owned_refresh_sessions WHERE row_id=?').get(JSON.stringify(['42','session','owned-session-1-saved'])).run_id,1);
+  const gifts=f.database.prepare('SELECT user_id,run_id,summary_json FROM public_gift_refresh_runs ORDER BY user_id,run_id').all();
+  assert.deepEqual(gifts.map(row=>[row.user_id,row.run_id]),[['41',1],['41',2],['42',1]]);
+  assert.ok(gifts.every(row=>!Object.hasOwn(JSON.parse(row.summary_json),'results')&&!Object.hasOwn(JSON.parse(row.summary_json),'session_fence')));
 });
 
 test('a remapped immutable session aborts the complete event and every preceding archive write',t=>{
@@ -157,7 +161,7 @@ test('compact archive watermark mismatch fails closed rather than rebuilding mis
 });
 
 test('installation is idempotent and rejects unexpected existing trigger definitions',async t=>{
-  const f=fixture(t);assert.deepEqual(await installCompactOperationalStorage(f.db),{ready:true,trigger_count:2});
+  const f=fixture(t);assert.deepEqual(await installCompactOperationalStorage(f.db),{ready:true,trigger_count:3});
   assert.equal((await f.db.get(`SELECT 1 AS ready WHERE ${COMPACT_OPERATIONAL_READY_SQL}`)).ready,1);
   f.database.exec('DROP TRIGGER operational_storage_v1_private_insert');assert.equal(await f.db.get(`SELECT 1 AS ready WHERE ${COMPACT_OPERATIONAL_READY_SQL}`),null);
   f.database.exec('CREATE TRIGGER operational_storage_v1_private_insert AFTER INSERT ON cloud_events BEGIN SELECT 1; END');

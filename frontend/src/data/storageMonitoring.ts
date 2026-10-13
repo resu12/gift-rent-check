@@ -185,7 +185,7 @@ export function createStorageMaintenanceController(options: {
 
   const plan = (delay?: number) => {
     unschedule();
-    if (!canRun() || snapshot.error) return;
+    if (!canRun() || snapshot.error || inhibited) return;
     if (!snapshot.status || readRequested) {
       scheduled = timer(() => { scheduled = undefined; void perform(false, true); }, delay ?? 1500);
       return;
@@ -260,6 +260,8 @@ export function createStorageMaintenanceController(options: {
       inhibited = busy; publish(snapshot); plan();
     },
     visibilityChanged() { updateManualClock(); publish(snapshot); plan(); },
+    /** Explicit saved-status reads remain usable while provider updates are busy. */
+    checkNow() { return perform(false, true); },
     async cleanNow() {
       // A second tap between scheduled chunks must not restart the batch or
       // reset its safety counter. Paused work and explicit retries remain usable.

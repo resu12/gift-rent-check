@@ -4,13 +4,14 @@ import {DatabaseSync} from 'node:sqlite';
 import {createCloudRepository} from '../tgcloud/lib/cloud-repository.js';
 import {createCloudEngine} from '../tgcloud/lib/cloud-engine.js';
 import {buildCloudDashboard} from '../tgcloud/lib/cloud-pricing.js';
+import {SUPPORTED_CODE_HASH, MARKETAPP_OPERATOR} from '../tgcloud/lib/ton-price-decoder.js';
 
 const ctx = {initData: {user: {id: 123}}};
 function fixture(t) {
   const database = new DatabaseSync(':memory:'); t.after(() => database.close());
   database.exec(`CREATE TABLE cloud_events(sequence INTEGER PRIMARY KEY,event_key TEXT,state_json TEXT,job_id INTEGER,job_json TEXT,records_json TEXT,raw_body TEXT,observed_at TEXT);
     CREATE TABLE collector_state(id INTEGER,document TEXT);
-    CREATE TABLE personal_rental_analytics(fingerprint TEXT,imported_at TEXT,wallet TEXT,captured_at TEXT,normalized_json TEXT);
+    CREATE TABLE personal_rental_analytics(fingerprint TEXT,imported_at TEXT,wallet TEXT,captured_at TEXT,normalized_json TEXT,raw_snapshot TEXT);
     CREATE TABLE dashboard_projection_cache(selection_key TEXT PRIMARY KEY,records_revision INTEGER,time_bucket INTEGER,snapshot_json TEXT)`);
   const reads = [];
   const db = {async run(sql, params = {}) {return {rowsAffected: Number(database.prepare(sql).run(params).changes)};},
@@ -50,6 +51,31 @@ test('unchanged projections reuse cache while request budgets remain fresh', asy
   assert.notEqual(budgetChanged.update_token, first.update_token); assert.equal(f.projections(), 1);
 });
 
+test('gift rental statistics survive cached reads and invalidate the earlier dashboard projection format', async t => {
+  const f = fixture(t), address = n => `0:${String(n).padStart(64, '0')}`;
+  const wallet = address(1), nft = address(2), collection = address(3);
+  await f.append([{kind: 'settings', record: {wallet}}, {kind: 'portfolio', record: {nft_address: nft, collection_address: collection, is_portfolio: true}},
+    {kind: 'history', observed_at: '2026-10-10T12:00:15Z', record: {identity: nft, source_json: {
+      address: nft, name: 'Saved gift', collection_address: collection, src: wallet, dst: address(4), ts: Date.parse('2025-01-01T12:00:00Z') / 1000,
+      currency: 'GRAM', price: '0.45', price_nano: '450000000', duration: 259200, is_extend: false,
+    }}}]);
+  const first = await f.engine.getDashboard(ctx, {source: 'rentals', timeframe: '30d'}), stats = first.gifts[0].rental_statistics;
+  assert.equal(first.gifts[0].price_tracking.coverage, 'no_observations');
+  assert.equal(stats.recorded_rentals, 1); assert.equal(stats.recorded_volume, '0.45'); assert.equal(stats.average_daily_rate, '0.15');
+  const before = await f.repository.read();
+  assert.deepEqual((await f.engine.getDashboard(ctx, {source: 'rentals', timeframe: '30d'})).gifts[0].rental_statistics, stats);
+  assert.equal(f.projections(), 1);
+  // Simulate a cache from the previous deployment, which has no per-gift stats.
+  const cached = f.database.prepare('SELECT * FROM dashboard_projection_cache').get(), snapshot = JSON.parse(cached.snapshot_json);
+  delete snapshot.dashboard.gifts[0].rental_statistics;
+  f.database.prepare('UPDATE dashboard_projection_cache SET selection_key=?,snapshot_json=? WHERE selection_key=?').run(
+    cached.selection_key.replace('projection-v10-gift-rental-statistics', 'projection-v9-verified-rental-counts'), JSON.stringify(snapshot), cached.selection_key);
+  assert.deepEqual((await f.engine.getDashboard(ctx, {source: 'rentals', timeframe: '30d'})).gifts[0].rental_statistics, stats);
+  assert.equal(f.projections(), 2);
+  assert.deepEqual((await f.engine.getDashboard(ctx, {source: 'listings', timeframe: '24h'})).gifts[0].rental_statistics, stats);
+  assert.equal((await f.repository.read()).revision, before.revision, 'projection reads do not write checkpoints or source data');
+});
+
 test('price tracking survives cached dashboard reads without provider requests or checkpoint writes', async t => {
   const f = fixture(t), address = n => `0:${String(n).padStart(64, '0')}`;
   const wallet = address(1), nft = address(2), collection = address(3);
@@ -77,7 +103,60 @@ test('price tracking survives cached dashboard reads without provider requests o
   const otherSelection = await f.engine.getDashboard(ctx, {source: 'listings', timeframe: '7d', backdrop: 'Black'});
   assert.deepEqual(otherSelection.gifts.find(gift => gift.nft_address === nft).price_tracking, tracking);
   assert.equal((await f.repository.read()).revision, before.revision);
-  assert.ok(f.database.prepare("SELECT selection_key FROM dashboard_projection_cache WHERE selection_key LIKE 'm:%'").all().every(row => row.selection_key.includes('projection-v7-verified-rental-start')));
+  assert.ok(f.database.prepare("SELECT selection_key FROM dashboard_projection_cache WHERE selection_key LIKE 'm:%'").all().every(row => row.selection_key.includes('projection-v10-gift-rental-statistics')));
+
+  // A successful website refresh adds a new source baseline. Rebuilding or
+  // caching that projection must keep the listing change and its own evidence.
+  await f.append([{kind: 'personal_gift', observed_at: '2026-10-10T12:00:00Z', record: {
+    provider: 'marketapp_website', semantics_version: 'marketapp-my-nfts-v1', scope: 'my_nfts',
+    authenticated: true, ownership_verified: false, visible: true, wallet,
+    nft_address: nft, collection_address: collection, rental_state: 'for_rent', rental_until: null,
+    currency: 'GRAM', price_per_day: '0.2',
+  }}]);
+  const refreshed = await f.engine.getDashboard(ctx, {source: 'rentals', timeframe: '30d'});
+  const retained = refreshed.gifts.find(gift => gift.nft_address === nft).price_tracking;
+  assert.equal(retained.source, 'Marketapp account');
+  assert.equal(retained.baseline_price_per_day, '0.2');
+  assert.equal(retained.change_count, 1);
+  assert.deepEqual(retained.changes, tracking.changes);
+  const cached = await f.engine.getDashboard(ctx, {source: 'rentals', timeframe: '30d'});
+  assert.deepEqual(cached.gifts.find(gift => gift.nft_address === nft).price_tracking, retained);
+  const switched = await f.engine.getDashboard(ctx, {source: 'listings', timeframe: '7d'});
+  assert.deepEqual(switched.gifts.find(gift => gift.nft_address === nft).price_tracking, retained);
+
+  // Fresh contract evidence must invalidate the projection and survive cache
+  // reuse while its payment history is still missing.
+  const startedAt = '2026-10-06T12:00:15Z', start = Date.parse(startedAt) / 1000;
+  const checkedAt = '2026-10-10T11:59:00Z', holder = address(5);
+  await f.append([{kind: 'owned_status', observed_at: checkedAt, record: {
+    provider: 'toncenter', semantics_version: 'ton-owned-rental-status-v1', nft_address: nft, nft,
+    collection_address: collection, wallet, owner: wallet, observed_owner: holder, holding_contract: holder,
+    verified: true, reason: 'verified_rental_status', rental_state: 'rented', role: 1, status: 1,
+    renter: address(6), counterpart: address(7), rental_until: start + 30 * 86400, rental_until_unit: 'Unix seconds',
+    rental_duration: 30 * 86400, rental_duration_unit: 'seconds', created_at: start, created_at_unit: 'Unix seconds',
+    code_hash: SUPPORTED_CODE_HASH, data_hash: 'b'.repeat(64), code_hash_verified: true, data_hash_verified: true,
+    decoder_version: 'fixture-v1', marketplace: MARKETAPP_OPERATOR, nft_last_transaction_lt: '100', account_last_transaction_lt: '99',
+    checked_at: checkedAt, rechecked_at: checkedAt,
+  }}]);
+  const afterPeriod = dashboard => dashboard.gifts.find(gift => gift.nft_address === nft).price_tracking.changes[0].comparisons[0].after;
+  const verified = afterPeriod(await f.engine.getDashboard(ctx, {source: 'rentals', timeframe: '30d'}));
+  assert.equal(verified.observed_rentals, 2); assert.equal(verified.verified_rentals_without_history, 1);
+  assert.equal(verified.recorded_rentals, 1); assert.equal(verified.recorded_volume, '0.45');
+  const projectionsBeforeCache = f.projections(), revisionBeforeCache = (await f.repository.read()).revision;
+  assert.deepEqual(afterPeriod(await f.engine.getDashboard(ctx, {source: 'rentals', timeframe: '30d'})), verified);
+  assert.equal(f.projections(), projectionsBeforeCache);
+  assert.equal((await f.repository.read()).revision, revisionBeforeCache);
+
+  // Later payment history replaces the supplemental start, never double counts
+  // it or leaves a stale pending-history badge in the cached projection.
+  await f.append([{kind: 'history', observed_at: '2026-10-10T12:00:15Z', record: {identity: nft, source_json: {
+    address: nft, name: 'Synthetic tracked gift', collection_address: collection, src: wallet, dst: address(6),
+    ts: start, currency: 'GRAM', price: '4.5', price_nano: '4500000000', duration: 30 * 86400, is_extend: false, tx_hash: null,
+  }}}]);
+  const paid = afterPeriod(await f.engine.getDashboard(ctx, {source: 'rentals', timeframe: '30d'}));
+  assert.equal(paid.observed_rentals, 2); assert.equal(paid.verified_rentals_without_history, 0);
+  assert.equal(paid.recorded_rentals, 2); assert.equal(paid.recorded_volume, '4.95');
+  assert.deepEqual(afterPeriod(await f.engine.getDashboard(ctx, {source: 'rentals', timeframe: '30d'})), paid);
 });
 
 test('data, time, selection and analytics changes invalidate the appropriate projection or token', async t => {
@@ -91,6 +170,49 @@ test('data, time, selection and analytics changes invalidate the appropriate pro
   assert.notEqual(later.update_token, changed.update_token);
   f.database.prepare('INSERT INTO personal_rental_analytics(fingerprint,imported_at) VALUES(?,?)').run('sample', '2026-10-10T12:01:15Z');
   assert.notEqual((await f.engine.getDashboardRevision(ctx)).token, later.update_token);
+});
+
+test('startup reuses an unchanged dated projection then the normal read recalculates the current window', async t => {
+  const f = fixture(t); await f.append([{kind:'settings',record:{wallet:'legacy-owner'}}]);
+  const original = await f.engine.getDashboard(ctx, {source:'rentals',timeframe:'30d'});
+  f.advance(600000); f.reads.length = 0;
+  const saved = await f.engine.getDashboard(ctx, {source:'rentals',timeframe:'30d',startup:true});
+  assert.deepEqual(saved.startup_preview, {generated_at:original.generated_at});
+  assert.equal(saved.update_token, undefined); assert.equal(f.projections(),1);
+  assert.equal(f.reads.some(sql => sql.includes('WITH pending')),false);
+  const current = await f.engine.getDashboard(ctx, {source:'rentals',timeframe:'30d'});
+  assert.equal(current.startup_preview,undefined); assert.notEqual(current.generated_at,original.generated_at);
+  assert.notEqual(current.update_token,original.update_token); assert.equal(f.projections(),2);
+  assert.equal((await f.engine.getDashboard(ctx,{source:'rentals',timeframe:'30d',startup:true})).startup_preview,undefined);
+  assert.equal(f.projections(),2);
+});
+
+test('startup never reuses a changed wallet, different selection, future cache or over-day-old projection', async t => {
+  const f = fixture(t); await f.append([{kind:'settings',record:{wallet:'first-owner'}}]);
+  await f.engine.getDashboard(ctx); f.advance(60000);
+  await f.append([{kind:'settings',record:{wallet:'next-owner'}}]);
+  const changed = await f.engine.getDashboard(ctx,{startup:true});
+  assert.equal(changed.wallet,'next-owner'); assert.equal(changed.startup_preview,undefined);
+  assert.equal((await f.engine.getDashboard(ctx,{source:'rentals',startup:true})).startup_preview,undefined);
+  f.advance(86400001);
+  assert.equal((await f.engine.getDashboard(ctx,{startup:true})).startup_preview,undefined);
+  f.advance(-60000);
+  assert.equal((await f.engine.getDashboard(ctx,{startup:true})).startup_preview,undefined);
+  await assert.rejects(f.engine.getDashboard({}, {startup:true}),/Private access denied/);
+  await assert.rejects(f.engine.getDashboard(ctx,{startup:'yes'}),/startup/);
+});
+
+test('startup advances precise rental expiry and totals without rewriting the saved projection', async t => {
+  const f = fixture(t), at=Date.parse('2026-10-10T12:00:15Z');
+  const original=await f.engine.getDashboard(ctx), key=JSON.stringify(['projection-v10-gift-rental-statistics','listings','30d',null,null,null]);
+  const gift={id:'test',is_portfolio:true,state:'rented',ui_state:'rented',rental_until:new Date(at+60000).toISOString(),uncertainties:[]};
+  await f.repository.saveDashboardSnapshot(key,0,Math.floor(at/60000),{dashboard:{...original,gifts:[gift],summary:{...original.summary,rented_count:1}},wallet_configured:false,analytics_wallet:null});
+  f.advance(120000);
+  const saved=await f.engine.getDashboard(ctx,{startup:true});
+  assert.ok(saved.startup_preview); assert.equal(saved.gifts[0].state,'expired_pending_return'); assert.equal(saved.gifts[0].ui_state,null);
+  assert.equal(saved.summary.rented_count,0); assert.equal(saved.summary.uncertain_count,1);
+  const retained=await f.repository.dashboardSnapshot(key,0,Math.floor(at/60000));
+  assert.equal(retained.dashboard.gifts[0].state,'rented'); assert.equal((await f.repository.read()).revision,0);
 });
 
 test('a commit during a full dashboard read is left visible to the next revision probe', async t => {

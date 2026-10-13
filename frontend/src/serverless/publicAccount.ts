@@ -1,4 +1,4 @@
-import type { Job, MarketappLoginAccount, MarketappLoginProof } from '../data/types.ts';
+import type { Dashboard, Job, MarketappLoginAccount, MarketappLoginProof } from '../data/types.ts';
 import { canonicalMainnetAddress } from './walletIdentity.ts';
 
 export interface PublicAccountStatus {
@@ -37,6 +37,33 @@ export interface PublicAccountAdapter {
   reactivate(signal?: AbortSignal): Promise<PublicAccountStatus>;
   startDiscovery(): Promise<Job>;
   resumeDiscovery(id: number, accountGeneration?: number): Promise<Job>;
+}
+
+/** Only account changes trigger a settings read; ordinary dashboard polls do not. */
+export function publicAccountSettingsScope(dashboard: Pick<Dashboard, 'wallet' | 'capabilities'> | null | undefined): string | undefined {
+  if (!dashboard?.capabilities.public_account) return undefined;
+  const capabilities = dashboard.capabilities;
+  return JSON.stringify([capabilities.account_generation ?? null, canonicalMainnetAddress(dashboard.wallet),
+    capabilities.wallet_configured === true, capabilities.marketapp_configured === true]);
+}
+
+/** Discard superseded reads even if the transport ignores AbortSignal. */
+export function createPublicAccountReader(adapter: Pick<PublicAccountAdapter, 'get'>,
+  accept: (account: PublicAccountStatus) => void, failed: (problem: unknown) => void) {
+  let revision = 0;
+  let active: AbortController | null = null;
+  const invalidate = () => { revision++; active?.abort(); active = null; };
+  return {
+    invalidate,
+    async reload() {
+      invalidate();
+      const requestRevision = revision, abort = new AbortController(); active = abort;
+      const current = () => requestRevision === revision && !abort.signal.aborted;
+      try { const account = await adapter.get(abort.signal); if (current()) accept(account); }
+      catch (problem) { if (current()) failed(problem); }
+      finally { if (active === abort) active = null; }
+    },
+  };
 }
 
 export function readPublicApiKeyCheck(value: unknown): PublicApiKeyCheck {

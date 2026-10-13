@@ -1,5 +1,6 @@
 import type { Gift } from './data/types';
 import { dateTime } from './data/helpers';
+import { GiftRentalStatisticsDetails } from './GiftRentalStatistics';
 
 const HISTORY_NOTE = 'Counts confirmed rental starts in all saved Marketapp history. Coverage may be incomplete and rentals may predate your ownership. Extensions are excluded.';
 
@@ -16,10 +17,11 @@ export function RentalCount({ gift }: { gift: Gift }) {
 
 export function RentalHistoryDetails({ gift }: { gift: Gift }) {
   if (!gift.is_portfolio) return null;
+  if (gift.rental_statistics) return <GiftRentalStatisticsDetails gift={gift} />;
   const history = gift.rental_history;
   const count = history?.recorded_count;
   const excluded = Object.values(history?.excluded_counts || {}).reduce((sum, value) => sum + value, 0);
-  return <details className="detail-section detail-disclosure rental-history-details"><summary>Rental history{count != null && <> · {count.toLocaleString()} recorded</>}</summary>
+  return <details className="detail-section detail-disclosure rental-history-details"><summary>Saved market history{count != null && <> · {count.toLocaleString()} recorded</>}</summary>
     <dl><div><dt>Recorded rental starts</dt><dd>{count == null ? 'Unknown' : count.toLocaleString()}</dd></div>
       {excluded > 0 && <div><dt>Excluded records</dt><dd>{excluded.toLocaleString()}</dd></div>}
     </dl>

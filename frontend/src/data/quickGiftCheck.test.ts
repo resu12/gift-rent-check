@@ -21,3 +21,10 @@ test('candidate, conflicted and legacy identities are not eligible for a targete
   assert.equal(quickGiftCheckBlocker(gift), null);
   for (const change of [{ is_portfolio: false }, { category: 'unresolved' as const }, { collection_conflict: true }, { nft_address: 'legacy-nft' }, { collection_address: null }]) assert.ok(quickGiftCheckBlocker({ ...gift, ...change }));
 });
+
+test('a targeted busy Start gives waiting feedback without claiming a check failed', () => {
+  const waiting: OwnedPriceSnapshot = { scope: 'gift', phase: 'waiting', run: null, canStop: false, error: null };
+  assert.match(quickGiftCheckFeedback(gift, waiting)!, /still finishing/);
+  assert.doesNotMatch(quickGiftCheckFeedback(gift, waiting)!, /incomplete|failed/);
+  assert.equal(quickGiftCheckFeedback(gift, { ...waiting, scope: 'portfolio' }), null);
+});

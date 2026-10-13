@@ -7,9 +7,10 @@ import {utf8Size} from './bounded-response.js';
 import {CANDIDATES, compactDiscoveryJob, expandDiscoveryJob} from './public-discovery-storage.js';
 import {createMarketappWebsiteGate} from './marketapp-website-gate.js';
 import {DEFAULT_PUBLIC_ACCOUNT_BYTES} from './storage-policy.js';
-import {PERSONAL_ANALYTICS_MAX_BYTES} from './personal-analytics.js';
+import {PERSONAL_ANALYTICS_MAX_BYTES,PERSONAL_ANALYTICS_DAILY_BYTES,PERSONAL_ANALYTICS_ITEM_BYTES,PERSONAL_ANALYTICS_COLLECTION_BYTES,personalAnalyticsDailyReserve,personalAnalyticsDailyReadySQL,personalAnalyticsSnapshotPreservedSQL,buildPersonalAnalyticsAllTime,upgradePersonalAnalyticsTopItems} from './personal-analytics.js';
 import {StorageCapacityError,PUBLIC_COLLECTION_HEADROOM_BYTES} from './storage-admission.js';
 import {ownedScopeRecordFilter} from './owned-price-engine.js';
+import {giftRefreshSessionKey} from './gift-refresh-storage.js';
 
 const MAX = 9007199254740991;
 const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -36,15 +37,24 @@ const EVENT_BYTES="length(CAST(state_json AS BLOB))+COALESCE(length(CAST(job_jso
 const ANALYTICS_BYTES="length(CAST(raw_snapshot AS BLOB))+length(CAST(normalized_json AS BLOB))";
 const PAYLOAD_BYTES="length(CAST(payload_id AS BLOB))+length(CAST(scope AS BLOB))+length(CAST(document AS BLOB))";
 const OCCURRENCE_BYTES="length(CAST(occurrence_id AS BLOB))+length(CAST(scope AS BLOB))+length(CAST(event_key AS BLOB))+length(CAST(observed_at AS BLOB))+length(CAST(payload_id AS BLOB))+length(CAST(envelope_json AS BLOB))+32";
+const INLINE_INDEX_BYTES="length(CAST(row_id AS BLOB))+length(CAST(scope AS BLOB))+length(CAST(generation AS BLOB))+length(CAST(sequence AS BLOB))+length(CAST(has_seed AS BLOB))";
 const FALLBACK_ACCOUNT_BYTES=`COALESCE((SELECT SUM(${EVENT_BYTES}) FROM public_cloud_events WHERE user_id=:tenant),0)
   +COALESCE((SELECT SUM(${PAYLOAD_BYTES}) FROM service_record_payloads WHERE scope='public:'||:tenant),0)
   +COALESCE((SELECT SUM(${OCCURRENCE_BYTES}) FROM service_record_occurrences WHERE scope='public:'||:tenant),0)
+  +COALESCE((SELECT SUM(${INLINE_INDEX_BYTES}) FROM service_record_inline_events WHERE scope='public:'||:tenant),0)
   +COALESCE((SELECT SUM(${ANALYTICS_BYTES}) FROM public_personal_rental_analytics WHERE user_id=:tenant),0)
+  +COALESCE((SELECT SUM(${PERSONAL_ANALYTICS_DAILY_BYTES}+length(CAST(user_id AS BLOB))) FROM public_personal_analytics_daily WHERE user_id=:tenant),0)
+  +COALESCE((SELECT SUM(${PERSONAL_ANALYTICS_ITEM_BYTES}+length(CAST(user_id AS BLOB))) FROM public_personal_analytics_item_reports WHERE user_id=:tenant),0)
+  +COALESCE((SELECT SUM(${PERSONAL_ANALYTICS_COLLECTION_BYTES}+length(CAST(user_id AS BLOB))) FROM public_personal_analytics_collection_reports WHERE user_id=:tenant),0)
   +COALESCE((SELECT SUM(length(CAST(snapshot_json AS BLOB))) FROM public_dashboard_projection_cache WHERE user_id=:tenant),0)`;
 const FALLBACK_SERVICE_BYTES=`COALESCE((SELECT SUM(${EVENT_BYTES}) FROM public_cloud_events),0)
   +COALESCE((SELECT SUM(${PAYLOAD_BYTES}) FROM service_record_payloads WHERE scope LIKE 'public:%'),0)
   +COALESCE((SELECT SUM(${OCCURRENCE_BYTES}) FROM service_record_occurrences WHERE scope LIKE 'public:%'),0)
+  +COALESCE((SELECT SUM(${INLINE_INDEX_BYTES}) FROM service_record_inline_events WHERE scope LIKE 'public:%'),0)
   +COALESCE((SELECT SUM(${ANALYTICS_BYTES}) FROM public_personal_rental_analytics),0)
+  +COALESCE((SELECT SUM(${PERSONAL_ANALYTICS_DAILY_BYTES}+length(CAST(user_id AS BLOB))) FROM public_personal_analytics_daily),0)
+  +COALESCE((SELECT SUM(${PERSONAL_ANALYTICS_ITEM_BYTES}+length(CAST(user_id AS BLOB))) FROM public_personal_analytics_item_reports),0)
+  +COALESCE((SELECT SUM(${PERSONAL_ANALYTICS_COLLECTION_BYTES}+length(CAST(user_id AS BLOB))) FROM public_personal_analytics_collection_reports),0)
   +COALESCE((SELECT SUM(length(CAST(snapshot_json AS BLOB))) FROM public_dashboard_projection_cache),0)`;
 // Installed accounting is updated by the same write statement as records and
 // archives. Use its constant-size scope rows instead of summing every saved
@@ -74,7 +84,7 @@ function canonicalUser(value) {
 }
 
 export function createPublicRepository(db, verifiedUserId, {dashboardCache = false, maxAccounts = 100, credentialFence = null, walletFence = null, accountGenerationFence = null,
-  maxAccountBytes=DEFAULT_PUBLIC_ACCOUNT_BYTES,maxServiceBytes=134217728,storageAdmission=null} = {}) {
+  maxAccountBytes=DEFAULT_PUBLIC_ACCOUNT_BYTES,maxServiceBytes=134217728,storageAdmission=null,websiteLimits=null} = {}) {
   const userId = canonicalUser(verifiedUserId);
   if(!positive(maxAccounts)||maxAccounts>10000)throw new Error('Invalid public account cap');
   if(!positive(maxAccountBytes)||!positive(maxServiceBytes)||maxAccountBytes>maxServiceBytes||maxServiceBytes>536870912)throw new Error('Invalid public storage cap');
@@ -212,7 +222,7 @@ export function createPublicRepository(db, verifiedUserId, {dashboardCache = fal
     if(state.job?.kind==='discover'&&typeof source?.job_json==='string')state.job=await expandedJob(source);
     return {revision: row.sequence, state};
   }
-  async function append(expected, event, challenge = null) {
+  async function append(expected, event, challenge = null, website = null) {
     if (!Number.isSafeInteger(expected) || expected < 0 || expected >= MAX) throw new Error('Invalid public checkpoint revision');
     const compact=usesCompactOperationalStorage(event.state);
     if(compact&&!event.job&&positive(event.state?.job?.id))event={...event,job:event.state.job};
@@ -222,6 +232,18 @@ export function createPublicRepository(db, verifiedUserId, {dashboardCache = fal
       if(ownedRun.public_wallet_revision!==undefined&&ownedRun.public_wallet_revision!==capturedWalletRevision&&!stopping)throw new PublicWalletChangedError();
       if(ownedRun.public_wallet_revision===undefined)event={...event,state:{...event.state,owned_prices:{...event.state.owned_prices,run:{...ownedRun,public_wallet_revision:capturedWalletRevision}}}};
     }
+    if(capturedWalletRevision!==null&&event.key?.startsWith('gift-refresh')&&plain(event.state?.gift_refresh?.run)) {
+      const giftRun=event.state.gift_refresh.run,stopping=giftRun.state==='partial'&&giftRun.reason==='stopped_by_you'&&!event.raw_body&&!(event.records||[]).length;
+      if(giftRun.public_wallet_revision!==undefined&&giftRun.public_wallet_revision!==capturedWalletRevision&&!stopping)throw new PublicWalletChangedError();
+      if(giftRun.public_wallet_revision===undefined)event={...event,state:{...event.state,gift_refresh:{...event.state.gift_refresh,run:{...giftRun,public_wallet_revision:capturedWalletRevision}}}};
+    }
+    const websiteTime=website?Date.parse(event.observed_at):null;
+    if(website&&(!website.value||!website.fence||website.value.owner!==userId||!positive(websiteTime)
+      ||!Number.isSafeInteger(website.fence.generation)||website.fence.generation<0
+      ||!Number.isSafeInteger(website.fence.wallet_revision)||website.fence.wallet_revision<0
+      ||!positive(website.value.cookie_version)||website.value.generation!==website.fence.generation
+      ||website.value.wallet_revision!==website.fence.wallet_revision||typeof website.value.wallet!=='string'
+      ||new Date(websiteTime).toISOString()!==event.observed_at))return false;
     if(capturedCredentialFence&&plain(event.state?.job)) {
       const saved=event.state.job.public_credential;
       if(saved!==undefined&&JSON.stringify(saved)!==JSON.stringify(capturedCredentialFence))throw new PublicCredentialChangedError();
@@ -287,6 +309,9 @@ export function createPublicRepository(db, verifiedUserId, {dashboardCache = fal
       AND ${compactStorageGuard('public_cloud_events','user_id=:tenant')}
       AND ${retirement.sql}
       AND (:wallet_revision IS NULL OR :wallet_revision=${WALLET_REVISION})
+      AND (:website_generation IS NULL OR EXISTS(SELECT 1 FROM public_marketapp_analytics_sessions WHERE owner_id=:tenant
+        AND generation=:website_generation AND wallet=:website_wallet AND ${WALLET_REVISION}=:website_wallet_revision
+        AND cookie_version=:website_cookie_version AND ciphertext IS NOT NULL AND created_at<=:website_observed AND expires_at>:website_observed))
       AND (:credential_provider IS NULL OR EXISTS(SELECT 1 FROM public_provider_credentials WHERE user_id=:tenant
         AND provider=:credential_provider AND credential_version=:credential_version AND credential_fingerprint=:credential_fingerprint AND ciphertext IS NOT NULL))
       AND (:challenge IS NULL OR EXISTS(SELECT 1 FROM public_wallet_challenges WHERE user_id=:tenant AND challenge_id=:challenge
@@ -299,7 +324,9 @@ export function createPublicRepository(db, verifiedUserId, {dashboardCache = fal
         ':job':jobJson, ':records':recordsJson, ':raw':raw,...quota,...admission.parameters,...retirement.parameters,
         ':observed': event.observed_at, ':challenge': challenge?.id ?? null, ':verified': challenge?.at ?? 0, ':binding_wallet': challenge?.wallet ?? null,
         ':credential_provider':capturedCredentialFence?.provider??null,':credential_version':capturedCredentialFence?.credential_version??null,
-        ':credential_fingerprint':capturedCredentialFence?.fingerprint??null,':wallet_revision':capturedWalletRevision});
+        ':credential_fingerprint':capturedCredentialFence?.fingerprint??null,':wallet_revision':capturedWalletRevision,
+        ':website_generation':website?.fence.generation??null,':website_wallet':website?.value.wallet??null,
+        ':website_wallet_revision':website?.fence.wallet_revision??null,':website_cookie_version':website?.value.cookie_version??null,':website_observed':websiteTime});
     if(result.rowsAffected===1)return true;
     if(storageAdmission)await storageAdmission.assertAdmitted(admissionBytes,event.storage_token??null,{control});
     if(await get(`SELECT 1 AS limited WHERE ${ACTIVE} AND NOT(${QUOTA})
@@ -459,6 +486,30 @@ export function createPublicRepository(db, verifiedUserId, {dashboardCache = fal
     },
     async event(id) {const row=await get(`SELECT sequence,records_json FROM public_cloud_events WHERE user_id=:tenant AND event_key=:id AND ${ACTIVE} LIMIT 1`,{':id':id});
       const result=await normalizedEventRecords(all,row,{scope:normalizedRecordScope(userId),generation:capturedGeneration,where:ACTIVE});await ensureAccount();return result;},
+    async appendWebsite(expected,event,id,stored) {owner(id);return await append(expected,event,null,stored);},
+    async giftScopeRevision() {
+      const row=await get(`SELECT COALESCE(MAX(sequence),0) AS revision FROM public_cloud_events WHERE user_id=:tenant AND ${ACTIVE} AND (
+        records_json LIKE '%"kind":"settings"%' OR records_json LIKE '%"kind":"portfolio"%' OR records_json LIKE '%"kind":"metadata"%'
+        OR records_json LIKE '%"kind":"ownership"%' OR records_json LIKE '%"kind":"listing"%' OR records_json LIKE '%"kind":"history"%'
+        OR records_json LIKE '%"kind":"development_reset"%')`);
+      if(!Number.isSafeInteger(row?.revision)||row.revision<0)throw new Error('Gift scope revision unavailable');return row.revision;
+    },
+    async giftRefreshSession(session) {
+      const records=await repository.event(giftRefreshSessionKey(session));if(!records)return null;
+      const binding=records[0]?.record;
+      if(binding?.session_id!==session||!positive(binding.run_id))throw new Error('Invalid saved gift refresh binding');return binding.run_id;
+    },
+    async giftRefreshRun(id) {
+      const head=await read();
+      if(head.state.gift_refresh?.run?.id===id)return head.state.gift_refresh.run;
+      if(usesCompactOperationalStorage(head.state)) {
+        const row=await get(`SELECT summary_json FROM public_gift_refresh_runs WHERE row_id=:row AND user_id=:tenant AND ${ACTIVE}`,{':row':key('gift-run',id)});
+        return row?.summary_json?JSON.parse(row.summary_json):null;
+      }
+      const row=await get(`SELECT json_extract(state_json,'$.gift_refresh.run') AS run_json FROM public_cloud_events
+        WHERE user_id=:tenant AND ${ACTIVE} AND CASE WHEN json_valid(state_json) THEN json_extract(state_json,'$.gift_refresh.run.id')=:id ELSE 0 END
+        ORDER BY sequence DESC LIMIT 1`,{':id':id});return row?.run_json?JSON.parse(row.run_json):null;
+    },
     async job(id) {const row=await get(`SELECT sequence,job_id,job_json FROM public_cloud_events WHERE user_id=:tenant AND job_id=:id AND job_json IS NOT NULL AND ${ACTIVE} ORDER BY sequence DESC LIMIT 1`,{':id':id});return await expandedJob(row);},
     async jobs() {const rows=await all(`SELECT e.sequence,e.job_id,e.job_json FROM public_cloud_events e JOIN
       (SELECT job_id,MAX(sequence) AS seq FROM public_cloud_events WHERE user_id=:tenant AND job_id IS NOT NULL AND job_json IS NOT NULL GROUP BY job_id) j
@@ -530,7 +581,7 @@ export function createPublicRepository(db, verifiedUserId, {dashboardCache = fal
         const account=await publicAccount();if(!account?.wallet)return false;
         const current=await read(),at=await clock();
         const active=value=>plain(value)&&(value.state==='running'||(positive(value.lease_until)&&value.lease_until>at));
-        if(active(current.state.job)||active(current.state.owned_prices?.run)||active(current.state.public_discovery?.run))throw new Error('Stop active updates before disconnecting wallet.');
+        if(active(current.state.job)||active(current.state.owned_prices?.run)||active(current.state.public_discovery?.run)||active(current.state.gift_refresh?.run))throw new Error('Stop active updates before disconnecting wallet.');
         if(await append(current.revision,{key:`wallet-disconnect:${current.revision+1}`,state:current.state,job:null,
           records:[{kind:'settings',record:{wallet:account.wallet,wallet_address:account.wallet,wallet_verified_at:null,wallet_verification:null,
             wallet_disconnect_revision:current.revision+1}}],observed_at:new Date(at).toISOString()})) {
@@ -539,15 +590,15 @@ export function createPublicRepository(db, verifiedUserId, {dashboardCache = fal
       }throw new Error('Wallet disconnect checkpoint contention');
     },
   };
-  Object.assign(repository, analyticsMethods({get,all,run,key,owner,storage,storageAdmission,userId}), archiveMethods({get,all,run,key}), checkpointMethods({get,all,run,repository}));
-  Object.assign(repository,createMarketappWebsiteGate(db,{scopeFor:()=>`public:${userId}`,access:async id=>{owner(id);await ensureAccount();return true;}}));
+  Object.assign(repository, analyticsMethods({get,all,run,key,owner,storage,storageAdmission,userId,capturedWalletRevision}), archiveMethods({get,all,run,key}), checkpointMethods({get,all,run,repository}));
+  Object.assign(repository,createMarketappWebsiteGate(db,{scopeFor:()=>`public:${userId}`,access:async id=>{owner(id);await ensureAccount();return true;},...(websiteLimits?{limits:websiteLimits}:{})}));
   if(dashboardCache)Object.assign(repository,cacheMethods({get,all,run,key,storage,storageAdmission,userId}));
   Object.assign(repository,accountLifecycle({db,userId,key,accountRow,clock,maxAccounts,capture:()=>capturedGeneration,setCapture:value=>{capturedGeneration=value;}}));
   return repository;
 }
 
-function analyticsMethods({get,all,run,key,owner,storage,storageAdmission,userId}) {
-  const quotaFor=(raw,normalized)=>({':new_bytes':utf8Size(raw)+utf8Size(normalized),':max_account_bytes':storage.maxAccountBytes,':max_service_bytes':storage.maxServiceBytes});
+function analyticsMethods({get,all,run,key,owner,storage,storageAdmission,userId,capturedWalletRevision}) {
+  const quotaFor=(raw,normalized,dailyBytes)=>({':new_bytes':utf8Size(raw)+utf8Size(normalized)+dailyBytes,':max_account_bytes':storage.maxAccountBytes,':max_service_bytes':storage.maxServiceBytes});
   const SESSION_FENCE=`EXISTS(SELECT 1 FROM public_marketapp_analytics_sessions WHERE owner_id=:tenant
     AND generation=:generation AND ${WALLET_REVISION}=:wallet_revision AND (:version IS NULL OR cookie_version=:version))`;
   const clockSql="CAST(strftime('%s','now') AS INTEGER)*1000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)";
@@ -592,18 +643,20 @@ function analyticsMethods({get,all,run,key,owner,storage,storageAdmission,userId
                   AND confirmed.wallet=newer.wallet AND confirmed.fingerprint=json_extract(newer.outcome_json,'$.snapshot_fingerprint')
                   AND ${validSnapshot('confirmed')} AND ${period('confirmed')}=${period(alias)})) ELSE 0 END)) ELSE 0 END)`;
   async function saveAnalytics(snapshot,raw,at,{fence=null,version=null,storageToken=null}={}) {
-    const normalized=JSON.stringify(snapshot),quota=quotaFor(raw,normalized),
+    const normalized=JSON.stringify(snapshot),dailyBytes=personalAnalyticsDailyReserve(snapshot,userId),quota=quotaFor(raw,normalized,dailyBytes),
       bytes=utf8Size(raw)+utf8Size(normalized)+utf8Size(key('analytics',snapshot.fingerprint))+utf8Size(snapshot.fingerprint)
-        +utf8Size(snapshot.wallet)+utf8Size(snapshot.captured_at)+utf8Size(at)+utf8Size(userId),
+        +utf8Size(snapshot.wallet)+utf8Size(snapshot.captured_at)+utf8Size(at)+utf8Size(userId)+dailyBytes,
       admission=storageAdmission?.fence(bytes,storageToken)??{sql:'1',parameters:{}},
-      guard=`${ACTIVE}${fence?` AND ${SESSION_FENCE}`:''}`,
+      guard=`${ACTIVE}${capturedWalletRevision!==null?` AND ${WALLET_REVISION}=:analytics_wallet_revision`:''}${fence?` AND ${SESSION_FENCE}`:''}`,
+      fenceArgs={...(capturedWalletRevision!==null?{':analytics_wallet_revision':capturedWalletRevision}:{}),
+        ...(fence?{':generation':fence.generation,':wallet_revision':fence.wallet_revision,':version':version}:{})},
       args={':row_id':key('analytics',snapshot.fingerprint),':fingerprint':snapshot.fingerprint,':wallet':snapshot.wallet,
         ':captured':snapshot.captured_at,':imported':at,':raw':raw,':normalized':normalized,...quota,...admission.parameters,
-        ...(fence?{':generation':fence.generation,':wallet_revision':fence.wallet_revision,':version':version}:{})},
+        ...fenceArgs},
       span=Array.isArray(snapshot.daily)&&snapshot.daily.length>=1&&snapshot.daily.length<=366?snapshot.daily.length:null;
     const existing=()=>get(`SELECT 1 AS valid FROM public_personal_rental_analytics
       WHERE user_id=:tenant AND fingerprint=:fingerprint AND wallet=:wallet AND ${guard}`,
-      {':fingerprint':snapshot.fingerprint,':wallet':snapshot.wallet,...(fence?{':generation':fence.generation,':wallet_revision':fence.wallet_revision,':version':version}:{})});
+      {':fingerprint':snapshot.fingerprint,':wallet':snapshot.wallet,...fenceArgs});
     if(await existing())return {changed:false,valid:true};
     let changed=false;
     if(span!==null) {
@@ -614,12 +667,12 @@ function analyticsMethods({get,all,run,key,owner,storage,storageAdmission,userId
         replacementAdmission=admission.sql.replaceAll(':storage_bytes','MAX(0,:storage_bytes-(SELECT retained_bytes FROM selected))');
       const result=await run(`WITH selected AS MATERIALIZED(SELECT s.row_id,${payloadBytes('s')} AS payload_bytes,
           ${retainedBytes('s')} AS retained_bytes FROM public_personal_rental_analytics s
-        WHERE s.user_id=:tenant AND s.wallet=:wallet AND ${validSnapshot('s')} AND ${period('s')}=:period
+        WHERE s.user_id=:tenant AND s.wallet=:wallet AND ${validSnapshot('s')} AND ${personalAnalyticsSnapshotPreservedSQL('s',true)} AND ${period('s')}=:period
           AND (s.captured_at<:captured OR s.captured_at=:captured AND s.fingerprint<:fingerprint)
           AND NOT ${protectedSnapshot('s')} ORDER BY payload_bytes DESC,s.captured_at,s.fingerprint LIMIT 1)
         UPDATE OR IGNORE public_personal_rental_analytics SET row_id=:row_id,fingerprint=:fingerprint,wallet=:wallet,
           captured_at=:captured,imported_at=:imported,raw_snapshot=:raw,normalized_json=:normalized
-        WHERE user_id=:tenant AND row_id=(SELECT row_id FROM selected) AND ${guard}
+        WHERE user_id=:tenant AND row_id=(SELECT row_id FROM selected) AND ${guard} AND ${personalAnalyticsDailyReadySQL(true)}
           AND ${replacementQuota} AND ${replacementAdmission}
           AND NOT EXISTS(SELECT 1 FROM public_personal_rental_analytics duplicate WHERE duplicate.user_id=:tenant AND duplicate.fingerprint=:fingerprint)`,
         {...args,':period':span});
@@ -635,7 +688,7 @@ function analyticsMethods({get,all,run,key,owner,storage,storageAdmission,userId
       if(storageAdmission)await storageAdmission.assertAdmitted(bytes,storageToken);
       if(await get(`SELECT 1 AS limited WHERE ${guard} AND NOT EXISTS(SELECT 1 FROM public_personal_rental_analytics
         WHERE user_id=:tenant AND fingerprint=:fingerprint) AND NOT(${QUOTA})`,
-        {':fingerprint':snapshot.fingerprint,...quota,...(fence?{':generation':fence.generation,':wallet_revision':fence.wallet_revision,':version':version}:{})}))throw new PublicStorageLimitError();
+        {':fingerprint':snapshot.fingerprint,...quota,...fenceArgs}))throw new PublicStorageLimitError();
       return {changed:false,valid:false};
     }
     if(span!==null) {
@@ -643,9 +696,9 @@ function analyticsMethods({get,all,run,key,owner,storage,storageAdmission,userId
       // Recheck the saved row, identity/session fences and reference protection
       // in the DELETE itself. Concurrent logout/rebind or a newer replacement
       // therefore cannot let this stale worker prune another report.
-      try {await run(`DELETE FROM public_personal_rental_analytics WHERE user_id=:tenant AND ${guard}
+      try {await run(`DELETE FROM public_personal_rental_analytics WHERE user_id=:tenant AND ${guard} AND ${personalAnalyticsDailyReadySQL(true)}
         AND row_id IN(SELECT s.row_id FROM public_personal_rental_analytics s WHERE s.user_id=:tenant AND s.wallet=:wallet
-          AND ${validSnapshot('s')} AND ${period('s')}=:period AND s.fingerprint<>:fingerprint
+          AND ${validSnapshot('s')} AND ${personalAnalyticsSnapshotPreservedSQL('s',true)} AND ${period('s')}=:period AND s.fingerprint<>:fingerprint
           AND NOT ${protectedSnapshot('s')} AND EXISTS(SELECT 1 FROM public_personal_rental_analytics newer
             WHERE newer.user_id=:tenant AND newer.wallet=s.wallet AND ${validSnapshot('newer')}
               AND ${period('newer')}=${period('s')} AND (newer.captured_at>s.captured_at
@@ -653,7 +706,7 @@ function analyticsMethods({get,all,run,key,owner,storage,storageAdmission,userId
         AND EXISTS(SELECT 1 FROM public_personal_rental_analytics saved WHERE saved.user_id=:tenant
           AND saved.fingerprint=:fingerprint AND saved.wallet=:wallet AND saved.normalized_json=:normalized)`,
         {':wallet':snapshot.wallet,':fingerprint':snapshot.fingerprint,':normalized':normalized,':period':span,
-          ...(fence?{':generation':fence.generation,':wallet_revision':fence.wallet_revision,':version':version}:{})});}catch{/* Saved replacement remains usable; a later import resumes bounded cleanup. */}
+          ...fenceArgs});}catch{/* Saved replacement remains usable; a later import resumes bounded cleanup. */}
     }
     return {changed,valid};
   }
@@ -693,20 +746,58 @@ function analyticsMethods({get,all,run,key,owner,storage,storageAdmission,userId
       owner(id);await sessionFence(id);
       return (await run(`UPDATE public_marketapp_analytics_sessions SET generation=generation+1,wallet=NULL,wallet_revision=NULL,
         ciphertext=NULL,created_at=NULL,expires_at=NULL WHERE owner_id=:tenant AND generation<9007199254740991
-        AND (:generation IS NULL OR generation=:generation) AND (:version IS NULL OR cookie_version=:version) AND ${ACTIVE}`,
-        {':generation':fence?.generation??null,':version':version})).rowsAffected===1;
+        AND (:generation IS NULL OR generation=:generation) AND (:version IS NULL OR cookie_version=:version)
+        AND (:captured_wallet_revision IS NULL OR ${WALLET_REVISION}=:captured_wallet_revision) AND ${ACTIVE}`,
+        {':generation':fence?.generation??null,':version':version,':captured_wallet_revision':capturedWalletRevision})).rowsAffected===1;
     },
     async importPersonalAnalyticsFenced(snapshot,raw,at,id,fence,version=null,storageToken=null) {
       owner(id);return (await saveAnalytics(snapshot,raw,at,{fence,version,storageToken})).valid;
     },
-    async latestPersonalAnalytics(wallet) {const row=await get(`SELECT normalized_json FROM public_personal_rental_analytics
-      WHERE user_id=:tenant AND wallet=:wallet AND ${ACTIVE} ORDER BY captured_at DESC,fingerprint DESC LIMIT 1`,{':wallet':wallet});return row?JSON.parse(row.normalized_json):null;},
-    async personalAnalyticsSnapshots(wallet) {return (await all(`WITH periods AS (SELECT normalized_json,captured_at,fingerprint,
+    async latestPersonalAnalytics(wallet) {const row=await get(`SELECT normalized_json,CASE WHEN json_valid(normalized_json) AND (json_type(normalized_json,'$.top_items') IS NULL OR json_type(normalized_json,'$.by_collection') IS NULL)
+        AND length(CAST(raw_snapshot AS BLOB))<=262144 THEN raw_snapshot ELSE NULL END AS raw_snapshot FROM public_personal_rental_analytics
+      WHERE user_id=:tenant AND wallet=:wallet AND ${ACTIVE} ORDER BY captured_at DESC,fingerprint DESC LIMIT 1`,{':wallet':wallet});return row?upgradePersonalAnalyticsTopItems(row):null;},
+    async personalAnalyticsSnapshots(wallet) {const rows=await all(`WITH periods AS (SELECT normalized_json,captured_at,fingerprint,
       CASE WHEN json_valid(normalized_json) THEN json_array_length(normalized_json,'$.daily') ELSE NULL END AS period_days
       FROM public_personal_rental_analytics WHERE user_id=:tenant AND wallet=:wallet AND length(CAST(normalized_json AS BLOB))<=131072 AND ${ACTIVE}),
       ranked AS (SELECT normalized_json,captured_at,fingerprint,ROW_NUMBER() OVER(PARTITION BY period_days ORDER BY captured_at DESC,fingerprint DESC) AS ordinal
         FROM periods WHERE period_days BETWEEN 1 AND 366)
-      SELECT normalized_json FROM ranked WHERE ordinal=1 ORDER BY captured_at DESC,fingerprint DESC LIMIT 8`,{':wallet':wallet})).map(row=>JSON.parse(row.normalized_json));},
+      SELECT normalized_json FROM ranked WHERE ordinal=1 ORDER BY captured_at DESC,fingerprint DESC LIMIT 8`,{':wallet':wallet});
+      const result=[];
+      for(const row of rows) {
+        const saved=upgradePersonalAnalyticsTopItems(row);
+        if(saved&&(!Object.hasOwn(saved,'top_items')||!Object.hasOwn(saved,'by_collection'))) {
+          const raw=await get(`SELECT raw_snapshot FROM public_personal_rental_analytics WHERE user_id=:tenant AND wallet=:wallet
+            AND fingerprint=:fingerprint AND length(CAST(raw_snapshot AS BLOB))<=262144 AND ${ACTIVE}`,{':wallet':wallet,':fingerprint':saved.fingerprint});
+          result.push(upgradePersonalAnalyticsTopItems({...row,raw_snapshot:raw?.raw_snapshot}));
+        }else result.push(saved);
+      }
+      return result;}
+,
+    async personalAnalyticsAllTime(wallet) {
+      const observations=[];let after='';
+      for(;;) {
+        const rows=await all(`SELECT wallet,date,captured_at,fingerprint,rent_volume,new_rentals,extensions
+          FROM public_personal_analytics_daily WHERE user_id=:tenant AND wallet=:wallet AND date>:after AND ${ACTIVE}
+          ORDER BY date LIMIT 500`,{':wallet':wallet,':after':after});
+        if(!rows.length)break;
+        observations.push(...rows);after=rows.at(-1).date;
+      }
+      const itemReports=[];after='';
+      for(;;) {
+        const rows=await all(`SELECT row_id,wallet,item_key,period_start,period_end,captured_at,fingerprint,item_json
+          FROM public_personal_analytics_item_reports WHERE user_id=:tenant AND wallet=:wallet AND row_id>:after AND length(CAST(item_json AS BLOB))<=4096 AND ${ACTIVE}
+          ORDER BY row_id LIMIT 200`,{':wallet':wallet,':after':after});
+        if(!rows.length)break;itemReports.push(...rows);after=rows.at(-1).row_id;
+      }
+      const collectionReports=[];after='';
+      for(;;) {
+        const rows=await all(`SELECT row_id,wallet,collection_key,period_start,period_end,captured_at,fingerprint,item_json
+          FROM public_personal_analytics_collection_reports WHERE user_id=:tenant AND wallet=:wallet AND row_id>:after AND length(CAST(item_json AS BLOB))<=4096 AND ${ACTIVE}
+          ORDER BY row_id LIMIT 200`,{':wallet':wallet,':after':after});
+        if(!rows.length)break;collectionReports.push(...rows);after=rows.at(-1).row_id;
+      }
+      return buildPersonalAnalyticsAllTime(observations,wallet,Date.now(),itemReports,collectionReports);
+    },
     async reserveMarketappLoginAttempt(value,limits) {
       owner(value.owner);await run(`DELETE FROM public_marketapp_login_attempts WHERE user_id=:tenant AND created_at<:before AND ${ACTIVE}`,{':before':value.created-86400000});
       return (await run(`INSERT OR IGNORE INTO public_marketapp_login_attempts(row_id,user_id,attempt_id,owner_id,wallet,created_at,expires_at,state,nonce_fingerprint)
@@ -913,9 +1004,9 @@ function cacheMethods({get,run,key,storage,storageAdmission,userId}) {
       (SELECT COALESCE(MAX(sequence),0) FROM public_cloud_events WHERE user_id=:tenant AND records_json<>'[]') AS records_revision,
       (SELECT count(*) FROM public_personal_rental_analytics WHERE user_id=:tenant) AS analytics_count,
       (SELECT COALESCE(MAX(imported_at),'') FROM public_personal_rental_analytics WHERE user_id=:tenant) AS analytics_updated WHERE ${ACTIVE}`);},
-    async dashboardSnapshot(id,revision,bucket) {
+    async dashboardSnapshot(id,revision,bucket,{startup=false}={}) {
       const row=await get(`SELECT snapshot_json FROM public_dashboard_projection_cache WHERE user_id=:tenant AND selection_key=:id
-        AND records_revision=:revision AND time_bucket=:bucket AND length(CAST(snapshot_json AS BLOB))<=1024 AND ${ACTIVE}`,{':id':'m:'+id,':revision':revision,':bucket':bucket});
+        AND records_revision=:revision AND time_bucket BETWEEN :minimum_bucket AND :bucket AND length(CAST(snapshot_json AS BLOB))<=1024 AND ${ACTIVE}`,{':id':'m:'+id,':revision':revision,':bucket':bucket,':minimum_bucket':startup?bucket-1440:bucket});
       if(!row)return null;let value;try{value=JSON.parse(row.snapshot_json);}catch{return null;}
       if(value.version!==2||!/^[0-9a-f]{64}$/.test(value.hash)||!positive(value.parts)||value.parts>18||!positive(value.bytes)||value.bytes>SNAPSHOT)return null;
       const parts=[];let bytes=0;
@@ -971,7 +1062,7 @@ function cacheMethods({get,run,key,storage,storageAdmission,userId}) {
 function accountLifecycle({db,userId,accountRow,clock,maxAccounts,capture,setCapture}) {
   const CLEANING="EXISTS(SELECT 1 FROM public_accounts WHERE user_id=:tenant AND generation=:generation AND status='deleting')";
   // Identifiers below are an immutable allowlist, never supplied by callers.
-  const tables=['public_cloud_events','public_personal_rental_analytics','public_marketapp_login_attempts','public_owned_refresh_runs',
+  const tables=['public_cloud_events','public_personal_rental_analytics','public_personal_analytics_daily','public_personal_analytics_item_reports','public_personal_analytics_collection_reports','public_marketapp_login_attempts','public_owned_refresh_runs','public_gift_refresh_runs',
     'public_owned_refresh_sessions','public_dashboard_projection_cache','public_wallet_challenges'];
   async function processAccountDeletion(limit=100) {
     if(!positive(limit)||limit>100)throw new Error('Invalid deletion batch');
@@ -994,7 +1085,7 @@ function accountLifecycle({db,userId,accountRow,clock,maxAccounts,capture,setCap
         AND row_id IN(SELECT row_id FROM ${table} WHERE user_id=:tenant LIMIT :limit)`,{...args,':limit':left});
       left-=result.rowsAffected;if(left<=0)return {deleted:true,pending_cleanup:true};
     }
-    for(const [table,column] of [['service_record_occurrences','occurrence_id'],['service_record_payloads','payload_id']]) {
+    for(const [table,column] of [['service_record_occurrences','occurrence_id'],['service_record_payloads','payload_id'],['service_record_inline_events','row_id']]) {
       const result=await db.run(`DELETE FROM ${table} WHERE scope='public:'||:tenant AND ${CLEANING}
         AND ${column} IN(SELECT ${column} FROM ${table} WHERE scope='public:'||:tenant LIMIT :limit)`,{...args,':limit':left});
       left-=result.rowsAffected;if(left<=0)return {deleted:true,pending_cleanup:true};
@@ -1112,16 +1203,26 @@ export async function migrateLegacyOwner(db,verifiedOwnerId,{mode='check',limit=
   if(mode==='apply'&&!await db.get(`SELECT 1 AS legacy WHERE ${legacyLayout}`))throw new Error('Compact private storage cannot be copied by the legacy migration tool');
   const progress=await db.get('SELECT * FROM public_legacy_migrations WHERE user_id=:tenant',{':tenant':userId});
   const counts=await db.get(`SELECT (SELECT count(*) FROM cloud_events) AS source_events,
+    (SELECT count(*) FROM personal_analytics_daily) AS source_daily_days,
+    (SELECT count(*) FROM personal_analytics_item_reports) AS source_item_reports,
+    (SELECT count(*) FROM personal_analytics_collection_reports) AS source_collection_reports,
     (SELECT count(*) FROM public_cloud_events WHERE user_id=:tenant) AS copied_events,
     (SELECT count(*) FROM personal_rental_analytics) AS source_analytics,
     (SELECT count(*) FROM public_personal_rental_analytics WHERE user_id=:tenant) AS copied_analytics,
     (SELECT count(*) FROM marketapp_login_attempts WHERE owner_id=:tenant) AS source_attempts,
     (SELECT count(*) FROM public_marketapp_login_attempts WHERE user_id=:tenant) AS copied_attempts,
-    ${LEGACY_SOURCES.map(source=>`COALESCE((SELECT SUM(${source.columns.map(column=>`COALESCE(length(CAST(${column} AS BLOB)),0)`).join('+')}) FROM ${source.table} WHERE ${source.where}),0)`).join('+')} AS source_bytes,
+    ${LEGACY_SOURCES.map(source=>`COALESCE((SELECT SUM(${source.columns.map(column=>`COALESCE(length(CAST(${column} AS BLOB)),0)`).join('+')}) FROM ${source.table} WHERE ${source.where}),0)`).join('+')}
+      +COALESCE((SELECT SUM(${PERSONAL_ANALYTICS_DAILY_BYTES}) FROM personal_analytics_daily),0)
+      +COALESCE((SELECT SUM(${PERSONAL_ANALYTICS_ITEM_BYTES}) FROM personal_analytics_item_reports),0)
+      +COALESCE((SELECT SUM(${PERSONAL_ANALYTICS_COLLECTION_BYTES}) FROM personal_analytics_collection_reports),0) AS source_bytes,
     COALESCE((SELECT SUM(${EVENT_BYTES}) FROM public_cloud_events WHERE user_id=:tenant),0)
-      +COALESCE((SELECT SUM(${ANALYTICS_BYTES}) FROM public_personal_rental_analytics WHERE user_id=:tenant),0) AS copied_bytes,
+      +COALESCE((SELECT SUM(${ANALYTICS_BYTES}) FROM public_personal_rental_analytics WHERE user_id=:tenant),0)
+      +COALESCE((SELECT SUM(${PERSONAL_ANALYTICS_DAILY_BYTES}+length(CAST(user_id AS BLOB))) FROM public_personal_analytics_daily WHERE user_id=:tenant),0)
+  +COALESCE((SELECT SUM(${PERSONAL_ANALYTICS_ITEM_BYTES}+length(CAST(user_id AS BLOB))) FROM public_personal_analytics_item_reports WHERE user_id=:tenant),0)
+  +COALESCE((SELECT SUM(${PERSONAL_ANALYTICS_COLLECTION_BYTES}+length(CAST(user_id AS BLOB))) FROM public_personal_analytics_collection_reports WHERE user_id=:tenant),0) AS copied_bytes,
     (${SERVICE_BYTES}) AS current_service_bytes`,{':tenant':userId});
   if(mode==='check')return {mode,status:progress?.status??'not_started',boundary:progress?.boundary??privateHead,sequence:progress?.sequence??0,...counts,provider_requests:0};
+  if(mode==='apply'&&(counts.source_daily_days>0||counts.source_item_reports>0||counts.source_collection_reports>0))throw new Error('Legacy owner migration cannot copy durable all-time analytics; preserve owner mode or use a migration that includes daily analytics');
   if(canonicalUser(confirmOwnerId)!==userId)throw new Error('Explicit legacy-owner migration confirmation is required');
   if(mode==='clear') {
     const account=await db.get('SELECT status,generation FROM public_accounts WHERE user_id=:tenant',{':tenant':userId});
