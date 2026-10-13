@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve explicitly empty Marketapp gift and collection tables in All time analytics, including after snapshot cleanup. Additive archive triggers and bounded backfill retain empty-table availability without inventing rental figures.
+
 ## 0.5.0 — 2026-10-13
 
 Development / invitation-only beta. See [release notes and upgrade steps](docs/releases/v0.5.0.md).

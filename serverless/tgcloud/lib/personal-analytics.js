@@ -368,36 +368,47 @@ const dailyTable = publicScope => publicScope ? 'public_personal_analytics_daily
 const snapshotTable = publicScope => publicScope ? 'public_personal_rental_analytics' : 'personal_rental_analytics';
 const itemReportTable = publicScope => publicScope ? 'public_personal_analytics_item_reports' : 'personal_analytics_item_reports';
 const collectionReportTable = publicScope => publicScope ? 'public_personal_analytics_collection_reports' : 'personal_analytics_collection_reports';
+// Reserved archive metadata, outside both real gift and collection key domains.
+// It records an observed empty table without inventing a zero-valued item.
+const EMPTY_REPORT_KEY='table:empty';
+const EMPTY_REPORT_JSON='{"status":"available","items":[]}';
 export const PERSONAL_ANALYTICS_DAILY_BYTES = "length(CAST(row_id AS BLOB))+length(CAST(wallet AS BLOB))+length(CAST(date AS BLOB))+length(CAST(captured_at AS BLOB))+length(CAST(fingerprint AS BLOB))+length(CAST(rent_volume AS BLOB))+length(CAST(new_rentals AS BLOB))+length(CAST(extensions AS BLOB))";
 export const PERSONAL_ANALYTICS_ITEM_BYTES = "length(CAST(row_id AS BLOB))+length(CAST(wallet AS BLOB))+length(CAST(item_key AS BLOB))+length(CAST(period_start AS BLOB))+length(CAST(period_end AS BLOB))+length(CAST(captured_at AS BLOB))+length(CAST(fingerprint AS BLOB))+length(CAST(item_json AS BLOB))";
 export const PERSONAL_ANALYTICS_COLLECTION_BYTES = "length(CAST(row_id AS BLOB))+length(CAST(wallet AS BLOB))+length(CAST(collection_key AS BLOB))+length(CAST(period_start AS BLOB))+length(CAST(period_end AS BLOB))+length(CAST(captured_at AS BLOB))+length(CAST(fingerprint AS BLOB))+length(CAST(item_json AS BLOB))";
 const dailyTriggerName=(publicScope,event)=>`personal_analytics_daily_v1_${publicScope?'public':'private'}_${event}`;
 const itemTriggerName=(publicScope,event)=>`personal_analytics_items_v1_${publicScope?'public':'private'}_${event}`;
 const collectionTriggerName=(publicScope,event)=>`personal_analytics_collections_v1_${publicScope?'public':'private'}_${event}`;
+const emptyItemTriggerName=(publicScope,event)=>`personal_analytics_empty_items_v1_${publicScope?'public':'private'}_${event}`;
+const emptyCollectionTriggerName=(publicScope,event)=>`personal_analytics_empty_collections_v1_${publicScope?'public':'private'}_${event}`;
 export function personalAnalyticsDailyReadySQL(publicScope=false) {
-  const names=[dailyTriggerName,itemTriggerName,collectionTriggerName].flatMap(name=>['insert','old_update','update','delete'].map(event=>name(publicScope,event)));
-  return `(SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN(${names.map(name=>`'${name}'`).join(',')}))=12`;
+  const names=[dailyTriggerName,itemTriggerName,collectionTriggerName,emptyItemTriggerName,emptyCollectionTriggerName].flatMap(name=>['insert','old_update','update','delete'].map(event=>name(publicScope,event)));
+  return `(SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN(${names.map(name=>`'${name}'`).join(',')}))=20`;
 }
 export function personalAnalyticsSnapshotPreservedSQL(alias,publicScope=false) {
   if(!/^[A-Za-z_][A-Za-z_0-9]*$/.test(alias))throw new Error('Invalid analytics snapshot alias');
   const j=`${alias}.normalized_json`,start=`json_extract(${j},'$.period_start')`,end=`json_extract(${j},'$.period_end')`,length=`json_array_length(${j},'$.daily')`;
+  const emptyPreserved=(table,key)=>`EXISTS(SELECT 1 FROM ${table} marker WHERE ${publicScope?`marker.user_id=${alias}.user_id AND `:''}marker.wallet=${alias}.wallet
+    AND marker.${key}='${EMPTY_REPORT_KEY}' AND marker.item_json='${EMPTY_REPORT_JSON}' AND marker.period_start=${start} AND marker.period_end=${end}
+    AND (marker.captured_at>${alias}.captured_at OR marker.captured_at=${alias}.captured_at AND marker.fingerprint>=${alias}.fingerprint))`;
   return `CASE WHEN json_valid(${j}) THEN (${length} BETWEEN 1 AND 366
     AND julianday(${end})-julianday(${start})+1=${length}
     AND (SELECT count(*) FROM ${dailyTable(publicScope)} day WHERE ${publicScope?`day.user_id=${alias}.user_id AND `:''}day.wallet=${alias}.wallet
       AND day.date>=${start} AND day.date<=${end}
       AND (day.captured_at>${alias}.captured_at OR day.captured_at=${alias}.captured_at AND day.fingerprint>=${alias}.fingerprint))=${length}
     AND json_type(${j},'$.top_items')='object' AND json_extract(${j},'$.top_items.status') IN('available','missing')
-    AND (json_extract(${j},'$.top_items.status')='missing' OR
+    AND (json_extract(${j},'$.top_items.status')='missing' OR (
+      (json_array_length(${j},'$.top_items.items')>0 OR ${emptyPreserved(itemReportTable(publicScope),'item_key')}) AND
       (SELECT count(*) FROM ${itemReportTable(publicScope)} items WHERE ${publicScope?`items.user_id=${alias}.user_id AND `:''}items.wallet=${alias}.wallet
         AND items.period_start=${start} AND items.period_end=${end}
         AND (items.captured_at>${alias}.captured_at OR items.captured_at=${alias}.captured_at AND items.fingerprint>=${alias}.fingerprint)
-        AND instr(json_extract(${j},'$.top_items.items'),'"item_key":"'||items.item_key||'"')>0)=json_array_length(${j},'$.top_items.items'))
+        AND instr(json_extract(${j},'$.top_items.items'),'"item_key":"'||items.item_key||'"')>0)=json_array_length(${j},'$.top_items.items')))
     AND json_type(${j},'$.by_collection')='object' AND json_extract(${j},'$.by_collection.status') IN('available','missing')
-    AND (json_extract(${j},'$.by_collection.status')='missing' OR
+    AND (json_extract(${j},'$.by_collection.status')='missing' OR (
+      (json_array_length(${j},'$.by_collection.items')>0 OR ${emptyPreserved(collectionReportTable(publicScope),'collection_key')}) AND
       (SELECT count(*) FROM ${collectionReportTable(publicScope)} items WHERE ${publicScope?`items.user_id=${alias}.user_id AND `:''}items.wallet=${alias}.wallet
         AND items.period_start=${start} AND items.period_end=${end}
         AND (items.captured_at>${alias}.captured_at OR items.captured_at=${alias}.captured_at AND items.fingerprint>=${alias}.fingerprint)
-        AND instr(json_extract(${j},'$.by_collection.items'),'"collection_key":'||json_quote(items.collection_key))>0)=json_array_length(${j},'$.by_collection.items'))) ELSE 0 END`;
+        AND instr(json_extract(${j},'$.by_collection.items'),'"collection_key":'||json_quote(items.collection_key))>0)=json_array_length(${j},'$.by_collection.items')))) ELSE 0 END`;
 }
 
 // Execute only inside a trigger: the hosted database supports json_each there.
@@ -445,13 +456,16 @@ export function personalAnalyticsDailyTriggers({publicScope=false}={}) {
         WHERE excluded.captured_at>${target}.captured_at OR excluded.captured_at=${target}.captured_at AND excluded.fingerprint>${target}.fingerprint;
       END`};
   });
-  return [...dailyTriggers,...personalAnalyticsItemTriggers({publicScope}),...personalAnalyticsCollectionTriggers({publicScope})];
+  // Keep the original definitions unchanged so installation is additive and
+  // an interrupted upgrade can resume without dropping existing archives.
+  return [...dailyTriggers,...personalAnalyticsItemTriggers({publicScope}),...personalAnalyticsCollectionTriggers({publicScope}),
+    ...personalAnalyticsItemTriggers({publicScope,empty:true}),...personalAnalyticsCollectionTriggers({publicScope,empty:true})];
 }
 
-function personalAnalyticsItemTriggers({publicScope=false}={}) {
+function personalAnalyticsItemTriggers({publicScope=false,empty=false}={}) {
   const target=itemReportTable(publicScope),table=snapshotTable(publicScope);
   return [['insert','AFTER INSERT','NEW'],['old_update','BEFORE UPDATE','OLD'],['update','AFTER UPDATE','NEW'],['delete','BEFORE DELETE','OLD']].map(([event,timing,row])=>{
-    const name=itemTriggerName(publicScope,event),j=`${row}.normalized_json`,get=field=>`json_extract(${j},'$.${field}')`,item=field=>`json_extract(d.value,'$.${field}')`;
+    const name=(empty?emptyItemTriggerName:itemTriggerName)(publicScope,event),j=`${row}.normalized_json`,get=field=>`json_extract(${j},'$.${field}')`,item=field=>`json_extract(d.value,'$.${field}')`;
     const address=field=>`(length(${field})=66 AND substr(${field},1,2)='0:' AND substr(${field},3) NOT GLOB '*[^0-9a-f]*'
       OR length(${field})=67 AND substr(${field},1,3)='-1:' AND substr(${field},4) NOT GLOB '*[^0-9a-f]*')`;
     const decimal=field=>{
@@ -483,21 +497,23 @@ function personalAnalyticsItemTriggers({publicScope=false}={}) {
       AND NOT EXISTS(SELECT 1 FROM json_each(${j},'$.top_items.items') d WHERE COALESCE(CASE WHEN d.type='object' THEN (${validItem}) ELSE 0 END,0)=0)
       AND (SELECT count(DISTINCT json_extract(value,'$.item_key')) FROM json_each(${j},'$.top_items.items'))=json_array_length(${j},'$.top_items.items') ELSE 0 END`;
     const id=`${publicScope?`${row}.user_id||':'||`:''}${row}.wallet||':'||${item('item_key')}||':'||${get('period_start')}||':'||${get('period_end')}`;
+    const selection=empty?`SELECT ${id.replace(item('item_key'),`'${EMPTY_REPORT_KEY}'`)},${publicScope?`${row}.user_id,`:''}${row}.wallet,'${EMPTY_REPORT_KEY}',${get('period_start')},${get('period_end')},${row}.captured_at,${row}.fingerprint,'${EMPTY_REPORT_JSON}' WHERE 1`
+      :`SELECT ${id},${publicScope?`${row}.user_id,`:''}${row}.wallet,${item('item_key')},${get('period_start')},${get('period_end')},${row}.captured_at,${row}.fingerprint,d.value
+          FROM json_each(${j},'$.top_items.items') d WHERE ${validItem}`;
     return {name,table,sql:`CREATE TRIGGER ${name} ${timing} ON ${table}
-      WHEN ${recognized}${publicScope?` AND EXISTS(SELECT 1 FROM public_accounts WHERE user_id=${row}.user_id AND status='active')`:''}
+      WHEN ${empty?`CASE WHEN (${recognized}) THEN json_array_length(${j},'$.top_items.items')=0 ELSE 0 END`:recognized}${publicScope?` AND EXISTS(SELECT 1 FROM public_accounts WHERE user_id=${row}.user_id AND status='active')`:''}
       BEGIN INSERT INTO ${target}(row_id,${publicScope?'user_id,':''}wallet,item_key,period_start,period_end,captured_at,fingerprint,item_json)
-        SELECT ${id},${publicScope?`${row}.user_id,`:''}${row}.wallet,${item('item_key')},${get('period_start')},${get('period_end')},${row}.captured_at,${row}.fingerprint,d.value
-          FROM json_each(${j},'$.top_items.items') d WHERE ${validItem}
+        ${selection}
         ON CONFLICT(row_id) DO UPDATE SET captured_at=excluded.captured_at,fingerprint=excluded.fingerprint,item_json=excluded.item_json
         WHERE excluded.captured_at>${target}.captured_at OR excluded.captured_at=${target}.captured_at AND excluded.fingerprint>${target}.fingerprint;
       END`};
   });
 }
 
-function personalAnalyticsCollectionTriggers({publicScope=false}={}) {
+function personalAnalyticsCollectionTriggers({publicScope=false,empty=false}={}) {
   const target=collectionReportTable(publicScope),table=snapshotTable(publicScope);
   return [['insert','AFTER INSERT','NEW'],['old_update','BEFORE UPDATE','OLD'],['update','AFTER UPDATE','NEW'],['delete','BEFORE DELETE','OLD']].map(([event,timing,row])=>{
-    const name=collectionTriggerName(publicScope,event),j=`${row}.normalized_json`,get=field=>`json_extract(${j},'$.${field}')`,item=field=>`json_extract(d.value,'$.${field}')`;
+    const name=(empty?emptyCollectionTriggerName:collectionTriggerName)(publicScope,event),j=`${row}.normalized_json`,get=field=>`json_extract(${j},'$.${field}')`,item=field=>`json_extract(d.value,'$.${field}')`;
     const address=field=>`(length(${field})=66 AND substr(${field},1,2)='0:' AND substr(${field},3) NOT GLOB '*[^0-9a-f]*'
       OR length(${field})=67 AND substr(${field},1,3)='-1:' AND substr(${field},4) NOT GLOB '*[^0-9a-f]*')`;
     const decimal=field=>{
@@ -528,11 +544,13 @@ function personalAnalyticsCollectionTriggers({publicScope=false}={}) {
       AND NOT EXISTS(SELECT 1 FROM json_each(${j},'$.by_collection.items') d WHERE COALESCE(CASE WHEN d.type='object' THEN (${validItem}) ELSE 0 END,0)=0)
       AND (SELECT count(DISTINCT json_extract(value,'$.collection_key')) FROM json_each(${j},'$.by_collection.items'))=json_array_length(${j},'$.by_collection.items') ELSE 0 END`;
     const id=`${publicScope?`${row}.user_id||':'||`:''}${row}.wallet||':'||${item('collection_key')}||':'||${get('period_start')}||':'||${get('period_end')}`;
+    const selection=empty?`SELECT ${id.replace(item('collection_key'),`'${EMPTY_REPORT_KEY}'`)},${publicScope?`${row}.user_id,`:''}${row}.wallet,'${EMPTY_REPORT_KEY}',${get('period_start')},${get('period_end')},${row}.captured_at,${row}.fingerprint,'${EMPTY_REPORT_JSON}' WHERE 1`
+      :`SELECT ${id},${publicScope?`${row}.user_id,`:''}${row}.wallet,${item('collection_key')},${get('period_start')},${get('period_end')},${row}.captured_at,${row}.fingerprint,d.value
+          FROM json_each(${j},'$.by_collection.items') d WHERE ${validItem}`;
     return {name,table,sql:`CREATE TRIGGER ${name} ${timing} ON ${table}
-      WHEN ${recognized}${publicScope?` AND EXISTS(SELECT 1 FROM public_accounts WHERE user_id=${row}.user_id AND status='active')`:''}
+      WHEN ${empty?`CASE WHEN (${recognized}) THEN json_array_length(${j},'$.by_collection.items')=0 ELSE 0 END`:recognized}${publicScope?` AND EXISTS(SELECT 1 FROM public_accounts WHERE user_id=${row}.user_id AND status='active')`:''}
       BEGIN INSERT INTO ${target}(row_id,${publicScope?'user_id,':''}wallet,collection_key,period_start,period_end,captured_at,fingerprint,item_json)
-        SELECT ${id},${publicScope?`${row}.user_id,`:''}${row}.wallet,${item('collection_key')},${get('period_start')},${get('period_end')},${row}.captured_at,${row}.fingerprint,d.value
-          FROM json_each(${j},'$.by_collection.items') d WHERE ${validItem}
+        ${selection}
         ON CONFLICT(row_id) DO UPDATE SET captured_at=excluded.captured_at,fingerprint=excluded.fingerprint,item_json=excluded.item_json
         WHERE excluded.captured_at>${target}.captured_at OR excluded.captured_at=${target}.captured_at AND excluded.fingerprint>${target}.fingerprint;
       END`};
@@ -565,6 +583,11 @@ export function personalAnalyticsDailyReserve(snapshot,publicUserId=null) {
   let wallet;try{wallet=canonicalAddress(snapshot.wallet);}catch{return 0;}
   if(!Array.isArray(snapshot.daily)||snapshot.daily.length>366)return 0;
   let bytes=0;
+  for(const table of [snapshot.top_items,snapshot.by_collection])if(table?.status==='available'&&Array.isArray(table.items)&&table.items.length===0) {
+    const id=`${publicUserId===null?'':`${publicUserId}:`}${wallet}:${EMPTY_REPORT_KEY}:${snapshot.period_start}:${snapshot.period_end}`;
+    bytes+=[id,...(publicUserId===null?[]:[String(publicUserId)]),wallet,EMPTY_REPORT_KEY,snapshot.period_start,snapshot.period_end,
+      snapshot.captured_at,snapshot.fingerprint,EMPTY_REPORT_JSON].reduce((sum,text)=>sum+utf8Bytes(text).length,0);
+  }
   for(const value of snapshot.daily) {
     const row={...value,wallet,captured_at:snapshot.captured_at,fingerprint:snapshot.fingerprint};
     if(!dailyObservation(row,wallet))continue;
@@ -619,12 +642,13 @@ export function buildPersonalAnalyticsAllTime(rows,configuredWallet,now=Date.now
 export function buildPersonalAnalyticsItemsAllTime(rows,configuredWallet,now=Date.now(),range=null) {
   const empty={status:'missing',scope:'saved_non_overlapping_reports',incomplete:true,items:[]};
   let wallet;try{wallet=canonicalAddress(configuredWallet);}catch{return empty;}
-  const groups=new Map();
+  const groups=new Map();let observedEmpty=false;
   for(const row of rows)try {
     if(!object(row)||row.wallet!==wallet||!/^[0-9a-f]{64}$/.test(row.fingerprint))continue;
     const captured=captureTime(row.captured_at),start=date(row.period_start),end=date(row.period_end);
     if(captured!==row.captured_at||Date.parse(captured)>now||end>Date.parse(captured)||end<start||end-start>365*DAY)continue;
     if(range&&(start<date(range.period_start)||end>date(range.period_end)))continue;
+    if(row.item_key===EMPTY_REPORT_KEY&&row.item_json===EMPTY_REPORT_JSON){observedEmpty=true;continue;}
     const item=topItem(typeof row.item_json==='string'?JSON.parse(row.item_json):row.item,true);
     if(row.item_key!==undefined&&row.item_key!==item.item_key)continue;
     let reports=groups.get(item.item_key);if(!reports)groups.set(item.item_key,reports=new Map());
@@ -660,18 +684,19 @@ export function buildPersonalAnalyticsItemsAllTime(rows,configuredWallet,now=Dat
         periods:selected.map(row=>({period_start:row.period_start,period_end:row.period_end,captured_at:row.captured_at}))}});
   }
   items.sort((a,b)=>{const difference=fixed(b.volume,false,40)-fixed(a.volume,false,40);return difference>0n?1:difference<0n?-1:a.item_key.localeCompare(b.item_key);});
-  return {...empty,status:items.length?'available':'missing',items};
+  return {...empty,status:items.length||observedEmpty?'available':'missing',items};
 }
 
 export function buildPersonalAnalyticsCollectionsAllTime(rows,configuredWallet,now=Date.now(),range=null) {
   const empty={status:'missing',scope:'saved_non_overlapping_reports',incomplete:true,items:[]};
   let wallet;try{wallet=canonicalAddress(configuredWallet);}catch{return empty;}
-  const groups=new Map();
+  const groups=new Map();let observedEmpty=false;
   for(const row of rows)try {
     if(!object(row)||row.wallet!==wallet||!/^[0-9a-f]{64}$/.test(row.fingerprint))continue;
     const captured=captureTime(row.captured_at),start=date(row.period_start),end=date(row.period_end);
     if(captured!==row.captured_at||Date.parse(captured)>now||end>Date.parse(captured)||end<start||end-start>365*DAY)continue;
     if(range&&(start<date(range.period_start)||end>date(range.period_end)))continue;
+    if(row.collection_key===EMPTY_REPORT_KEY&&row.item_json===EMPTY_REPORT_JSON){observedEmpty=true;continue;}
     const item=collectionItem(typeof row.item_json==='string'?JSON.parse(row.item_json):row.item,true);
     if(row.collection_key!==undefined&&row.collection_key!==item.collection_key)continue;
     let reports=groups.get(item.collection_key);if(!reports)groups.set(item.collection_key,reports=new Map());
@@ -707,5 +732,5 @@ export function buildPersonalAnalyticsCollectionsAllTime(rows,configuredWallet,n
         periods:selected.map(row=>({period_start:row.period_start,period_end:row.period_end,captured_at:row.captured_at}))}});
   }
   items.sort((a,b)=>{const difference=fixed(b.volume,false,40)-fixed(a.volume,false,40);return difference>0n?1:difference<0n?-1:a.collection_key.localeCompare(b.collection_key);});
-  return {...empty,status:items.length?'available':'missing',items};
+  return {...empty,status:items.length||observedEmpty?'available':'missing',items};
 }

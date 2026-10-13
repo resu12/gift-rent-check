@@ -124,7 +124,7 @@ node serverless/tools/install-analytics-daily-storage.mjs --action backfill --sc
 node serverless/tools/install-analytics-daily-storage.mjs --action backfill --scope public --app-id YOUR_APP_ID --owner-id YOUR_OWNER_ID
 ```
 
-Analytics setup must report `ready: true` and 24 archive triggers. For each incomplete backfill, repeat the same scope's command with its returned `--after` cursor until `complete: true`. Existing reports are preserved; empty scopes finish without importing another account's data. See the release steps for interrupted setup and the optional inline-event index.
+Analytics setup must report `ready: true` and 40 archive triggers. For each incomplete backfill, repeat the same scope's command with its returned `--after` cursor until `complete: true`. Existing reports are preserved; empty scopes finish without importing another account's data. See the release steps for interrupted setup and the optional inline-event index.
 
 A fresh beta deployment needs no private-owner data copy. Preserving the private owner alongside invited accounts also needs no copy. The following copy procedure supports only legacy private storage: it rejects a source already using `operational_storage_version: 1`. If deliberately converting a supported legacy private app, first stop its writes and provider collection, then publish the additive schema and migration-capable reader while public mode stays disabled. Keep private provider collection stopped until its previous rolling 24-hour requests have aged out before enabling public mode: the new service ledger cannot govern earlier requests or collectors running elsewhere. Inspect the copy plan, then explicitly confirm the same configured legacy human owner; copy is bounded to 25 records per invocation and prints aggregate counts only:
 
@@ -445,7 +445,7 @@ node serverless/tools/install-analytics-daily-storage.mjs --action backfill --sc
 node serverless/tools/install-analytics-daily-storage.mjs --action backfill --scope public --app-id YOUR_APP_ID --owner-id YOUR_OWNER_ID
 ```
 
-Before this sequence, complete any missing [v0.4.0 prerequisites](releases/v0.4.0.md#upgrade-an-existing-telegram-deployment). Analytics installation must report `ready: true` and 24 archive triggers; repeat each incomplete backfill with its returned `--after` cursor until `complete: true`. The [v0.5.0 upgrade guide](releases/v0.5.0.md#upgrade-from-v040) covers preservation, interrupted setup and the optional inline-event index.
+Before this sequence, complete any missing [v0.4.0 prerequisites](releases/v0.4.0.md#upgrade-an-existing-telegram-deployment). Analytics installation must report `ready: true` and 40 archive triggers; repeat each incomplete backfill with its returned `--after` cursor until `complete: true`. The [v0.5.0 upgrade guide](releases/v0.5.0.md#upgrade-from-v040) covers preservation, interrupted setup and the optional inline-event index.
 
 These wrappers and the `serverless/package.json` commands use the same destination guard. It rejects custom `TG_CLOUD_API_URL` values and `TGCLOUD_BETA` before importing the CLI, then checks the resolved token against the explicit app ID. An inherited `TGCLOUD_TOKEN` takes precedence over saved credentials and must match; it never silently falls back to a different saved login. The validated token is pinned for the command, including status and migration. No token is printed or passed in command-line arguments.
 

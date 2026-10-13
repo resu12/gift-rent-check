@@ -145,7 +145,7 @@ test('legacy By collection backfill preserves snapshot identity and existing Top
  const other=structuredClone(source);other.captured_at='2026-10-10T12:00:00Z';assert.equal(upgradePersonalAnalyticsTopItems({...stored,raw_snapshot:JSON.stringify(other)}).by_collection,undefined);
  await repo.importPersonalAnalytics(legacy,raw,legacy.captured_at);assert.deepEqual((await repo.latestPersonalAnalytics(wallet)).by_collection,complete.by_collection);
  f.database.prepare('INSERT INTO service_storage_usage VALUES(1,0,?)').run(Date.now());storageAccountingTriggers().forEach(trigger=>f.database.exec(trigger.sql));
- assert.equal((await installPersonalAnalyticsDailyStorage(f.db)).trigger_count,24);await backfillPersonalAnalyticsDailyStorage(f.db);
+ assert.equal((await installPersonalAnalyticsDailyStorage(f.db)).trigger_count,40);await backfillPersonalAnalyticsDailyStorage(f.db);
  assert.equal((await repo.personalAnalyticsAllTime(wallet)).by_collection.items[0].volume,'3');
  f.database.exec('DELETE FROM personal_rental_analytics');assert.equal((await repo.personalAnalyticsAllTime(wallet)).by_collection.items[0].rentals,4);
 });
