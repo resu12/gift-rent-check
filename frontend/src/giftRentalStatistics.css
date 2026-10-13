@@ -1,4 +1,5 @@
 .gift-rental-overview{margin-bottom:20px;padding:16px 18px}
+.analytics-read-limit,.gift-all-time p.analytics-read-limit{font-size:12px;line-height:1.6;color:#e5b475;margin:0 0 12px}
 .gift-rental-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
 .gift-rental-heading h2{display:flex;align-items:center;gap:7px;font-size:18px;font-weight:550;margin:0;color:#dce7ef}
 .gift-rental-heading h2 svg{color:#91cdbd;flex:none}

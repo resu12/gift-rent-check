@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Bound Telegram All time analytics reads for private and invited accounts to nine indexed archive queries per dashboard request. Large histories load recent records with explicit partial-preview notices; all saved history remains stored. Additive capture indexes support bounded reads without sorting the full archive.
 - Preserve explicitly empty Marketapp gift and collection tables in All time analytics, including after snapshot cleanup. Additive archive triggers and bounded backfill retain empty-table availability without inventing rental figures.
 
 ## 0.5.0 — 2026-10-13

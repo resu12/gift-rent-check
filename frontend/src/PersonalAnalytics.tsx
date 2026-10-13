@@ -17,6 +17,7 @@ import { canonicalMainnetAddress } from './serverless/walletIdentity';
 import { ANALYTICS_CLOCK_SKEW_MS } from './data/analyticsClock';
 import { useAnalyticsClock } from './useAnalyticsClock';
 import { analyticsImages } from './data/analyticsImages';
+import { analyticsReadLimitMessage } from './data/analyticsReadCoverage';
 import './personalAnalytics.css';
 
 const GROUPS: { id: AnalyticsGrouping; label: string }[] = [
@@ -69,6 +70,7 @@ export function PersonalAnalytics({ snapshot: latestSnapshot, snapshots: savedSn
   const selectedDays = analyticsReportDays(snapshots, walletIdentity, periodSelection);
   const snapshot = selectAnalyticsReport(snapshots, selectedDays, allTime);
   const savedHistory = selectedDays === 'all_time';
+  const readLimitMessage = analyticsReadLimitMessage(snapshot, 'daily');
   const providerPeriod = analyticsRefreshPeriod(selectedDays);
   const refreshable = refreshEnabled && providerPeriod !== null;
   const [now, setNow] = useAnalyticsClock();
@@ -175,6 +177,7 @@ export function PersonalAnalytics({ snapshot: latestSnapshot, snapshots: savedSn
       {refreshable && marketappAnalyticsRefresh ? <Suspense fallback={<p role="status">Loading refresh…</p>}><MarketappAnalyticsRefresh transport={marketappAnalyticsRefresh} wallet={wallet} periodDays={providerPeriod!} onImported={reloadHistory} startupBusy={analyticsStartup?.busy === true || pending || reloading} onViewChange={setManualRefreshView} showOutcome={freshness.manualNotice === true} savedHistory={savedHistory} /></Suspense> : null}
     </div>
     {snapshot ? <>
+      {readLimitMessage && <p className="analytics-read-limit" role="status">{readLimitMessage}</p>}
       <div className="personal-analytics-summary">
         <div><span>Rent volume <small>before fees</small></span><strong>{formatAmount(snapshot.summary.rent_volume, 1)}<small>GRAM</small></strong></div>
         <div><span>Rentals <small>incl. extensions</small></span><strong>{snapshot.summary.rentals.toLocaleString()}</strong>{!savedHistory && <small>{snapshot.summary.items == null ? 'Gift count unavailable' : `${snapshot.summary.items.toLocaleString()} ${snapshot.summary.items === 1 ? 'gift' : 'gifts'}`}</small>}</div>
@@ -189,7 +192,7 @@ export function PersonalAnalytics({ snapshot: latestSnapshot, snapshots: savedSn
       <details className="personal-analytics-statistics"><summary>More statistics</summary><div>
         <div className="personal-analytics-facts">{savedHistory ? <><span>New rentals <b>{snapshot.summary.new_rentals.toLocaleString()}</b></span><span>Extensions <b>{snapshot.summary.extensions.toLocaleString()}</b></span></> : <><span>Daily price <b>{formatAmount(snapshot.summary.price_per_day)} GRAM</b></span><span>Average duration <b>{snapshot.summary.average_duration ?? '—'} days</b></span><span>Extensions <b>{snapshot.summary.extensions.toLocaleString()} · {snapshot.summary.extension_percent ?? '—'}%</b></span><span>Spent on rent <b>{formatAmount(snapshot.summary.spent_on_rent)} GRAM</b></span></>}</div>
         <dl className="personal-analytics-report-details"><div><dt>Saved dates · UTC</dt><dd>{analyticsPeriod(snapshot.period_start, snapshot.period_end)}</dd></div><div><dt>{savedHistory ? 'Latest included capture' : 'Captured'}</dt><dd>{dateTime(snapshot.captured_at)}</dd></div></dl>
-        <p>{savedHistory ? 'All time combines saved days, not a complete lifetime total. Overlapping dates count once; missing days remain unknown. Refresh adds the annual report and keeps earlier saved days.' : 'Today may be incomplete. Daily price is Marketapp’s duration-weighted average.'} Volume is before fees and royalties.</p>
+        <p>{savedHistory ? `All time combines saved days, not a complete lifetime total. Overlapping dates count once; missing days remain unknown. ${readLimitMessage ? 'This preview includes only the loaded days. Refresh updates saved reports; it does not remove this display limit.' : 'Refresh adds the annual report and keeps earlier saved days.'}` : 'Today may be incomplete. Daily price is Marketapp’s duration-weighted average.'} Volume is before fees and royalties.</p>
         <div className="personal-analytics-table-wrap"><table><thead><tr><th scope="col">{renderGroup === 'week' ? 'Week (Mon–Sun)' : renderGroup === 'month' ? 'Month' : renderGroup === 'year' ? 'Year' : 'Day'} UTC</th><th scope="col">Volume</th><th scope="col">New</th><th scope="col">Extended</th><th scope="col">Total</th></tr></thead><tbody>{buckets.map(bucket => <tr key={bucket.key}><th scope="row">{renderGroup === 'year' && !bucket.gap && <>{bucket.key.slice(0, 4)} · </>}{analyticsPeriod(bucket.start, bucket.end)}{bucket.partial && <small>{bucket.gap ? 'No saved data' : 'Partial'}</small>}</th><td>{formatAmount(bucket.volume, 1)}</td><td>{bucket.newRentals ?? '—'}</td><td>{bucket.extensions ?? '—'}</td><td>{bucket.rentals ?? '—'}</td></tr>)}</tbody></table></div>
       </div></details>
     </> : <p className="personal-analytics-empty">{refreshable ? 'Refresh to load your rental totals.' : 'Import a Marketapp report to see your rental totals.'}</p>}

@@ -6,6 +6,7 @@ import { dateTime, formatAmount } from './data/helpers';
 import { analyticsPeriod, analyticsReportingPeriod } from './data/personalAnalytics';
 import { marketappItemUrl, marketappTopItems, sortTopItems, type TopItemSort } from './data/marketappTopItems';
 import { canonicalMainnetAddress } from './serverless/walletIdentity';
+import { analyticsReadLimitMessage } from './data/analyticsReadCoverage';
 import './giftRentalStatistics.css';
 
 export function MarketappTopItems({ report, wallet, now, images }: { report: PersonalRentalAnalyticsReport | null; wallet: string | null; now: number; images?: ReadonlyMap<string, string> }) {
@@ -14,9 +15,11 @@ export function MarketappTopItems({ report, wallet, now, images }: { report: Per
   const top = useMemo(() => marketappTopItems(report, wallet, now), [report, wallet, now]);
   const rows = useMemo(() => sortTopItems(top?.items || [], search, sort), [top, search, sort]);
   const allTime = report && 'report_kind' in report && report.report_kind === 'all_time';
+  const readLimitMessage = analyticsReadLimitMessage(report, 'items');
   return <section className="panel gift-rental-overview marketapp-top-items" aria-labelledby={titleId}>
     <div className="gift-rental-heading"><h2 id={titleId}><Icon name="gift" size={18} />By gift</h2>{report && <span>{analyticsReportingPeriod(report)}</span>}</div>
     <p className="gift-rental-caption">GRAM · before fees</p>
+    {readLimitMessage && <p className="analytics-read-limit" role="status">{readLimitMessage}</p>}
     {top ? <>
       <p className="top-items-coverage">{allTime ? 'Partial history · coverage varies by gift' : 'Marketapp’s reported gifts only'}</p>
       {top.items.length > 0 && <div className="gift-rental-controls">
@@ -40,8 +43,8 @@ export function MarketappTopItems({ report, wallet, now, images }: { report: Per
           </div>
         </details></li>)}</ul>
         <div className="gift-rental-footer"><span role="status">{Math.min(limit, rows.length)} / {rows.length} gifts</span>{rows.length > limit && <button type="button" className="button secondary small" onClick={() => setLimit(value => value + 8)}>Show more</button>}</div>
-      </> : <p className="gift-rental-empty">{search.trim() ? 'No matching gifts.' : 'No gifts reported for this period. Unreported totals remain unknown.'}</p>}
+      </> : <p className="gift-rental-empty">{search.trim() ? 'No matching gifts.' : readLimitMessage ? 'No gift totals in this loaded history. Saved reports may exist outside this preview.' : 'No gifts reported for this period. Unreported totals remain unknown.'}</p>}
       <details className="gift-rental-method"><summary>Report details</summary><p>{allTime ? 'Marketapp’s Top items cover selected periods, not each day. Each gift uses non-overlapping reports; coverage may differ from the chart. Unreported gifts and missing periods remain unknown. Combined reports use volume divided by rented days for the daily price.' : 'Marketapp’s Top items for the selected period. Unreported gifts have unknown totals, not zero rentals.'}</p><p>Volume is before fees and royalties. Expand a gift for exact amounts and dates. Refresh analytics above to update the report.</p></details>
-    </> : <p className="gift-rental-empty">Gift totals unavailable. Refresh analytics above to load them.</p>}
+    </> : <p className="gift-rental-empty">{readLimitMessage ? 'No gift totals in this loaded history. Saved reports may exist outside this preview.' : 'Gift totals unavailable. Refresh analytics above to load them.'}</p>}
   </section>;
 }

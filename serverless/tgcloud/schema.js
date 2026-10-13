@@ -34,12 +34,14 @@ export const personalAnalyticsItemReports = table('personal_analytics_item_repor
   rowId: text('row_id').primaryKey(), wallet: text('wallet').notNull(), itemKey: text('item_key').notNull(),
   periodStart: text('period_start').notNull(), periodEnd: text('period_end').notNull(),
   capturedAt: text('captured_at').notNull(), fingerprint: text('fingerprint').notNull(), itemJson: text('item_json').notNull(),
-}, t => ({walletIndex: index('personal_analytics_items_wallet_idx').on(t.wallet, t.rowId)}));
+}, t => ({walletIndex: index('personal_analytics_items_wallet_idx').on(t.wallet, t.rowId),
+  captureIndex: index('personal_analytics_items_capture_idx').on(t.wallet, t.capturedAt, t.rowId)}));
 export const personalAnalyticsCollectionReports = table('personal_analytics_collection_reports', {
   rowId: text('row_id').primaryKey(), wallet: text('wallet').notNull(), collectionKey: text('collection_key').notNull(),
   periodStart: text('period_start').notNull(), periodEnd: text('period_end').notNull(),
   capturedAt: text('captured_at').notNull(), fingerprint: text('fingerprint').notNull(), itemJson: text('item_json').notNull(),
-}, t => ({walletIndex: index('personal_analytics_collections_wallet_idx').on(t.wallet, t.rowId)}));
+}, t => ({walletIndex: index('personal_analytics_collections_wallet_idx').on(t.wallet, t.rowId),
+  captureIndex: index('personal_analytics_collections_capture_idx').on(t.wallet, t.capturedAt, t.rowId)}));
 // Short-lived compatibility/refresh attempts contain no cookie, account proof or
 // signature. They remain independent of collection and personal snapshots.
 export const marketappLoginAttempts = table('marketapp_login_attempts', {
@@ -152,12 +154,14 @@ export const publicPersonalAnalyticsItemReports = table('public_personal_analyti
   rowId: text('row_id').primaryKey(), userId: text('user_id').notNull(), wallet: text('wallet').notNull(), itemKey: text('item_key').notNull(),
   periodStart: text('period_start').notNull(), periodEnd: text('period_end').notNull(),
   capturedAt: text('captured_at').notNull(), fingerprint: text('fingerprint').notNull(), itemJson: text('item_json').notNull(),
-}, t => ({walletIndex: index('public_analytics_items_wallet_idx').on(t.userId, t.wallet, t.rowId)}));
+}, t => ({walletIndex: index('public_analytics_items_wallet_idx').on(t.userId, t.wallet, t.rowId),
+  captureIndex: index('public_analytics_items_capture_idx').on(t.userId, t.wallet, t.capturedAt, t.rowId)}));
 export const publicPersonalAnalyticsCollectionReports = table('public_personal_analytics_collection_reports', {
   rowId: text('row_id').primaryKey(), userId: text('user_id').notNull(), wallet: text('wallet').notNull(), collectionKey: text('collection_key').notNull(),
   periodStart: text('period_start').notNull(), periodEnd: text('period_end').notNull(),
   capturedAt: text('captured_at').notNull(), fingerprint: text('fingerprint').notNull(), itemJson: text('item_json').notNull(),
-}, t => ({walletIndex: index('public_analytics_collections_wallet_idx').on(t.userId, t.wallet, t.rowId)}));
+}, t => ({walletIndex: index('public_analytics_collections_wallet_idx').on(t.userId, t.wallet, t.rowId),
+  captureIndex: index('public_analytics_collections_capture_idx').on(t.userId, t.wallet, t.capturedAt, t.rowId)}));
 export const publicMarketappLoginAttempts = table('public_marketapp_login_attempts', {
   rowId: text('row_id').primaryKey(), userId: text('user_id').notNull(), attemptId: text('attempt_id').notNull(),
   ownerId: text('owner_id').notNull(), wallet: text('wallet').notNull(), createdAt: integer('created_at').notNull(),

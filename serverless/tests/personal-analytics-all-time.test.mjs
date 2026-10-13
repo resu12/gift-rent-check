@@ -98,7 +98,7 @@ test('all-time exceeds a one-year report without truncation and reads small inde
   assert.equal(report.daily.length,700);assert.equal(report.summary.rent_volume,'864.15');
   assert.equal(report.period_start,day(0));assert.equal(report.period_end,day(699));
   const pages=f.queries.filter(query=>query.method==='all'&&query.sql.includes('FROM personal_analytics_daily'));
-  assert.equal(pages.length,3);assert.ok(pages.every(query=>query.sql.includes('LIMIT 500')));
+  assert.equal(pages.length,2);assert.ok(pages.every(query=>query.sql.includes('LIMIT 500')));
 });
 
 test('invited accounts keep wallet-scoped daily history across retained snapshot replacement',async t=>{

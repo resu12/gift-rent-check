@@ -7,7 +7,7 @@ import {utf8Size} from './bounded-response.js';
 import {CANDIDATES, compactDiscoveryJob, expandDiscoveryJob} from './public-discovery-storage.js';
 import {createMarketappWebsiteGate} from './marketapp-website-gate.js';
 import {DEFAULT_PUBLIC_ACCOUNT_BYTES} from './storage-policy.js';
-import {PERSONAL_ANALYTICS_MAX_BYTES,PERSONAL_ANALYTICS_DAILY_BYTES,PERSONAL_ANALYTICS_ITEM_BYTES,PERSONAL_ANALYTICS_COLLECTION_BYTES,personalAnalyticsDailyReserve,personalAnalyticsDailyReadySQL,personalAnalyticsSnapshotPreservedSQL,buildPersonalAnalyticsAllTime,upgradePersonalAnalyticsTopItems} from './personal-analytics.js';
+import {PERSONAL_ANALYTICS_MAX_BYTES,PERSONAL_ANALYTICS_DAILY_BYTES,PERSONAL_ANALYTICS_ITEM_BYTES,PERSONAL_ANALYTICS_COLLECTION_BYTES,personalAnalyticsDailyReserve,personalAnalyticsDailyReadySQL,personalAnalyticsSnapshotPreservedSQL,readPersonalAnalyticsAllTime,upgradePersonalAnalyticsTopItems} from './personal-analytics.js';
 import {StorageCapacityError,PUBLIC_COLLECTION_HEADROOM_BYTES} from './storage-admission.js';
 import {ownedScopeRecordFilter} from './owned-price-engine.js';
 import {giftRefreshSessionKey} from './gift-refresh-storage.js';
@@ -774,29 +774,7 @@ function analyticsMethods({get,all,run,key,owner,storage,storageAdmission,userId
       return result;}
 ,
     async personalAnalyticsAllTime(wallet) {
-      const observations=[];let after='';
-      for(;;) {
-        const rows=await all(`SELECT wallet,date,captured_at,fingerprint,rent_volume,new_rentals,extensions
-          FROM public_personal_analytics_daily WHERE user_id=:tenant AND wallet=:wallet AND date>:after AND ${ACTIVE}
-          ORDER BY date LIMIT 500`,{':wallet':wallet,':after':after});
-        if(!rows.length)break;
-        observations.push(...rows);after=rows.at(-1).date;
-      }
-      const itemReports=[];after='';
-      for(;;) {
-        const rows=await all(`SELECT row_id,wallet,item_key,period_start,period_end,captured_at,fingerprint,item_json
-          FROM public_personal_analytics_item_reports WHERE user_id=:tenant AND wallet=:wallet AND row_id>:after AND length(CAST(item_json AS BLOB))<=4096 AND ${ACTIVE}
-          ORDER BY row_id LIMIT 200`,{':wallet':wallet,':after':after});
-        if(!rows.length)break;itemReports.push(...rows);after=rows.at(-1).row_id;
-      }
-      const collectionReports=[];after='';
-      for(;;) {
-        const rows=await all(`SELECT row_id,wallet,collection_key,period_start,period_end,captured_at,fingerprint,item_json
-          FROM public_personal_analytics_collection_reports WHERE user_id=:tenant AND wallet=:wallet AND row_id>:after AND length(CAST(item_json AS BLOB))<=4096 AND ${ACTIVE}
-          ORDER BY row_id LIMIT 200`,{':wallet':wallet,':after':after});
-        if(!rows.length)break;collectionReports.push(...rows);after=rows.at(-1).row_id;
-      }
-      return buildPersonalAnalyticsAllTime(observations,wallet,Date.now(),itemReports,collectionReports);
+      return readPersonalAnalyticsAllTime(all,wallet,{publicScope:true,active:ACTIVE});
     },
     async reserveMarketappLoginAttempt(value,limits) {
       owner(value.owner);await run(`DELETE FROM public_marketapp_login_attempts WHERE user_id=:tenant AND created_at<:before AND ${ACTIVE}`,{':before':value.created-86400000});

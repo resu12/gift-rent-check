@@ -315,6 +315,7 @@ export interface PersonalRentalAnalyticsAllTime extends Omit<PersonalRentalAnaly
   source_url: null;
   daily: (PersonalRentalAnalytics['daily'][number] & { captured_at: string; partial: boolean })[];
   coverage: { observed_days: number; missing_days: number; partial_days: number };
+  read_coverage?: { daily_limited: boolean; items_limited: boolean; collections_limited: boolean };
 }
 export type PersonalRentalAnalyticsReport = PersonalRentalAnalytics | PersonalRentalAnalyticsAllTime;
 

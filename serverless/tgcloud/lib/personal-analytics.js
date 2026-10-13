@@ -614,7 +614,49 @@ export function personalAnalyticsDailyReserve(snapshot,publicUserId=null) {
   return bytes;
 }
 
-export function buildPersonalAnalyticsAllTime(rows,configuredWallet,now=Date.now(),itemReports=[],collectionReports=[]) {
+// Bound archive work independently of retention. Newest-first indexed pages
+// avoid loading every rolling capture on each dashboard request. The extra
+// row on the final page detects truncation without a separate count/scan.
+export const PERSONAL_ANALYTICS_READ_LIMITS=Object.freeze({daily:2000,items:400,collections:600});
+export async function readPersonalAnalyticsAllTime(all,wallet,{publicScope=false,active='1',now=Date.now()}={}) {
+  const prefix=publicScope?'public_':'',scope=publicScope?`user_id=:tenant AND ${active} AND `:'';
+  async function read(kind) {
+    const daily=kind==='daily',table=`${prefix}personal_analytics_${daily?'daily':kind==='items'?'item_reports':'collection_reports'}`;
+    const cap=PERSONAL_ANALYTICS_READ_LIMITS[kind],pageSize=daily?500:200,rows=[];
+    let cursor=null,limited=false;
+    while(rows.length<cap) {
+      const take=Math.min(pageSize,cap-rows.length),last=rows.length+take===cap;
+      const params={':wallet':wallet};
+      let after='';
+      if(cursor) {
+        if(daily){after=' AND date<:after_date';params[':after_date']=cursor.date;}
+        else{after=' AND (captured_at,row_id)<(:after_captured,:after_id)';params[':after_captured']=cursor.captured_at;params[':after_id']=cursor.row_id;}
+      }
+      const columns=daily?'wallet,date,captured_at,fingerprint,rent_volume,new_rentals,extensions'
+        :`row_id,wallet,${kind==='items'?'item_key':'collection_key'},period_start,period_end,captured_at,fingerprint,
+          CASE WHEN length(CAST(item_json AS BLOB))<=4096 THEN item_json ELSE NULL END AS item_json`;
+      let page;
+      try {page=await all(`SELECT ${columns} FROM ${table} WHERE ${scope}wallet=:wallet${after}
+        ORDER BY ${daily?'date DESC':'captured_at DESC,row_id DESC'} LIMIT ${take+(last?1:0)}`,params);}
+      catch(error) {
+        if(!publicScope&&String(error?.message).includes(`no such table: ${table}`))break;
+        throw error;
+      }
+      limited=last&&page.length>take;
+      rows.push(...page.slice(0,take));
+      if(page.length<take||last)break;
+      cursor=page.at(-1);
+    }
+    return {rows,limited};
+  }
+  const daily=await read('daily');if(!daily.rows.length)return null;
+  const items=await read('items'),collections=await read('collections');
+  return buildPersonalAnalyticsAllTime(daily.rows,wallet,now,items.rows,collections.rows,{
+    daily_limited:daily.limited,items_limited:items.limited||daily.limited,
+    collections_limited:collections.limited||daily.limited});
+}
+
+export function buildPersonalAnalyticsAllTime(rows,configuredWallet,now=Date.now(),itemReports=[],collectionReports=[],readCoverage=null) {
   let wallet;try{wallet=canonicalAddress(configuredWallet);}catch{return null;}
   const days=new Map();
   for(const row of rows) {
@@ -636,6 +678,7 @@ export function buildPersonalAnalyticsAllTime(rows,configuredWallet,now=Date.now
     coverage:{observed_days:daily.length,missing_days:(date(last)-date(first))/DAY+1-daily.length,partial_days:daily.filter(row=>row.partial).length},
     top_items:buildPersonalAnalyticsItemsAllTime(itemReports,wallet,now,{period_start:first,period_end:last}),
     by_collection:buildPersonalAnalyticsCollectionsAllTime(collectionReports,wallet,now,{period_start:first,period_end:last})};
+  if(readCoverage)report.read_coverage=readCoverage;
   return {...report,fingerprint:Array.from(sha256(utf8Bytes(canonicalJSON(report))),byte=>byte.toString(16).padStart(2,'0')).join('')};
 }
 

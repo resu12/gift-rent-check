@@ -9,7 +9,7 @@ import {utf8Size} from './bounded-response.js';
 import {ownedScopeRecordFilter} from './owned-price-engine.js';
 import {canonicalJSON} from './cloud-pricing-core.js';
 import {sha256} from './ton-price-decoder.js';
-import {utf8Bytes,personalAnalyticsDailyReserve,buildPersonalAnalyticsAllTime,upgradePersonalAnalyticsTopItems} from './personal-analytics.js';
+import {utf8Bytes,personalAnalyticsDailyReserve,readPersonalAnalyticsAllTime,upgradePersonalAnalyticsTopItems} from './personal-analytics.js';
 
 // The opt-in layout keeps immutable observations separate from the latest
 // operational checkpoint. Payload identity includes every source field; it
@@ -689,32 +689,7 @@ export function createCloudRepository(db, {dashboardCache = false, credentialFen
       return result;
     },
     async personalAnalyticsAllTime(wallet) {
-      const observations=[];let after='';
-      for(;;) {
-        let rows;
-        try {rows=await db.all(`SELECT wallet,date,captured_at,fingerprint,rent_volume,new_rentals,extensions
-          FROM personal_analytics_daily WHERE wallet=:wallet AND date>:after ORDER BY date LIMIT 500`,{':wallet':wallet,':after':after});}
-        catch(error) {if(/no such table.*personal_analytics_daily/i.test(String(error?.message)))return null;throw error;}
-        if(!rows.length)break;
-        observations.push(...rows);after=rows.at(-1).date;
-      }
-      const itemReports=[];after='';
-      for(;;) {
-        let rows;
-        try {rows=await db.all(`SELECT row_id,wallet,item_key,period_start,period_end,captured_at,fingerprint,item_json
-          FROM personal_analytics_item_reports WHERE wallet=:wallet AND row_id>:after AND length(CAST(item_json AS BLOB))<=4096 ORDER BY row_id LIMIT 200`,{':wallet':wallet,':after':after});}
-        catch(error){if(/no such table.*personal_analytics_item_reports/i.test(String(error?.message)))break;throw error;}
-        if(!rows.length)break;itemReports.push(...rows);after=rows.at(-1).row_id;
-      }
-      const collectionReports=[];after='';
-      for(;;) {
-        let rows;
-        try {rows=await db.all(`SELECT row_id,wallet,collection_key,period_start,period_end,captured_at,fingerprint,item_json
-          FROM personal_analytics_collection_reports WHERE wallet=:wallet AND row_id>:after AND length(CAST(item_json AS BLOB))<=4096 ORDER BY row_id LIMIT 200`,{':wallet':wallet,':after':after});}
-        catch(error){if(/no such table.*personal_analytics_collection_reports/i.test(String(error?.message)))break;throw error;}
-        if(!rows.length)break;collectionReports.push(...rows);after=rows.at(-1).row_id;
-      }
-      return buildPersonalAnalyticsAllTime(observations,wallet,Date.now(),itemReports,collectionReports);
+      return readPersonalAnalyticsAllTime((sql,params)=>db.all(sql,params),wallet);
     },
     async reserveMarketappLoginAttempt(attempt, limits) {
       // Reservation and rate checks are one statement, including failed GETs.
