@@ -177,7 +177,11 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     if (['running', 'queued'].includes(job.state)) {
       return !knownOld || !millis(job.invocation_deadline) || job.invocation_deadline > at;
     }
-    return job.state === 'partial' && !knownOld;
+    // An allowance-ended listing scan is inactive. A separate history job can
+    // use the current slot; the listing's saved checkpoint remains resumable.
+    const inactiveListing = job.kind === 'prices' && job.state === 'partial'
+      && ['invocation_limit', 'duration_limit'].includes(job.reason);
+    return job.state === 'partial' && !knownOld && !inactiveListing;
   }
   function waitAt(value, at) {
     return count(value) ? Math.max(value, at) : at;
