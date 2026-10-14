@@ -174,13 +174,15 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     if (job.reason === 'stopped_by_you' || job.stop_requested === true) return true;
     const lease = job.lease_until ?? 0;
     if (!count(lease) || lease > at) return true;
-    if (['running', 'queued'].includes(job.state)) {
-      return !knownOld || !millis(job.invocation_deadline) || job.invocation_deadline > at;
-    }
     // An allowance-ended listing scan is inactive. A separate history job can
     // use the current slot; the listing's saved checkpoint remains resumable.
-    const inactiveListing = job.kind === 'prices' && job.state === 'partial'
-      && ['invocation_limit', 'duration_limit'].includes(job.reason);
+    // A terminated hosting request may leave the raw state running or queued;
+    // require its saved invocation and request lease to have both expired.
+    const active = ['running', 'queued'].includes(job.state);
+    const expiredInvocation = active && millis(job.invocation_deadline) && job.invocation_deadline <= at;
+    const inactiveListing = job.kind === 'prices' && (expiredInvocation || job.state === 'partial'
+      && ['invocation_limit', 'duration_limit'].includes(job.reason));
+    if (active) return !expiredInvocation || !knownOld && !inactiveListing;
     return job.state === 'partial' && !knownOld && !inactiveListing;
   }
   function waitAt(value, at) {

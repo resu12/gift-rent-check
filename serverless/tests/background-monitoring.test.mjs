@@ -536,6 +536,41 @@ test('the inactive-listing exception never bypasses stops, leases, or unrelated 
   }
 });
 
+test('a listing interrupted before saving its expired invocation can yield without changing its raw checkpoint', async () => {
+  for (const state of ['running', 'queued']) for (const lease_until of [0, START - 1]) {
+    const f = fixture(), listing = {id: 81, kind: 'prices', state, reason: null, lease_until,
+      invocation_deadline: START, cursor: 'saved-listing-page', pages: 33};
+    f.mutate(saved => {saved.job = copy(listing);});
+    const start = f.dependencies.history.start;
+    f.dependencies.history.start = async (...args) => {
+      assert.deepEqual(f.state().job, listing);
+      return start(...args);
+    };
+    const result = await f.complete();
+    assert.equal(result.state, 'complete', `${state}/${lease_until}`);
+    assert.equal(f.calls.filter(call => call === 'history.start').length, 1);
+    assert.equal(f.calls.includes('history.resume'), false);
+  }
+});
+
+test('foreign running listing scans require a valid expired invocation and lease before yielding', async () => {
+  const changes = [
+    ...[undefined, null, 0, -1, 1.5, String(START - 1), START + 60000].map(invocation_deadline => ({invocation_deadline})),
+    {lease_until: START + 60000}, {lease_until: -1}, {lease_until: '0'}, {lease_until: 1.5},
+    {reason: 'stopped_by_you'}, {stop_requested: true}, {kind: 'rental_prices'}, {kind: 'collect'},
+  ];
+  for (const state of ['running', 'queued']) for (const change of changes) {
+    const f = fixture(), listing = {id: 81, kind: 'prices', state, reason: null,
+      lease_until: 0, invocation_deadline: START - 1, ...change};
+    f.mutate(saved => {saved.job = copy(listing);});
+    const result = await f.complete();
+    assert.ok(['partial', 'blocked'].includes(result.state), `${state}/${JSON.stringify(change)}`);
+    assert.equal(result.background_monitoring.reason, 'collection_running');
+    assert.equal(f.calls.some(call => /^history\./.test(call)), false);
+    assert.deepEqual(f.state().job, listing);
+  }
+});
+
 test('a foreground gift refresh is waited for rather than joined or stepped', async () => {
   const f = fixture(); f.mutate(saved => {saved.gift_refresh = {run: {id: 81, wallet: address(1), session_id: 'foreground', state: 'running', deadline: START + 30000}};});
   const result = await f.tick(); assert.equal(result.state, 'waiting');
