@@ -244,6 +244,148 @@ test('completed, unrelated or changed-scope gift runs cannot donate an unfinishe
   }
 });
 
+async function resumableGiftFixture() {
+  const f = fixture(); await f.tick(); f.advance(300000);
+  f.mutate(saved => {
+    const gift = saved.gift_refresh.run;
+    Object.assign(gift, {state: 'partial', reason: 'duration_limit', execution_profile: 'background-monitoring-v1',
+      stage: 'ton', checked: gift.total, attempts: 1, deadline: f.at(), next_allowed_at: 0,
+      ton_run_id: 91, ton_session_id: `${gift.session_id}_ton`, ton_targets: [address(2), address(3)],
+      results: {[address(2)]: {checked: true, price: true, status: true}, [address(3)]: {checked: true, price: true, status: true}}});
+    saved.owned_prices = {attempts: [f.at() - 4000, f.at() - 3000, f.at() - 2000, f.at() - 1000], next_allowed_at: 0,
+      run: {id: 91, session_id: gift.ton_session_id, wallet: gift.wallet,
+      execution_profile: 'background-monitoring-v1', state: 'partial', reason: 'duration_limit', lease_until: 0,
+      deadline: f.at(), attempts: 4, offset: 1, checked: 1, targets: [2, 3].map(n => ({nft_address: address(n)}))}};
+  });
+  f.dependencies.gifts.resume = async (input, context) => {
+    f.calls.push('gifts.resume'); f.inputs.push(copy(input));
+    const saved = f.state(), run = saved.background_monitoring.run;
+    assert.equal(run.intent, 'gift_resume'); assert.equal(run.gift_resumes, 1);
+    assert.equal(context.deadline, run.deadline); assert.equal(context.session_id, input.session_id);
+    assert.equal(context.gift_run_id, input.run_id); assert.equal(run.lease.token, context.lease.token);
+    f.mutate(state => {
+      for (const gift of [state.gift_refresh.run, state.owned_prices.run]) {
+        gift.state = 'running'; gift.reason = null; gift.deadline = f.at() + 300000;
+      }
+    });
+    return {run: f.state().gift_refresh.run, next_allowed_at: 0};
+  };
+  f.dependencies.gifts.step = async (input, context) => {
+    f.calls.push('gifts.step'); assert.equal(input.run_id, context.gift_run_id);
+    f.mutate(state => {state.owned_prices.run.offset = 2; state.owned_prices.run.checked = 2;
+      state.owned_prices.run.state = 'complete'; state.gift_refresh.run.state = 'complete';});
+    return {run: f.state().gift_refresh.run, next_allowed_at: 0};
+  };
+  return f;
+}
+
+test('an exact bounded cloud gift traversal resumes once in the same cycle before completing history', async () => {
+  const f = await resumableGiftFixture(), before = f.state(), first = await f.tick();
+  assert.equal(first.state, 'running'); assert.equal(f.calls.filter(call => call === 'gifts.resume').length, 1);
+  const after = f.state();
+  assert.equal(after.background_monitoring.run.id, before.background_monitoring.run.id);
+  assert.equal(after.gift_refresh.run.id, before.gift_refresh.run.id);
+  assert.equal(after.owned_prices.run.id, before.owned_prices.run.id);
+  assert.equal(after.owned_prices.run.offset, 1); assert.equal(after.owned_prices.run.attempts, 4);
+  assert.deepEqual(after.gift_refresh.run.results, before.gift_refresh.run.results);
+  assert.equal(after.background_monitoring.run.gift_complete, false, 'website checked counts do not complete TON work');
+  assert.equal(after.background_monitoring.last_success_at, null);
+  assert.equal(f.calls.includes('history.start'), false);
+  const result = await f.complete(); assert.equal(result.state, 'complete');
+  assert.equal(f.calls.filter(call => call === 'gifts.resume').length, 1);
+  assert.ok(f.calls.indexOf('gifts.step') < f.calls.indexOf('history.start'));
+  assert.equal(result.background_monitoring.last_success_at, result.background_monitoring.last_finished_at);
+});
+
+test('gift continuation rejects exhausted, stopped, foreign, unfinished-request and non-cloud checkpoints', async () => {
+  const cases = {
+    request_limit: saved => {saved.gift_refresh.run.attempts = 2; saved.owned_prices.run.attempts = 18;},
+    stopped: saved => {saved.gift_refresh.run.reason = 'stopped_by_you';},
+    stop_requested: saved => {saved.gift_refresh.run.stop_requested = true;},
+    daily_limit: saved => {saved.owned_prices.run.reason = 'daily_limit';},
+    invocation_limit: saved => {saved.gift_refresh.run.reason = 'invocation_limit';},
+    failed: saved => {saved.gift_refresh.run.state = 'failed';},
+    manual_wrapper: saved => {delete saved.gift_refresh.run.execution_profile;},
+    manual_inner: saved => {delete saved.owned_prices.run.execution_profile;},
+    website: saved => {saved.gift_refresh.run.stage = 'website';},
+    inner_session: saved => {saved.owned_prices.run.session_id = 'foreign';},
+    inner_wallet: saved => {saved.owned_prices.run.wallet = address(99);},
+    inner_id: saved => {saved.owned_prices.run.id++;},
+    target_mismatch: saved => {saved.owned_prices.run.targets[1].nft_address = address(99);},
+    exhausted_targets: saved => {saved.owned_prices.run.offset = 2;},
+    live_lease: (saved, at) => {saved.owned_prices.run.lease_until = at + 1000;},
+    live_http: (saved, at) => {saved.gift_refresh.run.inflight = {until: at + 1000};},
+    long_provider_wait: (saved, at) => {saved.owned_prices.next_allowed_at = at + LIMITS.gift_resume_ms;},
+    missing_daily_ledger: saved => {delete saved.owned_prices.attempts;},
+    invalid_daily_ledger: saved => {saved.owned_prices.attempts = {};},
+    invalid_daily_timestamp: saved => {saved.owned_prices.attempts.push('not-a-time');},
+    future_daily_timestamp: (saved, at) => {saved.owned_prices.attempts.push(at + 1);},
+  };
+  for (const [name, change] of Object.entries(cases)) {
+    const f = await resumableGiftFixture(); f.mutate(saved => change(saved, f.at()));
+    await f.tick(); assert.equal(f.calls.includes('gifts.resume'), false, name);
+    assert.equal(f.state().background_monitoring.run.stage, 'history_start', name);
+    assert.equal(f.state().background_monitoring.run.gift_complete, false, name);
+    const result = await f.complete(); assert.equal(result.state, 'partial', name);
+    assert.equal(result.background_monitoring.last_success_at, null, name);
+  }
+});
+
+test('simultaneous gift deadline and daily request exhaustion remain partial while history proceeds', async () => {
+  const f = await resumableGiftFixture();
+  f.mutate(saved => {saved.owned_prices.attempts = Array(LIMITS.gift_daily_attempts).fill(f.at());});
+  const result = await f.complete();
+  assert.equal(result.state, 'partial'); assert.equal(result.background_monitoring.reason, 'gift_refresh_partial');
+  assert.equal(f.calls.includes('gifts.resume'), false); assert.equal(f.calls.includes('history.step'), true);
+  assert.equal(f.calls.includes('rules.evaluate'), true); assert.equal(result.background_monitoring.last_success_at, null);
+  const expired = await resumableGiftFixture();
+  expired.mutate(saved => {saved.owned_prices.attempts = [
+    ...Array(LIMITS.gift_daily_attempts).fill(expired.at() - 86400000), expired.at() - 1000,
+  ];});
+  await expired.tick(); assert.equal(expired.calls.includes('gifts.resume'), true, 'only attempts strictly inside the rolling day consume its allowance');
+});
+
+test('gift continuation leaves a full bounded window for history and honors its one-resume cap', async () => {
+  const late = await resumableGiftFixture();
+  late.advance(LIMITS.run_ms - LIMITS.gift_resume_ms - LIMITS.gift_history_reserve_ms - (late.at() - START) + 1);
+  await late.tick(); assert.equal(late.calls.includes('gifts.resume'), false);
+  assert.equal(late.state().background_monitoring.run.stage, 'history_start');
+  const repeated = await resumableGiftFixture(); await repeated.tick();
+  repeated.advance(300000); repeated.mutate(saved => {
+    for (const run of [saved.gift_refresh.run, saved.owned_prices.run]) {run.state = 'partial'; run.reason = 'duration_limit';}
+  });
+  await repeated.tick(); assert.equal(repeated.calls.filter(call => call === 'gifts.resume').length, 1);
+  assert.equal(repeated.state().background_monitoring.run.stage, 'history_start');
+  assert.equal((await repeated.complete()).state, 'partial');
+});
+
+test('gift continuation preserves legacy ledgers and optional adapters without widening authority', async () => {
+  const legacy = await resumableGiftFixture(); legacy.mutate(saved => {delete saved.background_monitoring.run.gift_resumes;});
+  await legacy.tick(); assert.equal(legacy.calls.includes('gifts.resume'), true);
+  const oldAdapter = await resumableGiftFixture(); delete oldAdapter.dependencies.gifts.resume;
+  await oldAdapter.tick(); assert.equal(oldAdapter.state().background_monitoring.run.stage, 'history_start');
+  assert.equal((await oldAdapter.complete()).state, 'partial');
+});
+
+test('a lost gift-resume response is counted before dispatch and cannot be replayed in the same cycle', async () => {
+  const f = await resumableGiftFixture(), original = f.dependencies.gifts.resume;
+  f.dependencies.gifts.resume = async (...args) => {await original(...args); throw Error('lost response');};
+  const result = await f.tick(); assert.equal(result.state, 'failed');
+  assert.equal(f.state().background_monitoring.run.gift_resumes, 1);
+  await f.tick(); assert.equal(f.calls.filter(call => call === 'gifts.resume').length, 1);
+});
+
+test('pausing rules or changing scope prevents a pending gift continuation', async () => {
+  for (const mode of ['pause', 'scope', 'targets']) {
+    const f = await resumableGiftFixture();
+    if (mode === 'pause') f.policy.paused = true;
+    if (mode === 'scope') f.changeScope({credential_version: 2});
+    if (mode === 'targets') f.policy.policies[0].paused = true;
+    const result = await f.tick(); assert.ok(['paused', 'blocked'].includes(result.state));
+    assert.equal(f.calls.includes('gifts.resume'), false, mode);
+  }
+});
+
 test('the next scheduled tick closes an abandoned prior run and starts the due cycle immediately', async () => {
   const f = fixture(); f.advance(37 * 60000); await f.tick();
   const prior = f.state().background_monitoring.run.id;
