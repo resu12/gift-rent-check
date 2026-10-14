@@ -4,6 +4,7 @@
 export const BACKGROUND_MONITORING_LIMITS = Object.freeze({
   cadence_ms: 6 * 60 * 60 * 1000, run_ms: 20 * 60 * 1000,
   schedule_phase_ms: 37 * 60 * 1000, lease_ms: 120000, history_steps: 100, history_resumes: 3, manual_retry_ms: 60000,
+  gift_resumes: 1, gift_resume_ms: 300000, gift_history_reserve_ms: 300000, gift_attempts: 20, gift_daily_attempts: 1000,
 });
 const STATES = new Set(['running', 'complete', 'partial', 'paused', 'blocked', 'failed']);
 const REASONS = new Set(['monitoring_paused', 'no_enabled_gifts', 'rules_changed', 'scope_changed',
@@ -11,7 +12,7 @@ const REASONS = new Set(['monitoring_paused', 'no_enabled_gifts', 'rules_changed
   'history_limit', 'history_start_uncertain', 'history_changed', 'gift_refresh_changed',
   'request_failed', 'run_deadline', 'history_stopped']);
 const STAGES = new Set(['gift_start', 'gift_poll', 'history_start', 'history_poll', 'evaluate', 'done']);
-const INTENTS = new Set(['gift_start', 'gift_step', 'history_start', 'history_step', 'history_resume', 'evaluate']);
+const INTENTS = new Set(['gift_start', 'gift_step', 'gift_resume', 'history_start', 'history_step', 'history_resume', 'evaluate']);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const clone = value => JSON.parse(JSON.stringify(value));
 const iso = at => new Date(at).toISOString();
@@ -61,6 +62,7 @@ function validate(value) {
     || !validScope(run.scope) || !STAGES.has(run.stage) || !millis(run.started_at) || !millis(run.deadline)
     || run.deadline !== run.started_at + BACKGROUND_MONITORING_LIMITS.run_ms
     || !count(run.claim_generation) || !count(run.next_action_at) || !count(run.history_steps) || !count(run.history_resumes)
+    || !count(run.gift_resumes ?? 0) || (run.gift_resumes ?? 0) > BACKGROUND_MONITORING_LIMITS.gift_resumes
     || run.history_after_at !== null && !millis(run.history_after_at)
     || run.history_steps > BACKGROUND_MONITORING_LIMITS.history_steps || run.history_resumes > BACKGROUND_MONITORING_LIMITS.history_resumes
     || !['gift_run_id', 'history_job_id', 'previous_history_job_id'].every(key => run[key] === null || Number.isSafeInteger(run[key]) && run[key] > 0)
@@ -101,7 +103,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
   const now = async () => {const at = await clock(); if (!millis(at)) throw new BackgroundMonitoringError('BACKGROUND_CLOCK_INVALID'); return at;};
   const context = run => ({run_id: run.id, session_id: run.session_id, scope: clone(run.scope),
     lease: clone(run.lease), gift_run_id: run.gift_run_id, history_job_id: run.history_job_id,
-    gift_start_address: run.gift_start_address ?? null});
+    gift_start_address: run.gift_start_address ?? null, deadline: run.deadline});
   const reply = (ledger, at, state = null, retryAt = null) => ({
     state: state ?? ledger?.state ?? 'disabled', server_time: iso(at),
     ...(retryAt !== null ? {retry_at: iso(Math.max(at, retryAt))} : {}),
@@ -159,6 +161,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       row.run.intent = kind;
       if (kind === 'history_step') row.run.history_steps++;
       if (kind === 'history_resume') row.run.history_resumes++;
+      if (kind === 'gift_resume') row.run.gift_resumes = (row.run.gift_resumes ?? 0) + 1;
     });
     const checked = await gate(ledger.run);
     if (checked.stop) return {stopped: await finish(ledger.run, 'paused', checked.stop)};
@@ -201,6 +204,36 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     }
     return run.next_gift_start_address ?? run.gift_start_address ?? null;
   }
+  function resumableGift(state, run, gift, at) {
+    const current = state.gift_refresh?.run, inner = state.owned_prices?.run;
+    const limits = BACKGROUND_MONITORING_LIMITS, profile = 'background-monitoring-v1';
+    // Resume this cycle's exact persisted TON traversal once. Website counts
+    // cannot prove TON completion, and already saved prefix evidence is never
+    // relabelled as fresh evidence from a different six-hour cycle.
+    if (typeof gifts.resume !== 'function' || (run.gift_resumes ?? 0) >= limits.gift_resumes
+      || gift.state !== 'partial' || !['duration_limit', 'provider_wait'].includes(gift.reason)
+      || current?.id !== run.gift_run_id || current.session_id !== run.session_id || current.wallet !== run.scope.wallet
+      || current.execution_profile !== profile || current.stage !== 'ton' || current.stop_requested === true
+      || !['running', 'partial'].includes(current.state) || current.reason === 'stopped_by_you'
+      || current.state === 'running' && (!millis(current.deadline) || current.deadline > at)
+      || current.state === 'partial' && !['duration_limit', 'provider_wait'].includes(current.reason)
+      || !count(current.inflight?.until ?? 0) || (current.inflight?.until ?? 0) > at
+      || !object(inner) || inner.id !== current.ton_run_id || inner.session_id !== current.ton_session_id
+      || inner.wallet !== run.scope.wallet || inner.execution_profile !== profile
+      || !['running', 'partial'].includes(inner.state) || inner.stop_requested === true
+      || inner.state === 'partial' && !['duration_limit', 'provider_wait'].includes(inner.reason)
+      || !count(inner.lease_until ?? 0) || (inner.lease_until ?? 0) > at
+      || !Array.isArray(inner.targets) || !count(inner.offset) || inner.offset >= inner.targets.length
+      || !Array.isArray(current.ton_targets) || inner.targets.length !== current.ton_targets.length
+      || inner.targets.some((target, index) => target.nft_address !== current.ton_targets[index])
+      || !count(current.attempts) || !count(inner.attempts) || current.attempts + inner.attempts >= limits.gift_attempts
+      || !Array.isArray(state.owned_prices.attempts)
+      || state.owned_prices.attempts.some(value => !Number.isSafeInteger(value) || value <= 0 || value > at)
+      || state.owned_prices.attempts.filter(value => value > at - 86400000).length >= limits.gift_daily_attempts
+      || at + limits.gift_resume_ms + limits.gift_history_reserve_ms > run.deadline) return false;
+    const next = Math.max(state.owned_prices?.next_allowed_at ?? 0, current.next_allowed_at ?? 0);
+    return count(next) && next < at + limits.gift_resume_ms;
+  }
   async function saveGift(claim, result) {
     const gift = giftResult(result, claim);
     const state = (await repository.read()).state, current = state.gift_refresh?.run;
@@ -209,7 +242,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       const run = ledger.run; run.gift_run_id = gift.id; run.checked = gift.checked; run.total = gift.total;
       run.next_gift_start_address = nextGiftAddress(state, run);
       run.next_action_at = waitAt(result.next_allowed_at, at);
-      if (gift.state === 'running' && run.next_action_at < run.deadline) run.stage = 'gift_poll';
+      if (gift.state === 'running' && run.next_action_at < run.deadline || resumableGift(state, run, gift, at)) run.stage = 'gift_poll';
       else {
         run.gift_complete = gift.state === 'complete'; run.stage = 'history_start';
         // Coverage certificates store seconds. Freeze the next history window
@@ -301,7 +334,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
             gift_start_address: sameScope ? nextGiftAddress(saved.state, old.run) : null,
             next_gift_start_address: sameScope ? nextGiftAddress(saved.state, old.run) : null,
             previous_history_job_id: sameScope ? old.run.history_job_id ?? old.run.previous_history_job_id : null,
-            history_steps: 0, history_resumes: 0, gift_complete: false, history_complete: false,
+            history_steps: 0, history_resumes: 0, gift_resumes: 0, gift_complete: false, history_complete: false,
             history_after_at: null,
             checked: null, total: null, proposals: null,
           }};
@@ -347,6 +380,13 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
         }
         result = await gifts.status({session_id: claim.session_id}, context(claim));
         const gift = giftResult(result, claim), at = await now();
+        if (gift.state === 'partial' && resumableGift((await repository.read()).state, claim, gift, at)) {
+          const prepared = await intent(claim, 'gift_resume');
+          if (prepared.stopped) return reply(prepared.stopped, await now());
+          claim = prepared.run;
+          const row = await saveGift(claim, await gifts.resume({run_id: claim.gift_run_id, session_id: claim.session_id}, context(claim)));
+          return reply(row, await now(), null, row.run.next_action_at || null);
+        }
         if (gift.state !== 'running' || waitAt(result.next_allowed_at, at) > at) {
           const row = await saveGift(claim, result); return reply(row, at, row.run.next_action_at > at ? 'waiting' : null, row.run.next_action_at || null);
         }

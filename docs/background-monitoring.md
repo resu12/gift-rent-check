@@ -4,6 +4,8 @@ The cloud worker refreshes the private owner's saved gifts and checks enabled pr
 
 This first version serves only the configured private owner. It does not enumerate public users or run their policies. Paused rules and disabled gifts stay paused. Existing provider limits, ownership checks, saved-data checks, storage limits, and wallet approval safeguards still apply.
 
+The dashboard's **Status → Monitoring** card shows enabled gift monitoring, pending approvals, the latest saved cloud result, and the next planned check. Open its details for the last run and last fully successful check. **Manage rules** opens the existing rule controls and approval queue. The card reads saved status once a minute while the Status page is visible; **Refresh status** only reloads that information and does not launch a cloud run, collect provider data, or request wallet approval. A missing cloud record means no cloud check has been reported for that account, not proof that the GitHub schedule is disabled.
+
 ## How it runs
 
 Telegram hosting has no scheduler exposed by the repository's current deployment tools. `.github/workflows/background-monitoring.yml` supplies an external wake-up every six hours, at 00:37, 06:37, 12:37, and 18:37 UTC. A manual **Run workflow** can retry an incomplete or failed check before the next slot, using the same operation and safeguards.
@@ -12,7 +14,11 @@ The runner retrieves the app's canonical deployed source, requires the version-1
 
 Each invocation has a random runner identifier, a 20-minute deadline, and at most 200 steps. Individual administrative requests have a 90-second timeout and bounded response sizes. Waiting states honor their saved `retry_at`. A lost response or unexpected error stops the runner; it does not blindly repeat an operation with an unknown outcome. The core's durable checkpoints and leases support later recovery. A timeout does not imply that the most recent remote step was rolled back.
 
-When a gift check reaches its limit, the next cycle starts with the first unfinished TON check, even if the website already reported every gift as checked.
+Cloud gift checks target only retained gifts with enabled, unpaused rules. They use a five-minute window; ordinary dashboard refreshes keep their existing two-minute limit. Recognized candidates and unmonitored gifts do not consume the cloud check's TON work.
+
+If a cloud gift check reaches its time window, the worker can continue the same saved TON traversal once within that cycle, for up to five more minutes. Completed results, the cursor, and the shared 20-request allowance are preserved; the continuation does not reset provider or daily budgets. At least five minutes remain reserved for rental history. Provider cooldowns, active leases, changes to the monitored gifts, and a manual Stop still prevent an unsafe continuation.
+
+If the bounded continuation cannot finish, the result stays incomplete and the next cycle starts with the first unfinished TON check. A website count showing every gift checked does not mean the additional TON verification is complete. Results from different six-hour cycles are not combined into a falsely fresh, completed check.
 
 History collection uses a 30-, 60-, or 90-day window according to the enabled rules, with at most 100 collection steps per cycle. An unfinished traversal can continue from its saved cursor in a later cycle only when it is known to belong to this worker. After finishing an older traversal, the worker checks the recent head again before treating history as current. Manual collections and an explicit Stop remain respected. The scheduled due time follows the UTC slots above, so a delayed run does not cause the next normal slot to be skipped.
 
