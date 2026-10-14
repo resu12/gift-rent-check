@@ -499,6 +499,43 @@ test('a user partial history traversal is preserved while fresh gifts still adva
   assert.equal(f.calls.some(c => /^history\./.test(c)), false); assert.equal(f.state().job.id, 81);
 });
 
+test('an inactive allowance-ended listing scan permits a separate cloud history check', async () => {
+  for (const reason of ['invocation_limit', 'duration_limit']) {
+    const f = fixture(), listing = {id: 81, kind: 'prices', state: 'partial', reason, lease_until: 0,
+      invocation_deadline: START - 1, cursor: 'saved-listing-page', pages: 33};
+    f.mutate(saved => {saved.job = copy(listing);});
+    const start = f.dependencies.history.start;
+    f.dependencies.history.start = async (...args) => {
+      assert.deepEqual(f.state().job, listing, 'The worker must not edit the saved listing before starting history.');
+      return start(...args);
+    };
+    const result = await f.complete();
+    assert.equal(result.state, 'complete', reason);
+    assert.equal(f.calls.filter(call => call === 'history.start').length, 1);
+    assert.equal(f.calls.includes('history.resume'), false);
+    assert.equal(f.state().job.kind, 'rental_prices');
+  }
+});
+
+test('the inactive-listing exception never bypasses stops, leases, or unrelated partial work', async () => {
+  const cases = [
+    {reason: 'stopped_by_you'}, {stop_requested: true}, {reason: 'provider_wait'}, {reason: 'daily_limit'},
+    {reason: 'unknown'}, {reason: null}, {kind: 'rental_prices'}, {kind: 'collect'},
+    {lease_until: START + 300000}, {lease_until: -1}, {lease_until: '0'},
+    {state: 'running', invocation_deadline: START + 300000}, {state: 'queued', invocation_deadline: START + 300000},
+  ];
+  for (const change of cases) {
+    const f = fixture(), listing = {id: 81, kind: 'prices', state: 'partial', reason: 'invocation_limit',
+      lease_until: 0, invocation_deadline: START - 1, ...change};
+    f.mutate(saved => {saved.job = copy(listing);});
+    const result = await f.complete();
+    assert.ok(['partial', 'blocked'].includes(result.state), JSON.stringify(change));
+    assert.equal(result.background_monitoring.reason, 'collection_running');
+    assert.equal(f.calls.some(call => /^history\./.test(call)), false);
+    assert.deepEqual(f.state().job, listing);
+  }
+});
+
 test('a foreground gift refresh is waited for rather than joined or stepped', async () => {
   const f = fixture(); f.mutate(saved => {saved.gift_refresh = {run: {id: 81, wallet: address(1), session_id: 'foreground', state: 'running', deadline: START + 30000}};});
   const result = await f.tick(); assert.equal(result.state, 'waiting');

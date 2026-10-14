@@ -22,6 +22,8 @@ If the bounded continuation cannot finish, the result stays incomplete and the n
 
 History collection uses a 30-, 60-, or 90-day window according to the enabled rules, with at most 100 collection steps per cycle. An unfinished traversal can continue from its saved cursor in a later cycle only when it is known to belong to this worker. After finishing an older traversal, the worker checks the recent head again before treating history as current. Manual collections and an explicit Stop remain respected. The scheduled due time follows the UTC slots above, so a delayed run does not cause the next normal slot to be skipped.
 
+An inactive manual listing-price scan that ended at its request or time allowance does not block a separate cloud rental-history check. Its saved data and cursor remain available for manual Resume. Explicitly stopped scans, active requests, and unfinished manual rental-history scans still block that switch.
+
 For longer idle rules, the app retains a bounded record of overlapping, completed and verified history coverage for each unchanged availability baseline. This lets continued monitoring support rules up to 365 days without repeatedly downloading an ever-growing history window. The latest completed coverage must still include the latest gift observation. Missing or ambiguous history cannot extend that coverage, and a changed availability baseline starts it over.
 
 Logs contain only fixed status names, counts, and dates. Provider responses, addresses, gifts, credentials, private source, and remote error messages are not printed or uploaded as artifacts. A `partial` result means the runner reached a bound or saved work for a later wake-up; `blocked` or `failed` makes the workflow fail so the operator can investigate.
