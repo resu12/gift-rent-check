@@ -6,6 +6,12 @@ on:
     # its saved six-hour due time before making any provider requests.
     - cron: '37 * * * *'
   workflow_dispatch:
+    inputs:
+      scheduled:
+        description: 'Scheduled wake: respect the saved monitoring due time'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -37,7 +43,7 @@ jobs:
         working-directory: serverless
         env:
           BACKGROUND_MONITORING_ENABLED: ${{ vars.BACKGROUND_MONITORING_ENABLED }}
-          BACKGROUND_MONITORING_MANUAL_RETRY: ${{ github.event_name == 'workflow_dispatch' }}
+          BACKGROUND_MONITORING_MANUAL_RETRY: ${{ github.event_name == 'workflow_dispatch' && inputs.scheduled != true }}
           TGCLOUD_APP_ID: ${{ vars.TGCLOUD_APP_ID }}
           TGCLOUD_TOKEN: ${{ secrets.TGCLOUD_TOKEN }}
         run: node tools/run-background-monitoring.mjs --app-id "$TGCLOUD_APP_ID"

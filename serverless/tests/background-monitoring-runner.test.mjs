@@ -179,7 +179,8 @@ test('scheduled workflow is inert by default and confines credentials to its pro
   assert.match(workflow,/cron: '37 \* \* \* \*'/);assert.match(workflow,/workflow_dispatch:/);assert.doesNotMatch(workflow,/pull_request|repository_dispatch|workflow_run/);
   assert.match(workflow,/github\.repository == 'resu12\/gift-rent-check'/);assert.match(workflow,/github\.event\.repository\.default_branch/);
   assert.match(workflow,/vars\.BACKGROUND_MONITORING_ENABLED == 'true'/);assert.match(workflow,/environment: price-monitoring/);
-  assert.match(workflow,/BACKGROUND_MONITORING_MANUAL_RETRY: \$\{\{ github\.event_name == 'workflow_dispatch' \}\}/);
+  assert.match(workflow,/scheduled:\s+description: 'Scheduled wake: respect the saved monitoring due time'\s+type: boolean\s+required: false\s+default: false/);
+  assert.match(workflow,/BACKGROUND_MONITORING_MANUAL_RETRY: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.scheduled != true \}\}/);
   assert.match(workflow,/contents: read/);assert.match(workflow,/persist-credentials: false/);assert.match(workflow,/cancel-in-progress: false/);
   assert.equal((workflow.match(/secrets\./g)||[]).length,1);assert.ok(workflow.indexOf('secrets.TGCLOUD_TOKEN')>workflow.indexOf('- name: Run bounded owner monitoring'));
   assert.doesNotMatch(workflow,/npm (install|ci)|pnpm |upload-artifact|set -x/);
