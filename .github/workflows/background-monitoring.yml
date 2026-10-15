@@ -2,7 +2,9 @@ name: Background price monitoring
 
 on:
   schedule:
-    - cron: '37 */6 * * *'
+    # Wake hourly to catch a delayed or missed trigger. The worker enforces
+    # its saved six-hour due time before making any provider requests.
+    - cron: '37 * * * *'
   workflow_dispatch:
 
 permissions:
