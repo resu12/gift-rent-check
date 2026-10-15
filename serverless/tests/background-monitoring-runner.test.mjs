@@ -6,7 +6,7 @@ import {adminModuleSources} from '../tools/admin-module-sources.mjs';
 
 const token='app123:synthetic_test_secret',runner='a'.repeat(64),start=Date.parse('2026-10-14T12:00:00.000Z');
 const canonical={'lib/private-config':'export const ownerTelegramId=42;',
-  'lib/runtime':'export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;\nexport function createPrivateBackgroundMonitoringAccess() {}',
+  'lib/runtime':'export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;\nexport const PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION=1;\nexport function createPrivateBackgroundMonitoringAccess() {}',
   'lib/existing':'export const value=1;','endpoints/unrelated':'private source not needed'};
 const local={coreSource:"import {value} from './existing.js';\nexport const core=value;",
   entrypointSource:"import {core} from '../lib/background-monitoring.js';\nexport default async()=>core;"};
@@ -97,12 +97,38 @@ test('a manual retry is sent only on the first tick and never repeats after a te
   const check=fixture([],{check:true,retry:true});await check.run();assert.equal(check.calls.length,1);
 });
 
+test('completed running steps do not add a client delay after the server allowance has elapsed',async()=>{
+  const f=fixture([{state:'running',retry_at:new Date(start-1000).toISOString()},
+    {state:'running'},{state:'complete'}]);
+  assert.equal((await f.run()).state,'complete');
+  assert.deepEqual(f.waits,[]);
+  assert.equal(f.calls.filter(call=>call.operation==='run').length,3);
+  const future=fixture([{state:'running',retry_at:new Date(start+2500).toISOString()},{state:'complete'}]);
+  await future.run();assert.deepEqual(future.waits,[2500]);
+  const contention=fixture([{state:'busy',retry_at:new Date(start).toISOString()},{state:'complete'}]);
+  await contention.run();assert.deepEqual(contention.waits,[1000]);
+});
+
 test('deployed runtime protocol and owner factory are required before check or execution',async()=>{
   for(const check of [false,true])for(const runtime of [undefined,'// export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;',
     canonical['lib/runtime'].replace('VERSION=1','VERSION=2'),canonical['lib/runtime'].replace('export function','function')]) {
     let requests=0;const f=fixture([],{check,api:{getFiles:async()=>({canonical_modules:{...canonical,'lib/runtime':runtime}}),
       runFunction:async()=>{requests++;throw Error('must not execute');}}});
     await assert.rejects(f.run(),{message:'BACKGROUND_MONITORING_STOPPED'});assert.equal(requests,0);assert.deepEqual(f.output,[]);
+  }
+});
+
+test('scoped-history capability is required before loading or executing a worker against a version-1 runtime',async()=>{
+  const marker='export const PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION=1;';
+  for(const check of [false,true])for(const capability of ['',`// ${marker}`,marker.replace('export ',''),marker.replace('const','let'),
+    ...['0','2','-1','null','NaN','"1"'].map(value=>marker.replace('VERSION=1',`VERSION=${value}`))]) {
+    let reads=0,loads=0,requests=0;
+    const runtime=canonical['lib/runtime'].replace(marker,capability);
+    const f=fixture([],{check,loadSources:()=>{loads++;return local;},
+      api:{getFiles:async()=>{reads++;return {canonical_modules:{...canonical,'lib/runtime':runtime}};},
+        runFunction:async()=>{requests++;throw Error('must not execute');}}});
+    await assert.rejects(f.run(),{message:'BACKGROUND_MONITORING_STOPPED'});
+    assert.equal(reads,1);assert.equal(loads,0);assert.equal(requests,0);assert.deepEqual(f.output,[]);
   }
 });
 
@@ -117,7 +143,7 @@ test('deadline and step caps keep durable future work pending instead of calling
   assert.deepEqual(await f.run(),{state:'partial',retry_at:later});assert.equal(f.calls.length,2);assert.deepEqual(f.waits,[]);
   const limited=fixture([{state:'running'},{state:'running'},{state:'complete'}],{limits:{steps:2}});
   assert.equal((await limited.run()).state,'partial');assert.equal(limited.calls.filter(call=>call.operation==='run').length,2);
-  const expired=fixture([{state:'running'},{state:'complete'}],{limits:{duration_ms:1000}});
+  const expired=fixture([{state:'waiting',retry_at:new Date(start+1000).toISOString()},{state:'complete'}],{limits:{duration_ms:1000}});
   assert.equal((await expired.run()).state,'partial');assert.equal(expired.calls.filter(call=>call.operation==='run').length,1);
   for(const limits of [{steps:201},{duration_ms:RUNNER_LIMITS.duration_ms+1},{request_ms:1},{steps:0}])await assert.rejects(fixture([],{limits}).run());
 });

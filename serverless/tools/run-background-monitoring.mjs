@@ -94,9 +94,12 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
   const deployed=await api.getFiles({timeoutMs:requestTime()});
   if(!object(deployed?.canonical_modules))fail();
   // The bridge must use the reviewed deployed owner-access implementation.
-  // Missing/older runtimes fail closed before any administrative execution.
+  // The additive capability keeps existing v1 runners compatible while this
+  // worker rejects runtimes that cannot persist and resume scoped history.
+  // Missing/older runtimes fail closed before loading or executing the worker.
   const runtime=deployed.canonical_modules['lib/runtime'];
   if(typeof runtime!=='string'||!/^\s*export\s+const\s+PRIVATE_BACKGROUND_MONITORING_VERSION\s*=\s*1\s*;/m.test(runtime)
+    ||!/^\s*export\s+const\s+PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION\s*=\s*1\s*;/m.test(runtime)
     ||!/^\s*export\s+function\s+createPrivateBackgroundMonitoringAccess\s*\(/m.test(runtime))fail();
   const {coreSource,entrypointSource}=loadSources();
   const sources=adminModuleSources(deployed.canonical_modules,{'lib/background-monitoring':coreSource},MONITORING_ENDPOINT,entrypointSource);
@@ -112,7 +115,13 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
     summary=monitoringSummary(response?.result);emit(summary);
     if(!['running','waiting','busy'].includes(summary.state)||summary.state==='busy'&&!summary.retry_at)return summary;
     const current=now();if(!Number.isSafeInteger(current)||current<=0)fail();
-    const retryAt=Math.max(current+1000,summary.retry_at?Date.parse(summary.retry_at):current+1000);
+    // A running step already commits the provider's next permitted time.
+    // Do not add another second after network/host work has consumed that
+    // interval. Waiting/busy without a future deadline retains a small floor
+    // so stale contention replies cannot turn into a hot polling loop.
+    const fallback=summary.state==='running'?current:current+1000;
+    const retryAt=Math.max(current,summary.retry_at?Date.parse(summary.retry_at):fallback,
+      summary.state==='running'?current:current+1000);
     // Stop with the durable checkpoint intact when its due time is outside
     // this invocation. Never call early or start an unbounded provider wait.
     if(retryAt-current>=remaining())break;
