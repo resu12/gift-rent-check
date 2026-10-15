@@ -74,6 +74,32 @@ test('an active list with more than one page suppresses dispatch without travers
   assert.equal(f.calls.length, 1);
 });
 
+test('capped GitHub counts preserve active-run and recent-dispatch suppression', async () => {
+  for (const [index, status] of statuses.entries()) {
+    const f = fixture(url => new URL(url).searchParams.get('status') === status
+      ? Response.json({total_count: '2,500+', workflow_runs: [run({status})]}) : undefined);
+    assert.equal((await f.run()).state, 'busy');
+    assert.equal(f.calls.length, index + 1);
+  }
+  for (const [age, expected] of [[1000, 'recent_dispatch'], [SCHEDULER.duplicate_ms + 1, 'dispatched']]) {
+    const f = fixture(url => new URL(url).searchParams.has('event')
+      ? Response.json({total_count: '2,500+', workflow_runs: [run({created_at: new Date(start - age).toISOString()})]}) : undefined);
+    assert.equal((await f.run()).state, expected);
+    assert.equal(f.calls.filter(call => call.init.method === 'POST').length, expected === 'dispatched' ? 1 : 0);
+  }
+});
+
+test('unknown capped counts and inconsistent capped pages still fail closed', async () => {
+  for (const payload of [{workflow_runs: []}, {workflow_runs: [run({status: 'queued'})]}, {total_count: '2,500+', workflow_runs: []},
+    {total_count: '2,500+', workflow_runs: [run({status: 'queued'}), run({status: 'queued', id: 43})]},
+    ...['2500+', '2,500', '2,500++', '2,500+ private details', null, 1.5, -1, '1']
+      .map(total_count => ({total_count, workflow_runs: [run({status: 'queued'})]}))]) {
+    const f = fixture(() => Response.json(payload));
+    assert.equal((await f.run()).reason, 'invalid_response');
+    assert.equal(f.calls.length, 1);
+  }
+});
+
 test('recent manual or scheduler dispatches suppress duplicate delivery, including clock disagreement', async () => {
   for (const offset of [-SCHEDULER.duplicate_ms, -1000, 0, 60000]) {
     const f = fixture(url => new URL(url).searchParams.has('event') ? page(run({created_at: new Date(start + offset).toISOString()})) : undefined);

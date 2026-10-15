@@ -86,8 +86,14 @@ async function requestApi(request, token, path, method, timeoutMs) {
 }
 
 function runsFrom(value, {status, event} = {}) {
-  if (!record(value) || !Number.isSafeInteger(value.total_count) || value.total_count < 0 || !Array.isArray(value.workflow_runs)
-    || value.workflow_runs.length !== Math.min(value.total_count, 1)) stop('invalid_response');
+  if (!record(value) || !Array.isArray(value.workflow_runs) || value.workflow_runs.length > 1) stop('invalid_response');
+  // Decisions use the first returned run, not an exact history count. GitHub
+  // caps large filtered counts at the documented string "2,500+". Retain
+  // numeric consistency checks and reject incomplete or unknown metadata.
+  const count = value.total_count;
+  if (count === '2,500+') {
+    if (value.workflow_runs.length !== 1) stop('invalid_response');
+  } else if (!Number.isSafeInteger(count) || count < 0 || value.workflow_runs.length !== Math.min(count, 1)) stop('invalid_response');
   for (const run of value.workflow_runs) {
     if (!record(run) || !Number.isSafeInteger(run.id) || run.id <= 0 || !STATUSES.has(run.status)
       || typeof run.created_at !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(run.created_at)
