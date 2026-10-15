@@ -48,7 +48,7 @@ test('one eligible tick checks all active statuses then dispatches only the fixe
   ]);
   for (const {url, init} of f.calls) {
     assert.equal(new URL(url).origin, 'https://api.github.com');
-    assert.equal(init.redirect, 'error');
+    assert.equal(init.redirect, 'manual');
     assert.ok(init.signal instanceof AbortSignal);
     assert.equal(init.headers.Authorization, `Bearer ${token}`);
     assert.equal(init.headers['X-GitHub-Api-Version'], '2022-11-28');
@@ -66,6 +66,20 @@ test('every active state, including an old approval wait, suppresses another dis
     assert.equal(f.calls.length, index + 1);
     assert.ok(f.calls.every(call => call.init.method === 'GET'));
   }
+});
+
+test('scheduler dispatches with Workerd-compatible redirect handling and rejects redirects without following', async () => {
+  const workerd = response => (_url, init) => {
+    if (!['follow', 'manual'].includes(init.redirect)) throw new TypeError('Invalid redirect value');
+    assert.equal(init.redirect, 'manual');
+    return response?.();
+  };
+  const success = fixture(workerd());
+  assert.equal((await success.run()).state, 'dispatched');
+  assert.equal(success.calls.length, 7);
+  const redirected = fixture(workerd(() => new Response(null, {status: 302, headers: {Location: 'https://example.invalid/private'}})));
+  assert.equal((await redirected.run()).reason, 'redirect_blocked');
+  assert.equal(redirected.calls.length, 1);
 });
 
 test('an active list with more than one page suppresses dispatch without traversing history', async () => {
