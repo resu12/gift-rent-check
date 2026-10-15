@@ -842,6 +842,88 @@ test('recovery status acknowledges a claimed runner but not the preceding comple
   assert.equal((await worker.status({runner_id:RUNNER})).runner_acknowledged,true,'legacy run identity remains known');
 });
 
+async function preClaimTerminalFixture(reason) {
+  const f=fixture();
+  if(reason==='history_start_uncertain') {
+    await f.until('history_start');
+    f.mutate(saved=>{const run=saved.background_monitoring.run;run.intent='history_start';
+      run.lease={token:`${RUNNER}:9`,until:f.at()+1000};});
+    f.advance(1001);
+  } else {
+    await f.tick();
+    if(reason==='scope_changed')f.changeScope({credential_version:2});
+    else f.advance(LIMITS.run_ms);
+  }
+  return f;
+}
+
+test('lost terminal responses before a new claim recover each committed outcome without extra provider work',async()=>{
+  for(const reason of ['run_deadline','scope_changed','history_start_uncertain']) {
+    const f=await preClaimTerminalFixture(reason),worker=createBackgroundMonitoringWorker(f.dependencies);
+    const before=f.state().background_monitoring,revision=f.revision(),calls=f.calls.length,inputs=[];
+    const api={getFiles:async()=>({canonical_modules:{'lib/private-config':'export const ownerTelegramId=42;','lib/runtime':
+      'export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;\nexport const PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION=1;\nexport function createPrivateBackgroundMonitoringAccess() {}'}}),
+      runFunction:async(_sources,input)=>{
+        inputs.push({...input});
+        if(input.status_only)return {result:await worker.status(input)};
+        const result=await worker.tick(input);assert.equal(result.background_monitoring.reason,reason);
+        throw new MonitoringAdminError('network_error','tick');
+      }};
+    const result=await runBackgroundMonitoring({api,enabled:true,random:()=>OTHER,
+      now:f.at,monotonic:()=>f.at()-START,sleep:async ms=>f.advance(ms)});
+    assert.equal(result.state,reason==='run_deadline'?'partial':'blocked',reason);
+    assert.deepEqual(inputs,[{runner_id:OTHER},{runner_id:OTHER,status_only:true}]);
+    assert.equal(f.revision(),revision+1);assert.equal(f.calls.length,calls);
+    const after=f.state().background_monitoring;
+    assert.equal(after.run.last_runner_id,OTHER);assert.equal(after.reason,reason);
+    for(const key of ['id','started_at','deadline','claim_generation'])assert.equal(after.run[key],before.run[key]);
+    assert.equal(after.next_check_at,before.next_check_at);assert.equal(after.last_started_at,before.last_started_at);
+    assert.equal((await worker.status({runner_id:OTHER})).runner_acknowledged,true);
+  }
+});
+
+test('intermediate terminal writes are not acknowledged before a manual or overdue continuation claims its run',async()=>{
+  for(const reason of ['run_deadline','scope_changed','history_start_uncertain'])for(const retry of [true,false]) {
+    const f=await preClaimTerminalFixture(reason),worker=createBackgroundMonitoringWorker(f.dependencies);
+    if(!retry)f.advance(LIMITS.cadence_ms);
+    const committed=deferred(),release=deferred(),append=f.repository.append;let intercepted=false;
+    f.repository.append=async(...args)=>{
+      const result=await append(...args);
+      if(result&&!intercepted&&args[1].state.background_monitoring.reason===reason) {
+        intercepted=true;committed.resolve();await release.promise;
+      }
+      return result;
+    };
+    const pending=worker.tick({runner_id:OTHER,retry});
+    await committed.promise;
+    try {
+      const status=await worker.status({runner_id:OTHER});
+      assert.equal(status.runner_acknowledged,false,`${reason}, retry=${retry}`);
+      assert.equal(f.state().background_monitoring.run.last_runner_id,RUNNER);
+    } finally {release.resolve();}
+    await pending;
+    assert.equal((await worker.status({runner_id:OTHER})).runner_acknowledged,true);
+  }
+});
+
+test('read-only no-due terminal replies and active waits cannot stamp a new runner acknowledgement',async()=>{
+  for(const mode of ['complete','partial','blocked','busy','waiting']) {
+    const f=fixture(),worker=createBackgroundMonitoringWorker(f.dependencies);
+    if(['complete','partial','blocked'].includes(mode)) {
+      await f.complete();
+      if(mode!=='complete')f.mutate(saved=>{saved.background_monitoring.state=mode;});
+    } else {
+      await f.tick();
+      f.mutate(saved=>{const run=saved.background_monitoring.run;
+        if(mode==='busy')run.lease={token:`${RUNNER}:9`,until:f.at()+1000};else run.next_action_at=f.at()+1000;});
+    }
+    const before=f.state(),revision=f.revision(),calls=f.calls.length;
+    assert.equal((await worker.tick({runner_id:OTHER})).state,mode);
+    assert.equal((await worker.status({runner_id:OTHER})).runner_acknowledged,false);
+    assert.equal(f.revision(),revision);assert.equal(f.calls.length,calls);assert.deepEqual(f.state(),before);
+  }
+});
+
 test('driver reconciles a lost committed history response and completes without replaying history or requesting a wallet',async()=>{
   const f=fixture(),worker=createBackgroundMonitoringWorker(f.dependencies),inputs=[],output=[];
   let lost=false;
