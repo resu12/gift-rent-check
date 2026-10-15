@@ -322,6 +322,9 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
         if (old.run.lease?.until > at) return reply(old, at, 'busy', old.run.lease.until);
         if (old.run.next_action_at > at && old.run.deadline > at) return reply(old, at, 'waiting', Math.min(old.run.next_action_at, old.run.deadline));
         ledger = clone(old);
+        // A terminal checkpoint returned before claiming must acknowledge its
+        // writer too. Intermediate cleanup before a retry/due cycle must not.
+        if (automaticDue(ledger) > at && !retry) ledger.run.last_runner_id = runner_id;
         if (canonical(await captureScope()) !== canonical(ledger.run.scope)) {
           finished(ledger, at, 'blocked', 'scope_changed');
           if (await append(saved, ledger, at, {allowScopeChange: true}) && automaticDue(ledger) > at && !retry) return reply(ledger, at);
