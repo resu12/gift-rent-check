@@ -13,7 +13,7 @@ function bridge(options={}) {
     .replace(/^import[^\n]+\n/gm,'').replace('export default async function','return async function');
   const create=vm.runInNewContext(`(function(createPrivateBackgroundMonitoringAccess,PRIVATE_BACKGROUND_MONITORING_VERSION,PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION,createBackgroundMonitoringWorker,BackgroundMonitoringError){${source}})`);
   return {call:create(check=>{accesses++;guard=check;return access;},version,scopedHistoryVersion,
-    candidate=>{assert.equal(candidate,access);return {tick:async input=>({state:'complete',runner:input.runner_id,retry:input.retry})};},BackgroundMonitoringError),
+    candidate=>{assert.equal(candidate,access);return {tick:async input=>({state:'complete',runner:input.runner_id,retry:input.retry}),status:async input=>({state:'running',read_only:true,acknowledgement_for:input.runner_id})};},BackgroundMonitoringError),
     accesses:()=>accesses,guard:context=>guard(context)};
 }
 const input={runner_id:'a'.repeat(64)}, admin={background_worker:'price-monitoring-v1'};
@@ -22,7 +22,9 @@ test('ordinary Mini App contexts and arbitrary worker actions never obtain owner
   const f=bridge();
   for(const [args,ctx] of [[input,{}],[input,{initData:{user:{id:12345}}}],
     [{...input,action:'prepare'},admin],[{...input,user_id:12345},admin],[{runner_id:'invalid'},admin],
-    ...['true',1,null,{}].map(retry=>[{...input,retry},admin])]) {
+    ...['true',1,null,{}].map(retry=>[{...input,retry},admin]),
+    ...[false,'true',1,null,{}].map(status_only=>[{...input,status_only},admin]),
+    ...[true,false].map(retry=>[{...input,status_only:true,retry},admin])]) {
     await assert.rejects(()=>f.call(args,ctx),/BACKGROUND_ACCESS_DENIED/);
   }
   assert.equal(f.accesses(),0);
@@ -42,6 +44,14 @@ test('administrative bridge invokes only the fixed worker tick',async()=>{
   const f=bridge();assert.equal((await f.call(input,admin)).state,'complete');assert.equal(f.accesses(),1);
   assert.equal((await f.call({...input,retry:true},admin)).retry,true);
   assert.equal((await f.call({...input,retry:false},admin)).retry,false);
+});
+
+test('administrative recovery reads status without invoking a tick or accepting a retry',async()=>{
+  const f=bridge();
+  const result=await f.call({...input,status_only:true},admin);
+  assert.equal(result.state,'running');assert.equal(result.read_only,true);assert.equal(f.accesses(),1);
+  assert.equal(result.acknowledgement_for,input.runner_id);
+  await assert.rejects(()=>f.call({...input,status_only:true},{}),/BACKGROUND_ACCESS_DENIED/);
 });
 
 test('provider guard rejects replaced, expired and terminal worker claims',async()=>{

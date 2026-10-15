@@ -63,6 +63,7 @@ function validate(value) {
     || !validScope(run.scope) || !STAGES.has(run.stage) || !millis(run.started_at) || !millis(run.deadline)
     || run.deadline !== run.started_at + BACKGROUND_MONITORING_LIMITS.run_ms
     || !count(run.claim_generation) || !count(run.next_action_at) || !count(run.history_steps) || !count(run.history_resumes)
+    || run.last_runner_id !== undefined && (typeof run.last_runner_id !== 'string' || !/^[a-f0-9]{64}$/.test(run.last_runner_id))
     || !count(run.gift_resumes ?? 0) || (run.gift_resumes ?? 0) > BACKGROUND_MONITORING_LIMITS.gift_resumes
     || run.history_after_at !== null && !millis(run.history_after_at)
     || run.history_steps > BACKGROUND_MONITORING_LIMITS.history_steps || run.history_resumes > BACKGROUND_MONITORING_LIMITS.history_resumes
@@ -78,13 +79,20 @@ function validate(value) {
   return value;
 }
 
-/** Public metadata deliberately excludes identities, leases and job cursors. */
+/** Public metadata excludes identities, lease tokens and job cursors. */
 export function projectBackgroundMonitoring(value, now = Date.now()) {
   const ledger = validate(value);
   if (!ledger) return null;
   const result = Object.fromEntries(['version', 'cadence_hours', 'state', 'last_started_at', 'last_finished_at',
     'last_success_at', 'next_check_at', 'reason'].map(key => [key, ledger[key]]));
   result.next_check_at = iso(automaticDue(ledger));
+  if (ledger.state === 'running') {
+    result.run_deadline_at = iso(ledger.run.deadline);
+    // Allow a minute for the next driver request after the current lease or
+    // provider wait. Expose a display deadline, never the lease identity.
+    result.activity_expires_at = iso(Math.min(ledger.run.deadline,
+      Math.max(ledger.run.started_at, ledger.run.next_action_at, ledger.run.lease?.until ?? 0) + 60000));
+  }
   if (ledger.state === 'running' && ledger.run.deadline <= now) {result.state = 'partial'; result.reason = 'run_deadline';}
   return result;
 }
@@ -112,10 +120,17 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     ...Object.fromEntries(['checked', 'total', 'proposals'].filter(key => count(ledger?.run?.[key])).map(key => [key, ledger.run[key]])),
     background_monitoring: projectBackgroundMonitoring(ledger, at),
   });
-  async function status() {
+  async function status({runner_id} = {}) {
+    if (runner_id !== undefined && (typeof runner_id !== 'string' || !/^[a-f0-9]{64}$/.test(runner_id)))
+      throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
     const saved = await repository.read(), at = await now(), ledger = validate(saved.state.background_monitoring);
-    return reply(ledger, at, ledger?.state === 'running' && ledger.run.deadline <= at ? 'partial' : null, ledger?.state === 'running'
+    const result = reply(ledger, at, ledger?.state === 'running' && ledger.run.deadline <= at ? 'partial' : null, ledger?.state === 'running'
       ? Math.max(ledger.run.next_action_at, ledger.run.lease?.until ?? 0, at) : ledger ? automaticDue(ledger) : null);
+    // A lost initial response may precede the claim. Never let a recovery read
+    // mistake the preceding cycle's completion for this runner's outcome.
+    if (runner_id !== undefined) result.runner_acknowledged = Boolean(ledger &&
+      (ledger.run.last_runner_id === runner_id || ledger.run.id.startsWith(runner_id + ':')));
+    return result;
   }
   async function append(saved, ledger, at, {allowScopeChange = false} = {}) {
     if (!allowScopeChange) await assertScope(ledger.run.scope, context(ledger.run));
@@ -354,6 +369,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       }
       if (ledger.run.claim_generation >= Number.MAX_SAFE_INTEGER) throw new BackgroundMonitoringError('BACKGROUND_STATE_INVALID');
       ledger.run.claim_generation++;
+      ledger.run.last_runner_id = runner_id;
       ledger.run.lease = {token: `${runner_id}:${ledger.run.claim_generation}`, until: at + BACKGROUND_MONITORING_LIMITS.lease_ms};
       if (await append(saved, ledger, at)) {claim = ledger.run; break;}
     }

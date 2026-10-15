@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {createBackgroundMonitoringWorker, projectBackgroundMonitoring, BACKGROUND_MONITORING_LIMITS as LIMITS} from '../worker/monitoring.js';
 import {createCloudEngine} from '../tgcloud/lib/cloud-engine.js';
 import {streamedBody} from './fixtures/http-response.mjs';
+import {runBackgroundMonitoring,MonitoringAdminError} from '../tools/run-background-monitoring.mjs';
 
 const START = Date.parse('2026-10-14T12:00:00Z'), RUNNER = 'a'.repeat(64), OTHER = 'b'.repeat(64);
 const address = n => `0:${n.toString(16).padStart(64, '0')}`, copy = value => structuredClone(value);
@@ -796,6 +797,75 @@ test('metadata and read-only status disclose no wallet, session, job, lease, pol
   assert.deepEqual(projected, result.background_monitoring); assert.equal(f.revision(), before); assert.equal(f.calls.length, calls);
   for (const secret of [address(1), RUNNER, 'credential_version', 'session_id', 'history_job_id', 'lease', 'targets']) assert.equal(JSON.stringify(result).includes(secret), false, secret);
   assert.equal(projectBackgroundMonitoring(null), null);
+});
+
+test('running status expires after activity, respects provider waits and never extends the run deadline',async()=>{
+  const f=fixture();await f.tick();
+  const stamp=value=>new Date(value).toISOString();
+  const before=f.revision(),calls=f.calls.length;
+  let result=await f.status();
+  assert.equal(result.background_monitoring.activity_expires_at,stamp(f.at()+60000));
+  assert.equal(result.background_monitoring.run_deadline_at,stamp(START+LIMITS.run_ms));
+  f.advance(60001);result=await f.status();
+  assert.equal(result.background_monitoring.activity_expires_at,stamp(START+60000),'reads must not renew activity');
+  assert.equal(f.revision(),before);assert.equal(f.calls.length,calls);
+  f.mutate(saved=>{const run=saved.background_monitoring.run;run.next_action_at=f.at()+300000;
+    run.lease={token:`${RUNNER}:2`,until:f.at()+120000};});
+  result=await f.status();
+  assert.equal(result.retry_at,stamp(f.at()+300000));
+  assert.equal(result.background_monitoring.activity_expires_at,stamp(f.at()+360000));
+  f.mutate(saved=>{saved.background_monitoring.run.lease.until=START+LIMITS.run_ms+120000;});
+  result=await f.status();
+  assert.equal(result.background_monitoring.activity_expires_at,stamp(START+LIMITS.run_ms));
+  f.advance(LIMITS.run_ms);result=await f.status();
+  assert.equal(result.state,'partial');assert.equal(result.background_monitoring.reason,'run_deadline');
+  assert.equal(f.state().background_monitoring.state,'running','status leaves the recovery checkpoint untouched');
+  for(const privateField of ['session_id','history_job_id','lease','targets',RUNNER,address(1)])
+    assert.equal(JSON.stringify(result).includes(privateField),false);
+});
+
+test('recovery status acknowledges a claimed runner but not the preceding completed cycle',async()=>{
+  const f=fixture(),worker=createBackgroundMonitoringWorker(f.dependencies);
+  assert.equal((await worker.status({runner_id:RUNNER})).runner_acknowledged,false);
+  await f.complete();
+  const before=f.revision(),calls=f.calls.length;
+  assert.equal((await worker.status({runner_id:RUNNER})).runner_acknowledged,true);
+  const previous=await worker.status({runner_id:OTHER});
+  assert.equal(previous.state,'complete');assert.equal(previous.runner_acknowledged,false);
+  assert.equal(f.revision(),before);assert.equal(f.calls.length,calls);
+  f.advance(LIMITS.cadence_ms);await f.tick();await f.tick(OTHER);
+  assert.equal((await worker.status({runner_id:OTHER})).runner_acknowledged,true);
+  assert.equal((await worker.status({runner_id:'c'.repeat(64)})).runner_acknowledged,false);
+  assert.equal(JSON.stringify(previous).includes(RUNNER),false);
+  await assert.rejects(()=>worker.status({runner_id:'invalid'}),/BACKGROUND_RUNNER_INVALID/);
+  f.mutate(saved=>{delete saved.background_monitoring.run.last_runner_id;});
+  assert.equal((await worker.status({runner_id:RUNNER})).runner_acknowledged,true,'legacy run identity remains known');
+});
+
+test('driver reconciles a lost committed history response and completes without replaying history or requesting a wallet',async()=>{
+  const f=fixture(),worker=createBackgroundMonitoringWorker(f.dependencies),inputs=[],output=[];
+  let lost=false;
+  const api={getFiles:async()=>({canonical_modules:{'lib/private-config':'export const ownerTelegramId=42;','lib/runtime':
+    'export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;\nexport const PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION=1;\nexport function createPrivateBackgroundMonitoringAccess() {}'}}),
+    runFunction:async(_sources,input)=>{
+      inputs.push({...input});
+      if(input.status_only)return {result:await worker.status(input)};
+      const result=await worker.tick(input);
+      if(!lost&&f.calls.includes('history.step')){lost=true;throw new MonitoringAdminError('network_error','tick');}
+      return {result};
+    }};
+  const result=await runBackgroundMonitoring({api,enabled:true,retry:true,random:()=>RUNNER,
+    now:f.at,monotonic:()=>f.at()-START,sleep:async ms=>f.advance(ms),emit:value=>output.push(value)});
+  assert.equal(result.state,'complete');assert.equal(lost,true);
+  assert.equal(inputs.filter(input=>input.status_only).length,1);
+  assert.equal(inputs.filter(input=>input.retry).length,1);
+  assert.equal(f.calls.filter(call=>call==='gifts.start').length,1);
+  assert.equal(f.calls.filter(call=>call==='history.start').length,1);
+  assert.equal(f.calls.filter(call=>call==='history.step').length,2);
+  assert.equal(f.calls.filter(call=>call==='rules.evaluate').length,1);
+  assert.equal(f.state().background_monitoring.state,'complete');
+  assert.equal(output.filter(item=>item.state==='recovering').length,1);
+  assert.equal(JSON.stringify(output).includes(RUNNER),false);
 });
 
 test('a delayed old runner cannot acknowledge or overwrite a newer lease', async () => {

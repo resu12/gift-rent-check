@@ -5,8 +5,9 @@ import {createBackgroundMonitoringWorker, BackgroundMonitoringError} from '../li
 export default async function(input, ctx) {
   if(ctx?.background_worker!=='price-monitoring-v1'||PRIVATE_BACKGROUND_MONITORING_VERSION!==1
       ||PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION!==1
-      ||!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(key=>!['runner_id','retry'].includes(key))
+      ||!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only'].includes(key))
       ||Object.prototype.hasOwnProperty.call(input,'retry')&&typeof input.retry!=='boolean'
+      ||Object.prototype.hasOwnProperty.call(input,'status_only')&&(input.status_only!==true||Object.prototype.hasOwnProperty.call(input,'retry'))
       ||typeof input.runner_id!=='string'||!/^[a-f0-9]{64}$/.test(input.runner_id))
     throw new BackgroundMonitoringError('BACKGROUND_ACCESS_DENIED');
   let access;
@@ -18,5 +19,8 @@ export default async function(input, ctx) {
       throw new BackgroundMonitoringError('BACKGROUND_LEASE_LOST');
   };
   access=createPrivateBackgroundMonitoringAccess(check);
-  return createBackgroundMonitoringWorker(access).tick(input);
+  const worker=createBackgroundMonitoringWorker(access);
+  // Reconcile an uncertain administrative response without replaying a write,
+  // granting a retry exception, or contacting a provider.
+  return input.status_only===true?worker.status(input):worker.tick(input);
 }
