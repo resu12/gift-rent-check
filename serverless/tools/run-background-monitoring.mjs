@@ -112,7 +112,13 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
     summary=monitoringSummary(response?.result);emit(summary);
     if(!['running','waiting','busy'].includes(summary.state)||summary.state==='busy'&&!summary.retry_at)return summary;
     const current=now();if(!Number.isSafeInteger(current)||current<=0)fail();
-    const retryAt=Math.max(current+1000,summary.retry_at?Date.parse(summary.retry_at):current+1000);
+    // A running step already commits the provider's next permitted time.
+    // Do not add another second after network/host work has consumed that
+    // interval. Waiting/busy without a future deadline retains a small floor
+    // so stale contention replies cannot turn into a hot polling loop.
+    const fallback=summary.state==='running'?current:current+1000;
+    const retryAt=Math.max(current,summary.retry_at?Date.parse(summary.retry_at):fallback,
+      summary.state==='running'?current:current+1000);
     // Stop with the durable checkpoint intact when its due time is outside
     // this invocation. Never call early or start an unbounded provider wait.
     if(retryAt-current>=remaining())break;

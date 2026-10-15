@@ -53,7 +53,7 @@ function fixture() {
       async start(input, context) {
         contextCheck(context); calls.push('history.start'); inputs.push(copy(input));
         state.job = {id: nextJob++, kind: 'rental_prices', state: 'running', reason: null, created_at: new Date(at).toISOString(),
-          collection_window: {timeframe: input.timeframe},
+          collection_window: {timeframe: input.timeframe},background_history:{version:1,targets:[...state.background_monitoring.run.targets].sort()},
           lease_until: 0, invocation_deadline: at + 300000, pages: 0}; revision++; return {job: jobProjection()};
       },
       async step(input, context) {
@@ -563,6 +563,43 @@ test('the inactive-listing exception never bypasses stops, leases, or unrelated 
   }
 });
 
+test('automatic listing cycle and reserve pauses yield to cloud history without changing the saved checkpoint', async () => {
+  for (const reason of ['comparison_cycle_limit', 'monitoring_reserve']) {
+    const f = fixture(), listing = {id: 81, kind: 'prices', state: 'partial', reason, lease_until: 0,
+      invocation_deadline: START + 60000, startup_comparisons: {version: 2, cycle_used: 200},
+      cursor: 'saved-listing-page', pages: 33};
+    f.mutate(saved => {saved.job = copy(listing);});
+    const start = f.dependencies.history.start;
+    f.dependencies.history.start = async (...args) => {
+      assert.deepEqual(f.state().job, listing);
+      return start(...args);
+    };
+    const result = await f.complete();
+    assert.equal(result.state, 'complete', reason);
+    assert.equal(result.background_monitoring.reason, null);
+    assert.equal(f.calls.filter(call => call === 'history.start').length, 1);
+    assert.equal(f.calls.includes('history.resume'), false);
+    assert.equal(f.state().job.kind, 'rental_prices');
+  }
+});
+
+test('automatic budget pauses never bypass manual control, Stop, live work, or invalid leases', async () => {
+  const changes = [{startup_comparisons: undefined}, {startup_comparisons: {version: 1}},
+    {startup_comparisons: {version: 2, manual_control: true}}, {reason: 'stopped_by_you'}, {stop_requested: true},
+    {kind: 'rental_prices'}, {kind: 'collect'}, {state: 'running'}, {state: 'queued'},
+    {lease_until: START + 300000}, {lease_until: -1}, {lease_until: '0'}, {lease_until: 0.5}];
+  for (const reason of ['comparison_cycle_limit', 'monitoring_reserve']) for (const change of changes) {
+    const f = fixture(), listing = {id: 81, kind: 'prices', state: 'partial', reason, lease_until: 0,
+      invocation_deadline: START + 300000, startup_comparisons: {version: 2, cycle_used: 200}, ...change};
+    f.mutate(saved => {saved.job = copy(listing);});
+    const result = await f.complete();
+    assert.ok(['partial', 'blocked'].includes(result.state), `${reason}/${JSON.stringify(change)}`);
+    assert.equal(result.background_monitoring.reason, 'collection_running');
+    assert.equal(f.calls.some(call => /^history\./.test(call)), false);
+    assert.deepEqual(f.state().job, listing);
+  }
+});
+
 test('a listing interrupted before saving its expired invocation can yield without changing its raw checkpoint', async () => {
   for (const state of ['running', 'queued']) for (const lease_until of [0, START - 1]) {
     const f = fixture(), listing = {id: 81, kind: 'prices', state, reason: null, lease_until,
@@ -680,6 +717,41 @@ test('a stopped prior worker history is not silently resumed or replaced in the 
   assert.equal(result.state, 'partial'); assert.equal(result.background_monitoring.reason, 'collection_running');
   assert.equal(f.state().job.id, id); assert.equal(f.calls.filter(c => c === 'history.start').length, 1);
   assert.equal(f.calls.includes('history.resume'), false);
+});
+
+test('an acknowledged legacy or changed-target worker history starts a fresh bounded scope instead of resuming broad work',async()=>{
+  for(const legacy of [true,false]) {
+    const f=fixture();await f.until('history_poll');
+    f.mutate(saved=>{saved.background_monitoring.run.history_steps=LIMITS.history_steps;
+      saved.job.state='partial';saved.job.reason='invocation_limit';
+      if(legacy)delete saved.job.background_history;else saved.job.background_history.targets=[address(2)];});
+    await f.tick();await f.tick();const old=f.state().job.id;
+    f.advance(LIMITS.cadence_ms);await f.until('history_poll');
+    assert.notEqual(f.state().job.id,old);assert.equal(f.calls.filter(c=>c==='history.start').length,2);
+    assert.equal(f.calls.includes('history.resume'),false);
+    assert.deepEqual(f.state().job.background_history.targets,[address(2),address(3)]);
+  }
+});
+
+test('an explicitly stopped legacy worker history cannot be replaced for missing scope metadata',async()=>{
+  const f=fixture();await f.until('history_poll');
+  f.mutate(saved=>{delete saved.job.background_history;saved.job.state='partial';saved.job.reason='stopped_by_you';saved.job.stop_requested=true;});
+  await f.tick();await f.tick();const old=f.state().job.id;f.advance(LIMITS.cadence_ms);
+  const result=await f.complete();assert.equal(result.background_monitoring.reason,'collection_running');
+  assert.equal(f.state().job.id,old);assert.equal(f.calls.filter(c=>c==='history.start').length,1);
+});
+
+test('an obsolete monitored portfolio cursor is blocked once and the next cycle starts a fresh history scan',async()=>{
+  const f=fixture();await f.until('history_poll');const old=f.state().job.id;
+  const step=f.dependencies.history.step;
+  f.dependencies.history.step=async()=>{
+    f.mutate(saved=>{saved.job.state='failed';saved.job.reason='background_scope_changed';});
+    return {job:f.state().job};
+  };
+  const blocked=await f.tick();assert.equal(blocked.state,'blocked');assert.equal(blocked.background_monitoring.reason,'scope_changed');
+  f.dependencies.history.step=step;f.advance(LIMITS.cadence_ms);await f.until('history_poll');
+  assert.notEqual(f.state().job.id,old);assert.equal(f.calls.filter(c=>c==='history.start').length,2);
+  assert.equal(f.calls.includes('history.resume'),false);
 });
 
 test('overall deadline stops work and never invents a last successful check', async () => {

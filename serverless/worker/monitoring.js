@@ -183,8 +183,10 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     // require its saved invocation and request lease to have both expired.
     const active = ['running', 'queued'].includes(job.state);
     const expiredInvocation = active && millis(job.invocation_deadline) && job.invocation_deadline <= at;
+    const automaticBudgetPause = job.startup_comparisons?.version === 2 && !job.startup_comparisons.manual_control
+      && ['comparison_cycle_limit', 'monitoring_reserve'].includes(job.reason);
     const inactiveListing = job.kind === 'prices' && (expiredInvocation || job.state === 'partial'
-      && ['invocation_limit', 'duration_limit'].includes(job.reason));
+      && (['invocation_limit', 'duration_limit'].includes(job.reason) || automaticBudgetPause));
     if (active) return !expiredInvocation || !knownOld && !inactiveListing;
     return job.state === 'partial' && !knownOld && !inactiveListing;
   }
@@ -273,6 +275,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     const job = jobResult(result, claim);
     const selected = (await repository.read()).state.job;
     if (selected?.id !== job.id) return finish(claim, 'blocked', 'history_changed');
+    if(selected.reason==='background_scope_changed')return finish(claim,'blocked','scope_changed');
     return release(claim, (ledger, at) => {
       const run = ledger.run; run.history_job_id = job.id;
       run.next_action_at = waitAt(job.progress?.next_allowed_at, at);
@@ -419,7 +422,9 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
         const prior = saved.state.job;
         if (prior?.id === claim.previous_history_job_id && prior.kind === 'rental_prices'
           && ['running', 'queued', 'partial'].includes(prior.state)
-          && prior.collection_window?.timeframe === enabled.history_timeframe) {
+          && prior.collection_window?.timeframe === enabled.history_timeframe
+          && prior.background_history?.version===1
+          && canonical(prior.background_history.targets)===canonical([...claim.targets].sort())) {
           // This ID comes only from this same scope's acknowledged worker run.
           // Persist ownership before Resume; never infer ownership from a job's
           // matching parameters, latest position or creation timestamp.
