@@ -60,7 +60,9 @@ async function requestApi(request, token, path, method, timeoutMs) {
   });
   const work = (async () => {
     response = await request(SCHEDULER.api + path, {
-      method, redirect: 'error', signal: controller.signal,
+      // Workerd supports manual/follow only. Manual prevents credential-bearing
+      // redirects; the explicit 3xx check below rejects them without following.
+      method, redirect: 'manual', signal: controller.signal,
       headers: {
         Accept: 'application/vnd.github+json',
         Authorization: `Bearer ${token}`,

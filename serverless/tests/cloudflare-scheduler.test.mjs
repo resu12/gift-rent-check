@@ -48,7 +48,7 @@ test('one eligible tick checks all active statuses then dispatches only the fixe
   ]);
   for (const {url, init} of f.calls) {
     assert.equal(new URL(url).origin, 'https://api.github.com');
-    assert.equal(init.redirect, 'error');
+    assert.equal(init.redirect, 'manual');
     assert.ok(init.signal instanceof AbortSignal);
     assert.equal(init.headers.Authorization, `Bearer ${token}`);
     assert.equal(init.headers['X-GitHub-Api-Version'], '2022-11-28');
@@ -65,6 +65,24 @@ test('every active state, including an old approval wait, suppresses another dis
     assert.equal((await f.run()).state, 'busy');
     assert.equal(f.calls.length, index + 1);
     assert.ok(f.calls.every(call => call.init.method === 'GET'));
+  }
+});
+
+test('scheduler dispatches with Workerd-compatible redirect handling and rejects redirects without following', async () => {
+  const workerd = response => (_url, init) => {
+    if (!['follow', 'manual'].includes(init.redirect)) throw new TypeError('Invalid redirect value');
+    assert.equal(init.redirect, 'manual');
+    return response?.();
+  };
+  const success = fixture(workerd());
+  assert.equal((await success.run()).state, 'dispatched');
+  assert.equal(success.calls.length, 7);
+  for (const method of ['GET', 'POST']) for (const status of [301, 302, 303, 307, 308]) {
+    const redirected = fixture((url, init) => workerd(() => init.method === method
+      ? new Response(null, {status, headers: {Location: 'https://example.invalid/private'}}) : undefined)(url, init));
+    assert.equal((await redirected.run()).reason, 'redirect_blocked');
+    assert.equal(redirected.calls.length, method === 'GET' ? 1 : 7);
+    assert.ok(redirected.calls.every(call => call.url.startsWith(SCHEDULER.api + '/')));
   }
 });
 
