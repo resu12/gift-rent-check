@@ -150,7 +150,7 @@ test('actual worker sources fit the administrative closure without reading local
 
 test('scheduled workflow is inert by default and confines credentials to its protected worker step',()=>{
   const workflow=readFileSync(new URL('../../.github/workflows/background-monitoring.yml',import.meta.url),'utf8');
-  assert.match(workflow,/cron: '37 \*\/6 \* \* \*'/);assert.match(workflow,/workflow_dispatch:/);assert.doesNotMatch(workflow,/pull_request|repository_dispatch|workflow_run/);
+  assert.match(workflow,/cron: '37 \* \* \* \*'/);assert.match(workflow,/workflow_dispatch:/);assert.doesNotMatch(workflow,/pull_request|repository_dispatch|workflow_run/);
   assert.match(workflow,/github\.repository == 'resu12\/gift-rent-check'/);assert.match(workflow,/github\.event\.repository\.default_branch/);
   assert.match(workflow,/vars\.BACKGROUND_MONITORING_ENABLED == 'true'/);assert.match(workflow,/environment: price-monitoring/);
   assert.match(workflow,/BACKGROUND_MONITORING_MANUAL_RETRY: \$\{\{ github\.event_name == 'workflow_dispatch' \}\}/);

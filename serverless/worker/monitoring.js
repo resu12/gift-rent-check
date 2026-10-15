@@ -3,7 +3,7 @@
 // and provider request. This worker has no transaction or notification API.
 export const BACKGROUND_MONITORING_LIMITS = Object.freeze({
   cadence_ms: 6 * 60 * 60 * 1000, run_ms: 20 * 60 * 1000,
-  schedule_phase_ms: 37 * 60 * 1000, lease_ms: 120000, history_steps: 100, history_resumes: 3, manual_retry_ms: 60000,
+  lease_ms: 120000, history_steps: 100, history_resumes: 3, manual_retry_ms: 60000,
   gift_resumes: 1, gift_resume_ms: 300000, gift_history_reserve_ms: 300000, gift_attempts: 20, gift_daily_attempts: 1000,
 });
 const STATES = new Set(['running', 'complete', 'partial', 'paused', 'blocked', 'failed']);
@@ -19,9 +19,10 @@ const iso = at => new Date(at).toISOString();
 const time = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? Date.parse(value) : null;
 const millis = value => Number.isSafeInteger(value) && value > 0 && value < 8640000000000000 - BACKGROUND_MONITORING_LIMITS.cadence_ms;
 const count = value => Number.isSafeInteger(value) && value >= 0;
-const nextScheduledCheck = at => Math.floor((at - BACKGROUND_MONITORING_LIMITS.schedule_phase_ms)
-  / BACKGROUND_MONITORING_LIMITS.cadence_ms + 1) * BACKGROUND_MONITORING_LIMITS.cadence_ms
-  + BACKGROUND_MONITORING_LIMITS.schedule_phase_ms;
+// Hourly wake-ups do not imply hourly checks. Also protect saved ledgers from
+// the old fixed-slot schedule, which could follow a late run less than 6h later.
+const automaticDue = ledger => Math.max(time(ledger.next_check_at) ?? 0,
+  ledger.run.started_at + BACKGROUND_MONITORING_LIMITS.cadence_ms);
 const canonical = value => JSON.stringify(value, (_key, item) => object(item)
   ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
 const validScope = value => object(value) && /^0:[a-f0-9]{64}$/.test(value.wallet ?? '')
@@ -83,6 +84,7 @@ export function projectBackgroundMonitoring(value, now = Date.now()) {
   if (!ledger) return null;
   const result = Object.fromEntries(['version', 'cadence_hours', 'state', 'last_started_at', 'last_finished_at',
     'last_success_at', 'next_check_at', 'reason'].map(key => [key, ledger[key]]));
+  result.next_check_at = iso(automaticDue(ledger));
   if (ledger.state === 'running' && ledger.run.deadline <= now) {result.state = 'partial'; result.reason = 'run_deadline';}
   return result;
 }
@@ -113,7 +115,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
   async function status() {
     const saved = await repository.read(), at = await now(), ledger = validate(saved.state.background_monitoring);
     return reply(ledger, at, ledger?.state === 'running' && ledger.run.deadline <= at ? 'partial' : null, ledger?.state === 'running'
-      ? Math.max(ledger.run.next_action_at, ledger.run.lease?.until ?? 0, at) : time(ledger?.next_check_at));
+      ? Math.max(ledger.run.next_action_at, ledger.run.lease?.until ?? 0, at) : ledger ? automaticDue(ledger) : null);
   }
   async function append(saved, ledger, at, {allowScopeChange = false} = {}) {
     if (!allowScopeChange) await assertScope(ledger.run.scope, context(ledger.run));
@@ -143,6 +145,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     if (state === 'complete') ledger.last_success_at = iso(at);
     ledger.run.stage = 'done'; ledger.run.intent = null; ledger.run.lease = null;
     ledger.run.next_action_at = 0;
+    ledger.next_check_at = iso(automaticDue(ledger));
   };
   const finish = (claim, state, reason, options) => update(claim, (ledger, at) => finished(ledger, at, state, reason), options);
   const release = (claim, change = () => {}) => update(claim, (ledger, at) => {
@@ -303,27 +306,28 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
         ledger = clone(old);
         if (canonical(await captureScope()) !== canonical(ledger.run.scope)) {
           finished(ledger, at, 'blocked', 'scope_changed');
-          if (await append(saved, ledger, at, {allowScopeChange: true}) && time(ledger.next_check_at) > at && !retry) return reply(ledger, at);
+          if (await append(saved, ledger, at, {allowScopeChange: true}) && automaticDue(ledger) > at && !retry) return reply(ledger, at);
           continue;
         }
         if (ledger.run.intent === 'history_start' && ledger.run.history_job_id === null) {
           finished(ledger, at, 'blocked', 'history_start_uncertain');
-          if (await append(saved, ledger, at) && time(ledger.next_check_at) > at && !retry) return reply(ledger, at);
+          if (await append(saved, ledger, at) && automaticDue(ledger) > at && !retry) return reply(ledger, at);
           continue;
         }
         if (ledger.run.deadline <= at) {
           finished(ledger, at, 'partial', 'run_deadline');
-          if (await append(saved, ledger, at) && time(ledger.next_check_at) > at && !retry) return reply(ledger, at);
+          if (await append(saved, ledger, at) && automaticDue(ledger) > at && !retry) return reply(ledger, at);
           continue;
         }
       } else {
         const manualRetry = Boolean(retry && old && old.state !== 'complete');
-        if (manualRetry && old.last_manual_retry_runner === runner_id) return reply(old, at, null, time(old.next_check_at));
-        if (old && time(old.next_check_at) > at && (!manualRetry
+        const due = old ? automaticDue(old) : null;
+        if (manualRetry && old.last_manual_retry_runner === runner_id) return reply(old, at, null, due);
+        if (old && due > at && (!manualRetry
           || (time(old.last_manual_retry_at) ?? 0) + BACKGROUND_MONITORING_LIMITS.manual_retry_ms > at)) {
           return reply(old, at, null, manualRetry
-            ? Math.min(time(old.next_check_at), time(old.last_manual_retry_at) + BACKGROUND_MONITORING_LIMITS.manual_retry_ms)
-            : time(old.next_check_at));
+            ? Math.min(due, time(old.last_manual_retry_at) + BACKGROUND_MONITORING_LIMITS.manual_retry_ms)
+            : due);
         }
         const scope = await captureScope();
         if (!validScope(scope)) throw new BackgroundMonitoringError('BACKGROUND_SCOPE_INVALID');
@@ -332,7 +336,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
           last_finished_at: sameScope ? old.last_finished_at : null, last_success_at: sameScope ? old.last_success_at : null,
           last_manual_retry_at: manualRetry ? iso(at) : sameScope ? old.last_manual_retry_at ?? null : null,
           last_manual_retry_runner: manualRetry ? runner_id : sameScope ? old.last_manual_retry_runner ?? null : null,
-          next_check_at: iso(nextScheduledCheck(at)), run: {
+          next_check_at: iso(at + BACKGROUND_MONITORING_LIMITS.cadence_ms), run: {
             id: `${runner_id}:${at}`, session_id: `background_${runner_id}_${at}`, scope: clone(scope),
             stage: 'gift_start', started_at: at, deadline: at + BACKGROUND_MONITORING_LIMITS.run_ms,
             claim_generation: 0, lease: null, intent: null, targets: [], next_action_at: at,

@@ -107,7 +107,7 @@ test('background worker refreshes gifts, then bounded history, then evaluates an
   assert.deepEqual(f.state().unrelated, {retained: true});
   assert.equal(result.background_monitoring.cadence_hours, 6);
   assert.equal(result.background_monitoring.last_success_at, result.background_monitoring.last_finished_at);
-  assert.equal(result.background_monitoring.next_check_at, '2026-10-14T12:37:00.000Z');
+  assert.equal(result.background_monitoring.next_check_at, '2026-10-14T18:00:00.000Z');
   assert.ok(f.events.every(event => event.records.length === 0 && event.raw_body === null));
 });
 
@@ -159,23 +159,50 @@ test('actual CloudEngine history completes through getJobs despite its broad Res
   assert.equal(calls.at(-1), 'evaluate');
 });
 
-test('cadence stays aligned to UTC scheduler slots when a previous run began late', async () => {
-  const f = fixture(); f.advance(38 * 60000 + 22000); await f.complete();
-  assert.equal(f.state().background_monitoring.next_check_at, '2026-10-14T18:37:00.000Z');
-  f.advance(Date.parse('2026-10-14T18:37:02.000Z') - f.at());
-  const result = await f.tick(OTHER); assert.equal(result.state, 'running');
+test('hourly wake-ups keep delayed and legacy cycles at least six hours apart', async () => {
+  for (const legacy of [false, true]) {
+    const f = fixture(); f.advance(Date.parse('2026-10-14T17:37:00Z') - f.at()); await f.complete();
+    if (legacy) f.mutate(saved => {saved.background_monitoring.next_check_at = '2026-10-14T18:37:00.000Z';});
+    const calls = f.calls.length, revision = f.revision(), due = Date.parse('2026-10-14T23:37:00Z');
+    const status = await f.status();
+    assert.equal(status.background_monitoring.next_check_at, new Date(due).toISOString());
+    assert.equal(Date.parse(status.retry_at), due);
+    for (let hour = 18; hour <= 22; hour++) {
+      f.advance(Date.parse(`2026-10-14T${hour}:37:00Z`) - f.at());
+      assert.equal((await f.tick(OTHER)).state, 'complete');
+      assert.equal(f.calls.length, calls); assert.equal(f.revision(), revision);
+    }
+    f.advance(due - 1 - f.at());
+    assert.equal((await createBackgroundMonitoringWorker(f.dependencies).tick({runner_id: OTHER, retry: true})).state, 'complete');
+    assert.equal(f.calls.length, calls); assert.equal(f.revision(), revision);
+    f.advance(1); const result = await f.tick(OTHER); assert.equal(result.state, 'running');
+    assert.equal(f.calls.filter(c => c === 'gifts.start').length, 2);
+    assert.equal(result.background_monitoring.next_check_at, '2026-10-15T05:37:00.000Z');
+  }
+});
+
+test('a wake after missed slots catches up once and leaves early wake-ups read-only', async () => {
+  const f = fixture(); await f.complete(); f.advance(Date.parse('2026-10-15T04:37:00Z') - f.at());
+  assert.equal((await f.complete()).state, 'complete');
   assert.equal(f.calls.filter(c => c === 'gifts.start').length, 2);
-  assert.equal(result.background_monitoring.next_check_at, '2026-10-15T00:37:00.000Z');
+  assert.equal(f.state().background_monitoring.next_check_at, '2026-10-15T10:37:00.000Z');
+  const calls = f.calls.length, revision = f.revision();
+  for (let hour = 5; hour <= 9; hour++) {
+    f.advance(Date.parse(`2026-10-15T0${hour}:37:00Z`) - f.at());
+    assert.equal((await f.tick(OTHER)).state, 'complete');
+    assert.equal(f.calls.length, calls); assert.equal(f.revision(), revision);
+  }
 });
 
 test('manual retry immediately starts recovered terminal work but does not bypass a completed cadence', async () => {
   for (const state of ['failed', 'blocked', 'partial', 'paused']) {
-    const f = fixture(); await f.complete();
+    const f = fixture(); await f.complete(); f.advance(3600000);
     f.mutate(saved => {saved.background_monitoring.state = state; saved.background_monitoring.last_success_at = null;});
     const original = f.state().background_monitoring.run.id;
     const row = await createBackgroundMonitoringWorker(f.dependencies).tick({runner_id: OTHER, retry: true});
     assert.equal(row.state, 'running', state);assert.notEqual(f.state().background_monitoring.run.id, original);
     assert.equal(f.calls.filter(c => c === 'gifts.start').length, 2);
+    assert.equal(Date.parse(row.background_monitoring.next_check_at), f.at() + LIMITS.cadence_ms);
   }
   const f = fixture();await f.complete();const before = f.calls.length;
   const row = await createBackgroundMonitoringWorker(f.dependencies).tick({runner_id: OTHER, retry: true});
