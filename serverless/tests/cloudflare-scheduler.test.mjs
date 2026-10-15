@@ -77,9 +77,13 @@ test('scheduler dispatches with Workerd-compatible redirect handling and rejects
   const success = fixture(workerd());
   assert.equal((await success.run()).state, 'dispatched');
   assert.equal(success.calls.length, 7);
-  const redirected = fixture(workerd(() => new Response(null, {status: 302, headers: {Location: 'https://example.invalid/private'}})));
-  assert.equal((await redirected.run()).reason, 'redirect_blocked');
-  assert.equal(redirected.calls.length, 1);
+  for (const method of ['GET', 'POST']) for (const status of [301, 302, 303, 307, 308]) {
+    const redirected = fixture((url, init) => workerd(() => init.method === method
+      ? new Response(null, {status, headers: {Location: 'https://example.invalid/private'}}) : undefined)(url, init));
+    assert.equal((await redirected.run()).reason, 'redirect_blocked');
+    assert.equal(redirected.calls.length, method === 'GET' ? 1 : 7);
+    assert.ok(redirected.calls.every(call => call.url.startsWith(SCHEDULER.api + '/')));
+  }
 });
 
 test('an active list with more than one page suppresses dispatch without traversing history', async () => {
