@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync,readdirSync} from 'node:fs';
-import {MONITORING_ENDPOINT,RUNNER_LIMITS,parseMonitoringArgs,createMonitoringAdminApi,monitoringSummary,runBackgroundMonitoring,monitoringMain,loadMonitoringSources} from '../tools/run-background-monitoring.mjs';
+import {MONITORING_ENDPOINT,RUNNER_LIMITS,MonitoringAdminError,parseMonitoringArgs,createMonitoringAdminApi,monitoringSummary,runBackgroundMonitoring,monitoringMain,loadMonitoringSources} from '../tools/run-background-monitoring.mjs';
 import {adminModuleSources} from '../tools/admin-module-sources.mjs';
 
 const token='app123:synthetic_test_secret',runner='a'.repeat(64),start=Date.parse('2026-10-14T12:00:00.000Z');
@@ -51,6 +51,11 @@ test('administrative transport pins the official get/run protocol, identity and 
   for(const retry of ['true',1,null,{}])assert.throws(()=>api.runFunction({}, {runner_id:runner,retry}));
   await api.runFunction({}, {runner_id:runner,retry:true});
   assert.deepEqual(JSON.parse(requests[2].options.body).args,{runner_id:runner,retry:true});
+  await api.runFunction({}, {runner_id:runner,status_only:true});
+  assert.deepEqual(JSON.parse(requests[3].options.body).args,{runner_id:runner,status_only:true});
+  for(const status_only of [false,'true',1,null,{}])assert.throws(()=>api.runFunction({}, {runner_id:runner,status_only}));
+  for(const retry of [true,false])assert.throws(()=>api.runFunction({}, {runner_id:runner,status_only:true,retry}));
+  assert.equal(requests.length,4);
 });
 
 test('timeouts and remote errors are bounded and never echoed or retried',async()=>{
@@ -95,6 +100,113 @@ test('a manual retry is sent only on the first tick and never repeats after a te
   const failed=fixture([{state:'failed'},{state:'complete'}],{retry:true});
   assert.equal((await failed.run()).state,'failed');assert.equal(failed.calls.filter(row=>row.operation==='run').length,1);
   const check=fixture([],{check:true,retry:true});await check.run();assert.equal(check.calls.length,1);
+});
+
+test('a lost committed response recovers from read-only status without replaying a manual retry',async()=>{
+  let durable=null,ticks=0,at=start;const calls=[],output=[],waits=[];
+  const api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async(url,options)=>{
+    if(url.endsWith('/get'))return Response.json({ok:true,result:{canonical_modules:canonical}});
+    const input=JSON.parse(options.body).args;calls.push({input,at});
+    if(input.status_only)return Response.json({ok:true,result:{result:durable}});
+    if(++ticks===1) {durable={state:'running',checked:1,total:2,retry_at:new Date(start+65000).toISOString()};throw TypeError(token+' response lost after commit');}
+    durable={state:'complete',checked:2,total:2};return Response.json({ok:true,result:{result:durable}});
+  }});
+  const result=await runBackgroundMonitoring({api,enabled:true,retry:true,loadSources:()=>local,random:()=>runner,
+    now:()=>at,monotonic:()=>at-start,sleep:async ms=>{waits.push(ms);at+=ms;},emit:value=>output.push(value)});
+  assert.deepEqual(result,{state:'complete',checked:2,total:2});
+  assert.deepEqual(calls.map(row=>row.input),[{runner_id:runner,retry:true},{runner_id:runner,status_only:true},{runner_id:runner}]);
+  assert.ok(calls[2].at>=start+65000);assert.equal(ticks,2);assert.ok(waits.every(ms=>ms<=60000));
+  assert.deepEqual(output[0],{state:'recovering',error:'network_error',stage:'tick'});
+  assert.ok(!JSON.stringify(output).includes(token));
+});
+
+test('recovery returns acknowledged terminal status without issuing another tick',async()=>{
+  for(const state of ['complete','paused','disabled','partial','blocked','failed','busy']) {
+    const f=fixture([new MonitoringAdminError('request_timeout','tick'),{state,runner_acknowledged:true},{state:'complete'}],{retry:true});
+    assert.deepEqual(await f.run(),{state});
+    assert.deepEqual(f.calls.filter(row=>row.operation==='run').map(row=>row.input),[{runner_id:runner,retry:true},{runner_id:runner,status_only:true}]);
+  }
+});
+
+test('failure before claiming a run only reads status and cannot repeat a manual retry',async()=>{
+  let ticks=0;const inputs=[];
+  const api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async(url,options)=>{
+    if(url.endsWith('/get'))return Response.json({ok:true,result:{canonical_modules:canonical}});
+    const input=JSON.parse(options.body).args;inputs.push(input);
+    if(!input.status_only){ticks++;return new Response(token,{status:503});}
+    return Response.json({ok:true,result:{result:{state:'disabled',runner_acknowledged:false}}});
+  }});
+  const f=fixture([],{api,retry:true});await assert.rejects(f.run(),error=>error.reason==='recovery_exhausted');assert.equal(ticks,1);
+  assert.deepEqual(inputs,[{runner_id:runner,retry:true},...Array.from({length:3},()=>({runner_id:runner,status_only:true}))]);
+  assert.deepEqual(f.output[0],{state:'recovering',error:'http_error',stage:'tick',http_status:503});
+});
+
+test('recovery waits for leases and provider deadlines before continuing with the same runner',async()=>{
+  for(const state of ['running','waiting','busy']) {
+    const f=fixture([new MonitoringAdminError('network_error','tick'),{state,retry_at:new Date(start+120000).toISOString()},{state:'complete'}]);
+    assert.equal((await f.run()).state,'complete');
+    const calls=f.calls.filter(row=>row.operation==='run');assert.equal(calls.length,3);assert.equal(calls[1].input.status_only,true);
+    assert.ok(calls[2].at>=start+120000);assert.deepEqual(calls[2].input,{runner_id:runner});
+    assert.ok(f.waits.every(ms=>ms<=60000));
+  }
+});
+
+test('status-read failures have a shared recovery cap and exponential bounded backoff',async()=>{
+  const f=fixture([new MonitoringAdminError('network_error','tick'),new MonitoringAdminError('http_error','status',502),
+    new MonitoringAdminError('request_timeout','status'),{state:'complete',runner_acknowledged:true}]);
+  assert.equal((await f.run()).state,'complete');assert.deepEqual(f.waits,[1000,2000,4000]);
+  assert.equal(f.calls.filter(row=>row.input?.status_only).length,3);
+  const exhausted=fixture([new MonitoringAdminError('network_error','tick'),...Array.from({length:4},()=>new MonitoringAdminError('network_error','status'))]);
+  await assert.rejects(exhausted.run(),error=>error.reason==='recovery_exhausted'&&error.stage==='status');
+  assert.equal(exhausted.calls.filter(row=>row.operation==='run').length,4);
+  assert.deepEqual(exhausted.waits,[1000,2000,4000]);
+});
+
+test('an old complete checkpoint cannot falsely acknowledge a delayed tick claim',async()=>{
+  const f=fixture([new MonitoringAdminError('network_error','tick'),
+    {state:'complete',checked:161,total:161,runner_acknowledged:false},
+    {state:'running',checked:1,total:2,retry_at:new Date(start+120000).toISOString(),runner_acknowledged:true},
+    {state:'complete',checked:2,total:2}],{retry:true});
+  assert.deepEqual(await f.run(),{state:'complete',checked:2,total:2});
+  const calls=f.calls.filter(row=>row.operation==='run');
+  assert.deepEqual(calls.map(row=>row.input),[{runner_id:runner,retry:true},{runner_id:runner,status_only:true},{runner_id:runner,status_only:true},{runner_id:runner}]);
+  assert.ok(calls[3].at>=start+120000);
+  assert.ok(!f.output.some(row=>row.state==='complete'&&row.checked===161));
+});
+
+test('unacknowledged terminal checkpoints exhaust only read-only recovery and never report success',async()=>{
+  for(const runner_acknowledged of [false,undefined,'true',1]) {
+    const f=fixture([new MonitoringAdminError('network_error','tick'),
+      ...Array.from({length:3},()=>({state:'complete',checked:161,runner_acknowledged}))],{retry:true});
+    await assert.rejects(f.run(),error=>error.reason==='recovery_exhausted'&&error.stage==='status');
+    assert.equal(f.calls.filter(row=>row.operation==='run').length,4);
+    assert.ok(f.calls.filter(row=>row.operation==='run').slice(1).every(row=>row.input.status_only===true));
+    assert.ok(!f.output.some(row=>row.state==='complete'));
+  }
+});
+
+test('recovery shares the original time and step budgets and does not call ahead of a future lease',async()=>{
+  const error=()=>new MonitoringAdminError('network_error','tick');
+  const one=fixture([error(),{state:'complete'}],{limits:{steps:1}});
+  assert.equal((await one.run()).state,'partial');assert.equal(one.calls.length,2);assert.deepEqual(one.waits,[]);
+  const two=fixture([error(),{state:'running'},{state:'complete'}],{limits:{steps:2}});
+  assert.equal((await two.run()).state,'partial');assert.equal(two.calls.filter(row=>row.operation==='run').length,2);
+  const short=fixture([error(),{state:'complete'}],{limits:{duration_ms:1000}});
+  assert.equal((await short.run()).state,'partial');assert.equal(short.calls.length,2);assert.deepEqual(short.waits,[]);
+  const lease=fixture([error(),{state:'busy',retry_at:new Date(start+100000).toISOString()},{state:'complete'}],{limits:{duration_ms:5000}});
+  assert.equal((await lease.run()).state,'partial');assert.equal(lease.calls.filter(row=>row.operation==='run').length,2);assert.deepEqual(lease.waits,[1000]);
+});
+
+test('unknown status and nontransient failures stop without speculative writes',async()=>{
+  for(const result of [{state:'unknown'},{},{state:'waiting'},new MonitoringAdminError('http_error','status',403),new MonitoringAdminError('remote_error','status',200)]) {
+    const f=fixture([new MonitoringAdminError('network_error','tick'),result,{state:'complete'}],{retry:true});
+    await assert.rejects(f.run());assert.equal(f.calls.filter(row=>row.operation==='run').length,2);
+    assert.equal(f.calls.at(-1).input.status_only,true);
+  }
+  for(const error of [new MonitoringAdminError('http_error','tick',400),new MonitoringAdminError('http_error','tick',429),
+    new MonitoringAdminError('invalid_response','tick'),new MonitoringAdminError('remote_error','tick',200,'internal',500)]) {
+    const f=fixture([error,{state:'complete'}]);await assert.rejects(f.run());assert.equal(f.calls.filter(row=>row.operation==='run').length,1);
+  }
 });
 
 test('completed running steps do not add a client delay after the server allowance has elapsed',async()=>{
@@ -155,10 +267,51 @@ test('unknown failures and malformed results stop without a speculative retry',a
   for(const value of [null,{}, {state:'running',retry_at:'tomorrow'},{state:'complete',total:'3'},{state:'complete',proposals:Infinity}])assert.throws(()=>monitoringSummary(value));
 });
 
-test('CLI failure logs contain only an enum even when the administrative failure contains secrets',async t=>{
+test('CLI failure logs contain only safe enums even when the administrative failure contains secrets',async t=>{
   let requests=0;t.mock.method(globalThis,'fetch',async()=>{requests++;throw Error(token+' private source');});
   const output=[],exit=await monitoringMain({args:['--app-id','123'],env:{BACKGROUND_MONITORING_ENABLED:'true',TGCLOUD_TOKEN:token},emit:value=>output.push(value)});
-  assert.equal(exit,1);assert.deepEqual(output,[{state:'failed'}]);assert.equal(requests,1);
+  assert.equal(exit,1);assert.deepEqual(output,[{state:'failed',error:'network_error',stage:'get_files'}]);assert.equal(requests,1);
+});
+
+test('transport diagnostics distinguish HTTP errors, malformed envelopes and remote execution failures without bodies',async()=>{
+  for(const [response,expected] of [
+    [new Response(token,{status:502}),{reason:'http_error',http_status:502}],
+    [new Response('{'+token),{reason:'invalid_json',http_status:200}],
+    [Response.json({ok:true,secret:token}),{reason:'invalid_envelope',http_status:200}],
+    [Response.json({ok:true,secret:token},{status:500}),{reason:'invalid_envelope',http_status:500}],
+    [Response.json({ok:false,error_type:'INTERNAL',error_code:500,description:token}),{reason:'remote_error',http_status:200,remote_error:'internal',remote_code:500}],
+    [Response.json({ok:false,error_type:'INTERNAL',error_code:500,description:token},{status:500}),{reason:'remote_error',http_status:500,remote_error:'internal',remote_code:500}],
+    [Response.json({ok:false,error_type:'ENDPOINT_ERROR',error_code:token,description:token}),{reason:'remote_error',http_status:200,remote_error:'endpoint'}],
+    [Response.json({ok:false,error_type:token,error_code:999999999,description:token}),{reason:'remote_error',http_status:200,remote_error:'other'}],
+  ]) {
+    const api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async()=>response});
+    await assert.rejects(api.runFunction({}, {runner_id:runner,status_only:true}),error=>{
+      assert.equal(error.message,'BACKGROUND_MONITORING_STOPPED');assert.equal(error.stage,'status');
+      for(const [key,value] of Object.entries(expected))assert.equal(error[key],value);
+      assert.ok(!JSON.stringify(error).includes(token));return true;
+    });
+  }
+});
+
+test('an explicit execution error is never recovered regardless of its HTTP status',async()=>{
+  for(const status of [200,500]) {
+    let writes=0;
+    const api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async(url)=>{
+      if(url.endsWith('/get'))return Response.json({ok:true,result:{canonical_modules:canonical}});
+      writes++;return Response.json({ok:false,error_type:'INTERNAL',error_code:500,description:token},{status});
+    }});
+    const f=fixture([],{api,retry:true});await assert.rejects(f.run(),error=>error.reason==='remote_error'&&error.http_status===status);
+    assert.equal(writes,1);assert.deepEqual(f.waits,[]);
+  }
+});
+
+test('timeouts bound header and body reads even when a transport ignores abort',async()=>{
+  const stalled=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async()=>new Promise(()=>{})});
+  await assert.rejects(stalled.runFunction({}, {runner_id:runner,status_only:true},{timeoutMs:5}),error=>error.reason==='request_timeout'&&error.stage==='status');
+  let cancelled=false;
+  const body=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async()=>new Response(new ReadableStream({cancel(){cancelled=true;}}))});
+  await assert.rejects(body.runFunction({}, {runner_id:runner},{timeoutMs:5}),error=>error.reason==='request_timeout'&&error.stage==='tick');
+  assert.equal(cancelled,true);
 });
 
 test('actual worker sources fit the administrative closure without reading local ignored configuration',()=>{
