@@ -4,13 +4,15 @@ import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 import {BackgroundMonitoringError} from '../worker/monitoring.js';
 
-function bridge({version=1, ledger, at=1000}={}) {
+function bridge(options={}) {
+  const {version=1,ledger,at=1000}=options;
+  const scopedHistoryVersion=Object.hasOwn(options,'scopedHistoryVersion')?options.scopedHistoryVersion:1;
   let accesses=0, guard;
   const access={repository:{read:async()=>({state:{background_monitoring:ledger}})},clock:async()=>at};
   const source=readFileSync(new URL('../worker/entrypoint.js',import.meta.url),'utf8')
     .replace(/^import[^\n]+\n/gm,'').replace('export default async function','return async function');
-  const create=vm.runInNewContext(`(function(createPrivateBackgroundMonitoringAccess,PRIVATE_BACKGROUND_MONITORING_VERSION,createBackgroundMonitoringWorker,BackgroundMonitoringError){${source}})`);
-  return {call:create(check=>{accesses++;guard=check;return access;},version,
+  const create=vm.runInNewContext(`(function(createPrivateBackgroundMonitoringAccess,PRIVATE_BACKGROUND_MONITORING_VERSION,PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION,createBackgroundMonitoringWorker,BackgroundMonitoringError){${source}})`);
+  return {call:create(check=>{accesses++;guard=check;return access;},version,scopedHistoryVersion,
     candidate=>{assert.equal(candidate,access);return {tick:async input=>({state:'complete',runner:input.runner_id,retry:input.retry})};},BackgroundMonitoringError),
     accesses:()=>accesses,guard:context=>guard(context)};
 }
@@ -26,6 +28,14 @@ test('ordinary Mini App contexts and arbitrary worker actions never obtain owner
   assert.equal(f.accesses(),0);
   const old=bridge({version:0});await assert.rejects(()=>old.call(input,admin),/BACKGROUND_ACCESS_DENIED/);
   assert.equal(old.accesses(),0);
+});
+
+test('version-1 access without the supported scoped-history capability never obtains owner access',async()=>{
+  for(const scopedHistoryVersion of [undefined,null,0,2,'1',NaN,{}]) {
+    const f=bridge({scopedHistoryVersion});
+    await assert.rejects(()=>f.call(input,admin),/BACKGROUND_ACCESS_DENIED/);
+    assert.equal(f.accesses(),0);
+  }
 });
 
 test('administrative bridge invokes only the fixed worker tick',async()=>{

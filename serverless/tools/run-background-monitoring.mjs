@@ -94,9 +94,12 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
   const deployed=await api.getFiles({timeoutMs:requestTime()});
   if(!object(deployed?.canonical_modules))fail();
   // The bridge must use the reviewed deployed owner-access implementation.
-  // Missing/older runtimes fail closed before any administrative execution.
+  // The additive capability keeps existing v1 runners compatible while this
+  // worker rejects runtimes that cannot persist and resume scoped history.
+  // Missing/older runtimes fail closed before loading or executing the worker.
   const runtime=deployed.canonical_modules['lib/runtime'];
   if(typeof runtime!=='string'||!/^\s*export\s+const\s+PRIVATE_BACKGROUND_MONITORING_VERSION\s*=\s*1\s*;/m.test(runtime)
+    ||!/^\s*export\s+const\s+PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION\s*=\s*1\s*;/m.test(runtime)
     ||!/^\s*export\s+function\s+createPrivateBackgroundMonitoringAccess\s*\(/m.test(runtime))fail();
   const {coreSource,entrypointSource}=loadSources();
   const sources=adminModuleSources(deployed.canonical_modules,{'lib/background-monitoring':coreSource},MONITORING_ENDPOINT,entrypointSource);

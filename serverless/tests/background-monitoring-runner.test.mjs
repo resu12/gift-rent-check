@@ -6,7 +6,7 @@ import {adminModuleSources} from '../tools/admin-module-sources.mjs';
 
 const token='app123:synthetic_test_secret',runner='a'.repeat(64),start=Date.parse('2026-10-14T12:00:00.000Z');
 const canonical={'lib/private-config':'export const ownerTelegramId=42;',
-  'lib/runtime':'export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;\nexport function createPrivateBackgroundMonitoringAccess() {}',
+  'lib/runtime':'export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;\nexport const PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION=1;\nexport function createPrivateBackgroundMonitoringAccess() {}',
   'lib/existing':'export const value=1;','endpoints/unrelated':'private source not needed'};
 const local={coreSource:"import {value} from './existing.js';\nexport const core=value;",
   entrypointSource:"import {core} from '../lib/background-monitoring.js';\nexport default async()=>core;"};
@@ -115,6 +115,20 @@ test('deployed runtime protocol and owner factory are required before check or e
     let requests=0;const f=fixture([],{check,api:{getFiles:async()=>({canonical_modules:{...canonical,'lib/runtime':runtime}}),
       runFunction:async()=>{requests++;throw Error('must not execute');}}});
     await assert.rejects(f.run(),{message:'BACKGROUND_MONITORING_STOPPED'});assert.equal(requests,0);assert.deepEqual(f.output,[]);
+  }
+});
+
+test('scoped-history capability is required before loading or executing a worker against a version-1 runtime',async()=>{
+  const marker='export const PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION=1;';
+  for(const check of [false,true])for(const capability of ['',`// ${marker}`,marker.replace('export ',''),marker.replace('const','let'),
+    ...['0','2','-1','null','NaN','"1"'].map(value=>marker.replace('VERSION=1',`VERSION=${value}`))]) {
+    let reads=0,loads=0,requests=0;
+    const runtime=canonical['lib/runtime'].replace(marker,capability);
+    const f=fixture([],{check,loadSources:()=>{loads++;return local;},
+      api:{getFiles:async()=>{reads++;return {canonical_modules:{...canonical,'lib/runtime':runtime}};},
+        runFunction:async()=>{requests++;throw Error('must not execute');}}});
+    await assert.rejects(f.run(),{message:'BACKGROUND_MONITORING_STOPPED'});
+    assert.equal(reads,1);assert.equal(loads,0);assert.equal(requests,0);assert.deepEqual(f.output,[]);
   }
 });
 
