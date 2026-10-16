@@ -114,6 +114,114 @@ test('background worker refreshes gifts, then bounded history, then evaluates an
   assert.ok(f.events.every(event => event.records.length === 0 && event.raw_body === null));
 });
 
+test('cloud analytics refresh is a separate guarded stage before evaluation and cache preparation', async () => {
+  const f = fixture(); let calls = 0;
+  f.dependencies.analytics = {version: 1, refresh: async context => {
+    calls++; f.calls.push('analytics.refresh');
+    const run = f.state().background_monitoring.run;
+    assert.equal(run.stage, 'analytics'); assert.equal(run.intent, 'analytics_refresh');
+    assert.equal(context.lease.token, run.lease.token); assert.equal(context.run_id, run.id);
+    return {state: 'saved', period_days: 30, captured_at: new Date(f.at()).toISOString(), cookie: 'private', raw_html: 'private'};
+  }};
+  f.dependencies.dashboard = {version: 1, prewarm: async () => {
+    assert.equal(f.state().background_monitoring.run.personal_analytics.state, 'saved'); return {prepared: true};
+  }};
+  const result = await f.complete();
+  assert.equal(result.state, 'complete'); assert.equal(calls, 1);
+  assert.ok(f.calls.lastIndexOf('history.step') < f.calls.indexOf('analytics.refresh'));
+  assert.ok(f.calls.indexOf('analytics.refresh') < f.calls.indexOf('rules.evaluate'));
+  assert.deepEqual(result.personal_analytics, f.state().background_monitoring.run.personal_analytics);
+  assert.deepEqual(result.background_monitoring.personal_analytics, result.personal_analytics);
+  assert.deepEqual(Object.keys(result.personal_analytics), ['state', 'period_days', 'captured_at']);
+  assert.equal(JSON.stringify(result).includes('private'), false);
+  const before = f.revision(); await f.tick(); assert.equal(calls, 1); assert.equal(f.revision(), before);
+  assert.deepEqual(await createBackgroundMonitoringWorker(f.dependencies).prewarm({runner_id: RUNNER}), {state: 'prepared'});
+});
+
+test('analytics availability and malformed provider outcomes are reported without failing independent price checks', async () => {
+  for (const outcome of [new Error('secret error'), {state: 'unavailable', reason: 'no_login', period_days: 365},
+    {state: 'busy', reason: 'website_busy', period_days: 30}, {state: 'limited', reason: 'cooldown', period_days: 30,
+      retry_at: new Date(START + 600000).toISOString()}, {state: 'saved', period_days: 30}, {state: 'unavailable', reason: 'private error'}]) {
+    const f = fixture();
+    f.dependencies.analytics = {version: 1, refresh: async () => {if (outcome instanceof Error) throw outcome; return outcome;}};
+    const result = await f.complete(); assert.equal(result.state, 'complete');
+    assert.equal(f.calls.filter(call => call === 'rules.evaluate').length, 1);
+    assert.deepEqual(result.personal_analytics, outcome instanceof Error || ['saved'].includes(outcome.state)
+      || outcome.reason === 'private error' ? {state: 'unavailable', reason: 'refresh_failed'} : outcome);
+  }
+});
+
+test('analytics preserves rule evaluation time instead of starting a provider refresh near the deadline', async () => {
+  const f = fixture(); let calls = 0;
+  f.dependencies.analytics = {version: 1, refresh: async () => {calls++; throw Error('must not request');}};
+  await f.until('analytics');
+  f.advance(f.state().background_monitoring.run.deadline - f.at()
+    - LIMITS.analytics_refresh_ms - LIMITS.analytics_evaluation_reserve_ms + 1);
+  const skipped = await f.tick(); assert.equal(skipped.state, 'running'); assert.equal(calls, 0);
+  assert.deepEqual(skipped.personal_analytics, {state: 'unavailable', reason: 'run_budget'});
+  const result = await f.tick(); assert.equal(result.state, 'complete'); assert.equal(calls, 0);
+  assert.equal(f.calls.filter(call => call === 'rules.evaluate').length, 1);
+});
+
+test('pre-upgrade evaluation checkpoints refresh analytics once without repeating gift or history work', async () => {
+  const f = fixture(); await f.until('evaluate');
+  const calls = [...f.calls]; let analyticsCalls = 0;
+  f.dependencies.analytics = {version: 1, refresh: async () => {
+    analyticsCalls++; return {state: 'fresh', period_days: 365, captured_at: new Date(f.at()).toISOString()};
+  }};
+  assert.equal((await f.tick()).state, 'running'); assert.equal(f.state().background_monitoring.run.stage, 'analytics');
+  assert.equal((await f.complete()).state, 'complete'); assert.equal(analyticsCalls, 1);
+  assert.deepEqual(f.calls.filter(call => /^(?:gifts|history)\./.test(call)), calls.filter(call => /^(?:gifts|history)\./.test(call)));
+});
+
+test('an interrupted analytics checkpoint safely reuses a saved fresh report after the lease expires', async () => {
+  const f = fixture(); let capturedAt = null, providerCalls = 0, refreshCalls = 0;
+  f.dependencies.analytics = {version: 1, refresh: async () => {
+    refreshCalls++;
+    // The runtime's startup guard recognizes this persisted capture before it
+    // performs provider work, even when its earlier invocation lost the lease.
+    if (capturedAt) return {state: 'fresh', period_days: 30, captured_at: capturedAt};
+    providerCalls++; capturedAt = new Date(f.at()).toISOString(); f.advance(LIMITS.lease_ms + 1);
+    throw new BackgroundMonitoringError('BACKGROUND_LEASE_LOST');
+  }};
+  await f.until('analytics'); const first = await f.tick(); assert.equal(first.state, 'running');
+  assert.equal(f.state().background_monitoring.run.intent, 'analytics_refresh');
+  const result = await f.complete(); assert.equal(result.state, 'complete');
+  assert.equal(providerCalls, 1); assert.equal(refreshCalls, 2);
+  assert.deepEqual(result.personal_analytics, {state: 'fresh', period_days: 30, captured_at: capturedAt});
+});
+
+test('the frozen personal report period accepts only supported periods and preserves legacy ledgers', async () => {
+  const f = fixture(); await f.until('evaluate');
+  for (const period of [30, 365, undefined]) {
+    f.mutate(state => {
+      if (period === undefined) delete state.background_monitoring.run.personal_analytics_period_days;
+      else state.background_monitoring.run.personal_analytics_period_days = period;
+    });
+    assert.equal((await f.status()).state, 'running');
+  }
+  for (const period of [null, 0, 90, 366, '30', {}, []]) {
+    f.mutate(state => {state.background_monitoring.run.personal_analytics_period_days = period;});
+    await assert.rejects(() => f.status(), /BACKGROUND_STATE_INVALID/);
+    await assert.rejects(() => f.tick(), /BACKGROUND_STATE_INVALID/);
+  }
+});
+
+test('analytics cannot swallow a pause, scope change, changed rules or a replaced lease', async () => {
+  for (const mode of ['scope', 'pause', 'rules', 'lease']) {
+    const f = fixture();
+    f.dependencies.analytics = {version: 1, refresh: async () => {
+      if (mode === 'scope') {f.changeScope({credential_version: 2}); throw new BackgroundMonitoringError('BACKGROUND_SCOPE_CHANGED');}
+      if (mode === 'pause') {f.policy.paused = true; throw new BackgroundMonitoringError('BACKGROUND_PAUSED');}
+      if (mode === 'rules') {f.policy.policies.pop(); throw new BackgroundMonitoringError('BACKGROUND_RULES_CHANGED');}
+      f.advance(LIMITS.lease_ms + 1); throw new BackgroundMonitoringError('BACKGROUND_LEASE_LOST');
+    }};
+    await f.until('analytics'); const result = await f.tick();
+    assert.equal(result.state, mode === 'scope' ? 'blocked' : mode === 'lease' ? 'running' : 'paused');
+    assert.equal(result.personal_analytics, undefined); assert.equal(f.calls.includes('rules.evaluate'), false);
+  }
+});
+
 test('dashboard preparation follows a saved completion in a separate provider-free operation', async () => {
   const f = fixture(); let prepared;
   f.dependencies.dashboard = {version: 1, prewarm: async context => {
@@ -137,15 +245,16 @@ test('dashboard preparation passes its terminal-run context through the real bri
   let prepared;
   const source = readFileSync(new URL('../worker/entrypoint.js', import.meta.url), 'utf8')
     .replace(/^import[^\n]+\n/gm, '').replace('export default async function', 'return async function');
-  const create = vm.runInNewContext(`(function(createPrivateBackgroundMonitoringAccess,PRIVATE_BACKGROUND_MONITORING_VERSION,PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION,createBackgroundMonitoringWorker,BackgroundMonitoringError){${source}})`);
+  const create = vm.runInNewContext(`(function(createPrivateBackgroundMonitoringAccess,PRIVATE_BACKGROUND_MONITORING_VERSION,PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION,PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION,createBackgroundMonitoringWorker,BackgroundMonitoringError){${source}})`);
   const entrypoint = create(check => ({...f.dependencies,
+    analytics: {version: 1, refresh: async () => {throw Error('Preparation cannot refresh analytics');}},
     assertScope: async (scope, context) => {
       await assertScope(scope); contexts.push(context); await check(context);
     },
     dashboard: {version: 1, prewarm: async context => {
       await check(context); prepared = context; return {prepared: true};
     }},
-  }), 1, 1, createBackgroundMonitoringWorker, BackgroundMonitoringError);
+  }), 1, 1, 1, createBackgroundMonitoringWorker, BackgroundMonitoringError);
   assert.deepEqual(await entrypoint({runner_id: RUNNER, prewarm_only: true}, {background_worker: 'price-monitoring-v1'}), {state: 'prepared'});
   assert.equal(contexts.length, 2);
   assert.ok(contexts.every(context => context === prepared), 'Both scope checks use the same preparation context as the cache callback.');
@@ -939,7 +1048,7 @@ test('lost terminal responses before a new claim recover each committed outcome 
     const f=await preClaimTerminalFixture(reason),worker=createBackgroundMonitoringWorker(f.dependencies);
     const before=f.state().background_monitoring,revision=f.revision(),calls=f.calls.length,inputs=[];
     const api={getFiles:async()=>({canonical_modules:{'lib/private-config':'export const ownerTelegramId=42;','lib/runtime':
-      'export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;\nexport const PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION=1;\nexport function createPrivateBackgroundMonitoringAccess() {}'}}),
+      'export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;\nexport const PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION=1;\nexport const PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION=1;\nexport function createPrivateBackgroundMonitoringAccess() {}'}}),
       runFunction:async(_sources,input)=>{
         inputs.push({...input});
         if(input.status_only)return {result:await worker.status(input)};
@@ -1005,7 +1114,7 @@ test('driver reconciles a lost committed history response and completes without 
   const f=fixture(),worker=createBackgroundMonitoringWorker(f.dependencies),inputs=[],output=[];
   let lost=false;
   const api={getFiles:async()=>({canonical_modules:{'lib/private-config':'export const ownerTelegramId=42;','lib/runtime':
-    'export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;\nexport const PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION=1;\nexport function createPrivateBackgroundMonitoringAccess() {}'}}),
+    'export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;\nexport const PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION=1;\nexport const PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION=1;\nexport function createPrivateBackgroundMonitoringAccess() {}'}}),
     runFunction:async(_sources,input)=>{
       inputs.push({...input});
       if(input.status_only)return {result:await worker.status(input)};

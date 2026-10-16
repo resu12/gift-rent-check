@@ -116,6 +116,16 @@ export function monitoringSummary(value) {
     if(!date(value[field]))fail();result[field]=value[field];
   }
   if(result.state==='waiting'&&!result.retry_at)fail();
+  if(value.personal_analytics!==undefined&&value.personal_analytics!==null) {
+    const row=value.personal_analytics;
+    if(!object(row)||!['saved','fresh','busy','limited','unavailable'].includes(row.state)
+      ||row.period_days!==undefined&&![30,365].includes(row.period_days)
+      ||row.reason!==undefined&&!['wallet_missing','no_login','active_refresh','website_busy','cooldown','request_limit','refresh_failed','run_budget'].includes(row.reason)
+      ||['captured_at','retry_at'].some(key=>row[key]!==undefined&&!date(row[key]))
+      ||['saved','fresh'].includes(row.state)&&(![30,365].includes(row.period_days)||!date(row.captured_at)))fail();
+    result.personal_analytics=Object.fromEntries(['state','period_days','captured_at','reason','retry_at']
+      .filter(key=>row[key]!==undefined).map(key=>[key,row[key]]));
+  }
   return result;
 }
 
@@ -137,11 +147,13 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
   if(!object(deployed?.canonical_modules))fail('invalid_response','get_files');
   // The bridge must use the reviewed deployed owner-access implementation.
   // The additive capability keeps existing v1 runners compatible while this
-  // worker rejects runtimes that cannot persist and resume scoped history.
+  // worker rejects runtimes that cannot persist and resume scoped history or
+  // perform personal analytics with the same durable operation guards.
   // Missing/older runtimes fail closed before loading or executing the worker.
   const runtime=deployed.canonical_modules['lib/runtime'];
   if(typeof runtime!=='string'||!/^\s*export\s+const\s+PRIVATE_BACKGROUND_MONITORING_VERSION\s*=\s*1\s*;/m.test(runtime)
     ||!/^\s*export\s+const\s+PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION\s*=\s*1\s*;/m.test(runtime)
+    ||!/^\s*export\s+const\s+PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION\s*=\s*1\s*;/m.test(runtime)
     ||!/^\s*export\s+function\s+createPrivateBackgroundMonitoringAccess\s*\(/m.test(runtime))fail('capability_missing','sources');
   const canPrewarm=/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION\s*=\s*1\s*;/m.test(runtime);
   const {coreSource,entrypointSource}=loadSources();
@@ -212,7 +224,7 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
     if(retryAt-current>=remaining())break;
     while(now()<retryAt&&remaining()>0)await sleep(Math.min(cap.sleep_ms,retryAt-now(),remaining()));
   }
-  const result={state:'partial',...Object.fromEntries(Object.entries(summary).filter(([key])=>['checked','total','proposals','retry_at'].includes(key)))};
+  const result={state:'partial',...Object.fromEntries(Object.entries(summary).filter(([key])=>['checked','total','proposals','retry_at','personal_analytics'].includes(key)))};
   emit(result);return result;
 }
 

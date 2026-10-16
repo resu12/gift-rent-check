@@ -1,10 +1,11 @@
 // Run-only administrative bridge. This file is not a deployed Mini App endpoint.
-import {createPrivateBackgroundMonitoringAccess, PRIVATE_BACKGROUND_MONITORING_VERSION, PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION} from '../lib/runtime.js';
+import {createPrivateBackgroundMonitoringAccess, PRIVATE_BACKGROUND_MONITORING_VERSION, PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION, PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION} from '../lib/runtime.js';
 import {createBackgroundMonitoringWorker, BackgroundMonitoringError} from '../lib/background-monitoring.js';
 
 export default async function(input, ctx) {
   if(ctx?.background_worker!=='price-monitoring-v1'||PRIVATE_BACKGROUND_MONITORING_VERSION!==1
       ||PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION!==1
+      ||PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION!==1
       ||!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only'].includes(key))
       ||Object.prototype.hasOwnProperty.call(input,'retry')&&typeof input.retry!=='boolean'
       ||Object.prototype.hasOwnProperty.call(input,'status_only')&&(input.status_only!==true||Object.prototype.hasOwnProperty.call(input,'retry'))
@@ -31,6 +32,8 @@ export default async function(input, ctx) {
       throw new BackgroundMonitoringError('BACKGROUND_LEASE_LOST');
   };
   access=createPrivateBackgroundMonitoringAccess(check);
+  if(access.analytics?.version!==1||typeof access.analytics.refresh!=='function')
+    throw new BackgroundMonitoringError('BACKGROUND_ACCESS_DENIED');
   if(input.prewarm_only===true&&(access.dashboard?.version!==1||typeof access.dashboard.prewarm!=='function'))
     throw new BackgroundMonitoringError('BACKGROUND_ACCESS_DENIED');
   const worker=createBackgroundMonitoringWorker(access);

@@ -7,13 +7,15 @@ import {BackgroundMonitoringError} from '../worker/monitoring.js';
 function bridge(options={}) {
   const {version=1,ledger,at=1000}=options;
   const scopedHistoryVersion=Object.hasOwn(options,'scopedHistoryVersion')?options.scopedHistoryVersion:1;
+  const personalAnalyticsVersion=Object.hasOwn(options,'personalAnalyticsVersion')?options.personalAnalyticsVersion:1;
   let accesses=0, guard;
   const access={repository:{read:async()=>({state:{background_monitoring:ledger}})},clock:async()=>at,
+    analytics:Object.hasOwn(options,'analytics')?options.analytics:{version:1,refresh:async()=>{}},
     ...(options.dashboard?{dashboard:options.dashboard}:{})};
   const source=readFileSync(new URL('../worker/entrypoint.js',import.meta.url),'utf8')
     .replace(/^import[^\n]+\n/gm,'').replace('export default async function','return async function');
-  const create=vm.runInNewContext(`(function(createPrivateBackgroundMonitoringAccess,PRIVATE_BACKGROUND_MONITORING_VERSION,PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION,createBackgroundMonitoringWorker,BackgroundMonitoringError){${source}})`);
-  return {call:create(check=>{accesses++;guard=check;return access;},version,scopedHistoryVersion,
+  const create=vm.runInNewContext(`(function(createPrivateBackgroundMonitoringAccess,PRIVATE_BACKGROUND_MONITORING_VERSION,PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION,PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION,createBackgroundMonitoringWorker,BackgroundMonitoringError){${source}})`);
+  return {call:create(check=>{accesses++;guard=check;return access;},version,scopedHistoryVersion,personalAnalyticsVersion,
     candidate=>{assert.equal(candidate,access);return {tick:async input=>({state:'complete',runner:input.runner_id,retry:input.retry}),status:async input=>({state:'running',read_only:true,acknowledgement_for:input.runner_id}),prewarm:async input=>({state:'prepared',runner:input.runner_id})};},BackgroundMonitoringError),
     accesses:()=>accesses,guard:context=>guard(context)};
 }
@@ -47,6 +49,16 @@ test('administrative bridge invokes only the fixed worker tick',async()=>{
   const f=bridge();assert.equal((await f.call(input,admin)).state,'complete');assert.equal(f.accesses(),1);
   assert.equal((await f.call({...input,retry:true},admin)).retry,true);
   assert.equal((await f.call({...input,retry:false},admin)).retry,false);
+});
+
+test('personal analytics requires both the supported runtime protocol and implementation',async()=>{
+  for(const personalAnalyticsVersion of [undefined,null,0,2,'1',NaN,{}]) {
+    const f=bridge({personalAnalyticsVersion});
+    await assert.rejects(()=>f.call(input,admin),/BACKGROUND_ACCESS_DENIED/);assert.equal(f.accesses(),0);
+  }
+  for(const analytics of [undefined,{version:0,refresh:async()=>{}},{version:1}]) {
+    const f=bridge({analytics});await assert.rejects(()=>f.call(input,admin),/BACKGROUND_ACCESS_DENIED/);
+  }
 });
 
 test('administrative recovery reads status without invoking a tick or accepting a retry',async()=>{
