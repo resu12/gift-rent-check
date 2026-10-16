@@ -148,8 +148,8 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       && row.last_success_at === row.last_finished_at && time(row.last_finished_at) <= at
       && time(row.last_finished_at) > at - BACKGROUND_MONITORING_LIMITS.dashboard_prepare_age_ms;
     if (!eligible(ledger)) return {state: 'skipped'};
-    await assertScope(ledger.run.scope, context(ledger.run));
     const input = {...context(ledger.run), prewarm_only: true, deadline: at + BACKGROUND_MONITORING_LIMITS.dashboard_prepare_ms};
+    await assertScope(ledger.run.scope, input);
     const result = await dashboard.prewarm(input);
     const current = validate((await repository.read()).state.background_monitoring);
     await assertScope(ledger.run.scope, input);

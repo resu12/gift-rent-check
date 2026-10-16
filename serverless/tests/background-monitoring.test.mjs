@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createBackgroundMonitoringWorker, projectBackgroundMonitoring, BACKGROUND_MONITORING_LIMITS as LIMITS} from '../worker/monitoring.js';
+import {readFileSync} from 'node:fs';
+import vm from 'node:vm';
+import {createBackgroundMonitoringWorker, projectBackgroundMonitoring, BackgroundMonitoringError, BACKGROUND_MONITORING_LIMITS as LIMITS} from '../worker/monitoring.js';
 import {createCloudEngine} from '../tgcloud/lib/cloud-engine.js';
 import {streamedBody} from './fixtures/http-response.mjs';
 import {runBackgroundMonitoring,MonitoringAdminError} from '../tools/run-background-monitoring.mjs';
@@ -125,6 +127,31 @@ test('dashboard preparation follows a saved completion in a separate provider-fr
   const before = f.state(), revision = f.revision(), calls = [...f.calls];
   assert.deepEqual(await createBackgroundMonitoringWorker(f.dependencies).prewarm({runner_id: RUNNER}), {state: 'prepared'});
   assert.equal(prepared.run_id, before.background_monitoring.run.id);
+  assert.deepEqual(f.state(), before); assert.equal(f.revision(), revision); assert.deepEqual(f.calls, calls);
+});
+
+test('dashboard preparation passes its terminal-run context through the real bridge scope guard', async () => {
+  const f = fixture(); await f.complete();
+  const before = f.state(), revision = f.revision(), calls = [...f.calls], contexts = [];
+  const assertScope = f.dependencies.assertScope;
+  let prepared;
+  const source = readFileSync(new URL('../worker/entrypoint.js', import.meta.url), 'utf8')
+    .replace(/^import[^\n]+\n/gm, '').replace('export default async function', 'return async function');
+  const create = vm.runInNewContext(`(function(createPrivateBackgroundMonitoringAccess,PRIVATE_BACKGROUND_MONITORING_VERSION,PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION,createBackgroundMonitoringWorker,BackgroundMonitoringError){${source}})`);
+  const entrypoint = create(check => ({...f.dependencies,
+    assertScope: async (scope, context) => {
+      await assertScope(scope); contexts.push(context); await check(context);
+    },
+    dashboard: {version: 1, prewarm: async context => {
+      await check(context); prepared = context; return {prepared: true};
+    }},
+  }), 1, 1, createBackgroundMonitoringWorker, BackgroundMonitoringError);
+  assert.deepEqual(await entrypoint({runner_id: RUNNER, prewarm_only: true}, {background_worker: 'price-monitoring-v1'}), {state: 'prepared'});
+  assert.equal(contexts.length, 2);
+  assert.ok(contexts.every(context => context === prepared), 'Both scope checks use the same preparation context as the cache callback.');
+  assert.equal(prepared.prewarm_only, true); assert.equal(prepared.lease, null);
+  assert.equal(prepared.run_id, before.background_monitoring.run.id);
+  assert.equal(prepared.deadline, f.at() + LIMITS.dashboard_prepare_ms);
   assert.deepEqual(f.state(), before); assert.equal(f.revision(), revision); assert.deepEqual(f.calls, calls);
 });
 
