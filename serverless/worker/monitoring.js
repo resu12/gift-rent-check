@@ -355,9 +355,9 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       }
     });
   }
-  async function tick({runner_id, retry = false} = {}) {
+  async function tick({runner_id, retry = false, skip_analytics = false} = {}) {
     if (typeof runner_id !== 'string' || !/^[a-f0-9]{64}$/.test(runner_id)) throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
-    if (typeof retry !== 'boolean') throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
+    if (typeof retry !== 'boolean' || typeof skip_analytics !== 'boolean') throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
     let claim;
     for (let n = 0; n < 12; n++) {
       const saved = await repository.read(), at = await now(), old = validate(saved.state.background_monitoring);
@@ -535,20 +535,32 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       }
       // A pre-upgrade checkpoint can already be at evaluation. Move it through
       // the new stage once; a saved outcome prevents re-running this work.
-      if (claim.stage === 'evaluate' && hasAnalytics && !claim.personal_analytics) {
+      const analyticsReserve = BACKGROUND_MONITORING_LIMITS.analytics_refresh_ms + BACKGROUND_MONITORING_LIMITS.analytics_evaluation_reserve_ms;
+      const skipOptional = skip_analytics || await now() + analyticsReserve > claim.deadline;
+      if (claim.stage === 'evaluate' && hasAnalytics && !claim.personal_analytics && !skipOptional) {
         const row = await release(claim, (ledger, at) => {ledger.run.stage = 'analytics'; ledger.run.next_action_at = at;});
         return reply(row, await now());
       }
-      if (claim.stage === 'analytics') {
-        const at = await now();
+      if (claim.stage === 'analytics' || claim.stage === 'evaluate' && hasAnalytics && !claim.personal_analytics && skipOptional) {
+        let skip = skipOptional;
         let outcome;
         if (!hasAnalytics) throw new BackgroundMonitoringError('BACKGROUND_CONFIGURATION');
-        if (at + BACKGROUND_MONITORING_LIMITS.analytics_refresh_ms + BACKGROUND_MONITORING_LIMITS.analytics_evaluation_reserve_ms > claim.deadline) {
-          outcome = {state: 'unavailable', reason: 'run_budget'};
-        } else {
+        if (!skip) {
           const prepared = await intent(claim, 'analytics_refresh');
           if (prepared.stopped) return reply(prepared.stopped, await now());
           claim = prepared.run;
+          // Claim persistence and authorization also consume server time.
+          skip = await now() + analyticsReserve > claim.deadline;
+        }
+        if (skip) {
+          outcome = {state: 'unavailable', reason: 'run_budget'};
+          // Skipping optional work must not consume the driver's last request
+          // slot. Save the outcome under this lease and evaluate in this tick.
+          const row = await update(claim, ledger => {
+            ledger.run.personal_analytics = outcome; ledger.run.stage = 'evaluate'; ledger.run.intent = null;
+          });
+          claim = row.run;
+        } else {
           try {outcome = analyticsResult(await analytics.refresh(context(claim)));}
           catch (error) {
             // Independent analytics availability must not fail an otherwise
@@ -561,11 +573,11 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
           }
           const checked = await gate(claim);
           if (checked.stop) return reply(await finish(claim, 'paused', checked.stop), await now());
+          const row = await release(claim, (ledger, at) => {
+            ledger.run.personal_analytics = outcome; ledger.run.stage = 'evaluate'; ledger.run.next_action_at = at;
+          });
+          return reply(row, await now());
         }
-        const row = await release(claim, (ledger, at) => {
-          ledger.run.personal_analytics = outcome; ledger.run.stage = 'evaluate'; ledger.run.next_action_at = at;
-        });
-        return reply(row, await now());
       }
       if (claim.stage === 'evaluate') {
         const prepared = await intent(claim, 'evaluate');

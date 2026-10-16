@@ -10,7 +10,7 @@ import {adminModuleSources} from './admin-module-sources.mjs';
 import {requireId,validateAuthenticatedDestination,validateServerlessEnvironment} from './destination.mjs';
 
 export const MONITORING_ENDPOINT='endpoints/backgroundMonitoringTick';
-export const RUNNER_LIMITS=Object.freeze({duration_ms:20*60*1000,steps:200,request_ms:90000,source_bytes:8*1024*1024,response_bytes:1024*1024,sleep_ms:60000,recoveries:3,prewarm_ms:30000});
+export const RUNNER_LIMITS=Object.freeze({duration_ms:20*60*1000,steps:200,request_ms:90000,source_bytes:8*1024*1024,response_bytes:1024*1024,sleep_ms:60000,recoveries:3,prewarm_ms:30000,analytics_handoff_ms:1000});
 const states=new Set(['running','waiting','busy','complete','paused','disabled','partial','blocked','failed']);
 const object=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 const reasons=new Set(['invalid_request','invalid_response','invalid_json','invalid_envelope','invalid_result','response_too_large','network_error','request_timeout','http_error','remote_error','capability_missing','source_error','unacknowledged_status','recovery_exhausted','unexpected_error']);
@@ -96,9 +96,10 @@ export function createMonitoringAdminApi({token,appId,env=process.env,fetch:requ
   return {
     getFiles:({timeoutMs}={})=>call('/get',undefined,RUNNER_LIMITS.source_bytes,'get_files',timeoutMs),
     runFunction:(sources,input,{timeoutMs}={})=>{
-      if(!object(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only'].includes(key))
+      if(!object(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','skip_analytics'].includes(key))
         ||typeof input.runner_id!=='string'||!/^[0-9a-f]{64}$/.test(input.runner_id)
         ||Object.hasOwn(input,'retry')&&typeof input.retry!=='boolean'
+        ||Object.hasOwn(input,'skip_analytics')&&(typeof input.skip_analytics!=='boolean'||Object.hasOwn(input,'status_only')||Object.hasOwn(input,'prewarm_only'))
         ||Object.hasOwn(input,'status_only')&&(input.status_only!==true||Object.hasOwn(input,'retry'))
         ||Object.hasOwn(input,'prewarm_only')&&(input.prewarm_only!==true||Object.hasOwn(input,'retry')||Object.hasOwn(input,'status_only')))fail('invalid_request','configuration');
       return call('/run',{module:MONITORING_ENDPOINT,sources,args:input,ctx:{background_worker:'price-monitoring-v1'}},RUNNER_LIMITS.response_bytes,input.prewarm_only?'prewarm':input.status_only?'status':'tick',timeoutMs);
@@ -174,7 +175,13 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
     }
     // A manual launch can recover a terminal incomplete run once. Continuing
     // that launch never repeatedly bypasses due times or terminal safeguards.
-    const input={runner_id:runner,...(statusOnly?{status_only:true}:retry===true&&!tickAttempted?{retry:true}:{})};
+    // The runner clock starts before /get; a worker's later deadline cannot
+    // account for that skew. Optional analytics must leave two complete host
+    // request allowances (this tick plus evaluation) and a small handoff margin.
+    // This veto never extends a deadline and is recomputed after each response.
+    const skipAnalytics=remaining()<2*cap.request_ms+cap.analytics_handoff_ms||cap.steps-step<2;
+    const input={runner_id:runner,...(statusOnly?{status_only:true}:{
+      ...(retry===true&&!tickAttempted?{retry:true}:{}),...(skipAnalytics?{skip_analytics:true}:{})})};
     if(!statusOnly)tickAttempted=true;
     let response;
     try {response=await api.runFunction(sources,input,{timeoutMs:requestTime()});}

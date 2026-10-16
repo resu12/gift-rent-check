@@ -61,6 +61,36 @@ test('administrative transport pins the official get/run protocol, identity and 
   for(const prewarm_only of [false,'true',1,null,{}])assert.throws(()=>api.runFunction({}, {runner_id:runner,prewarm_only}));
   for(const input of [{retry:true},{retry:false},{status_only:true}])assert.throws(()=>api.runFunction({}, {runner_id:runner,prewarm_only:true,...input}));
   assert.equal(requests.length,5);
+  for(const skip_analytics of ['true',1,null,{},[]])assert.throws(()=>api.runFunction({}, {runner_id:runner,skip_analytics}));
+  for(const skip_analytics of [true,false]) {
+    for(const mode of [{status_only:true},{prewarm_only:true}])assert.throws(()=>api.runFunction({}, {runner_id:runner,...mode,skip_analytics}));
+    await api.runFunction({}, {runner_id:runner,skip_analytics});
+    assert.deepEqual(JSON.parse(requests.at(-1).options.body).args,{runner_id:runner,skip_analytics});
+  }
+  assert.equal(requests.length,7);
+});
+
+test('runner reserves two bounded requests before allowing optional analytics',async()=>{
+  const reserve=2*RUNNER_LIMITS.request_ms+1000;
+  for(const [remaining,steps,skip] of [[reserve-1,2,true],[reserve,2,false],[reserve+1,2,false],[reserve+1,1,true]]) {
+    const f=fixture([{state:'complete'}],{limits:{duration_ms:remaining,steps}});
+    assert.equal((await f.run()).state,'complete');
+    const input=f.calls.find(call=>call.operation==='run').input;
+    assert.deepEqual(input,{runner_id:runner,...(skip?{skip_analytics:true}:{})});
+  }
+});
+
+test('analytics budget uses elapsed monotonic time including source loading despite wall-clock changes',async()=>{
+  const reserve=2*RUNNER_LIMITS.request_ms+1000;
+  for(const [elapsed,wallShift,skip] of [[80000,-3600000,true],[0,3600000,false]]) {
+    let monotonic=0,wall=start;
+    const f=fixture([{state:'complete'}],{limits:{duration_ms:reserve+79000},now:()=>wall,monotonic:()=>monotonic});
+    f.args.api.getFiles=async()=>{monotonic+=elapsed;wall+=wallShift;return {canonical_modules:canonical};};
+    assert.equal((await f.run()).state,'complete');
+    const call=f.calls.find(row=>row.operation==='run');
+    assert.deepEqual(call.input,{runner_id:runner,...(skip?{skip_analytics:true}:{})});
+    assert.equal(call.value.timeoutMs,Math.min(RUNNER_LIMITS.request_ms,reserve+79000-elapsed));
+  }
 });
 
 test('acknowledged completion prepares the dashboard once in a separate bounded optional request',async()=>{

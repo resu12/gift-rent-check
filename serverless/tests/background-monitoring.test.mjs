@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import {createBackgroundMonitoringWorker, projectBackgroundMonitoring, BackgroundMonitoringError, BACKGROUND_MONITORING_LIMITS as LIMITS} from '../worker/monitoring.js';
 import {createCloudEngine} from '../tgcloud/lib/cloud-engine.js';
 import {streamedBody} from './fixtures/http-response.mjs';
-import {runBackgroundMonitoring,MonitoringAdminError} from '../tools/run-background-monitoring.mjs';
+import {runBackgroundMonitoring,MonitoringAdminError,RUNNER_LIMITS} from '../tools/run-background-monitoring.mjs';
 
 const START = Date.parse('2026-10-14T12:00:00Z'), RUNNER = 'a'.repeat(64), OTHER = 'b'.repeat(64);
 const address = n => `0:${n.toString(16).padStart(64, '0')}`, copy = value => structuredClone(value);
@@ -157,10 +157,112 @@ test('analytics preserves rule evaluation time instead of starting a provider re
   await f.until('analytics');
   f.advance(f.state().background_monitoring.run.deadline - f.at()
     - LIMITS.analytics_refresh_ms - LIMITS.analytics_evaluation_reserve_ms + 1);
-  const skipped = await f.tick(); assert.equal(skipped.state, 'running'); assert.equal(calls, 0);
+  const skipped = await f.tick(); assert.equal(skipped.state, 'complete'); assert.equal(calls, 0);
   assert.deepEqual(skipped.personal_analytics, {state: 'unavailable', reason: 'run_budget'});
-  const result = await f.tick(); assert.equal(result.state, 'complete'); assert.equal(calls, 0);
   assert.equal(f.calls.filter(call => call === 'rules.evaluate').length, 1);
+});
+
+test('runner budget skip evaluates analytics and legacy checkpoints in the same guarded invocation',async()=>{
+  for(const stage of ['analytics','evaluate']) {
+    const f=fixture();let analyticsCalls=0;
+    if(stage==='analytics')f.dependencies.analytics={version:1,refresh:async()=>{analyticsCalls++;throw Error('must not request');}};
+    await f.until(stage);
+    f.dependencies.analytics={version:1,refresh:async()=>{analyticsCalls++;throw Error('must not request');}};
+    const before=f.calls.filter(call=>/^(gifts|history)\./.test(call));
+    const result=await createBackgroundMonitoringWorker(f.dependencies).tick({runner_id:RUNNER,skip_analytics:true});
+    assert.equal(result.state,'complete',stage);assert.equal(analyticsCalls,0);
+    assert.deepEqual(result.personal_analytics,{state:'unavailable',reason:'run_budget'});
+    assert.equal(f.calls.filter(call=>call==='rules.evaluate').length,1);
+    assert.deepEqual(f.calls.filter(call=>/^(gifts|history)\./.test(call)),before);
+    assert.equal(f.state().background_monitoring.last_success_at,new Date(f.at()).toISOString());
+  }
+});
+
+test('analytics rechecks the server reserve after slow authorization and claim persistence',async()=>{
+  const f=fixture();let analyticsCalls=0,delayed=false;
+  f.dependencies.analytics={version:1,refresh:async()=>{analyticsCalls++;throw Error('must not request');}};
+  await f.until('analytics');
+  f.advance(f.state().background_monitoring.run.deadline-f.at()
+    -LIMITS.analytics_refresh_ms-LIMITS.analytics_evaluation_reserve_ms);
+  const status=f.dependencies.rules.status;
+  f.dependencies.rules.status=async()=>{
+    if(!delayed&&f.state().background_monitoring.run.intent==='analytics_refresh') {
+      delayed=true;f.advance(1000);
+    }
+    return status();
+  };
+  const result=await f.tick();
+  assert.equal(delayed,true);assert.equal(result.state,'complete');assert.equal(analyticsCalls,0);
+  assert.deepEqual(result.personal_analytics,{state:'unavailable',reason:'run_budget'});
+  assert.equal(f.calls.filter(call=>call==='rules.evaluate').length,1);
+});
+
+test('an old evaluation checkpoint with insufficient server time never needs an extra transition tick',async()=>{
+  const f=fixture();await f.until('evaluate');let analyticsCalls=0;
+  f.dependencies.analytics={version:1,refresh:async()=>{analyticsCalls++;throw Error('must not request');}};
+  f.advance(f.state().background_monitoring.run.deadline-f.at()
+    -LIMITS.analytics_refresh_ms-LIMITS.analytics_evaluation_reserve_ms+1);
+  const result=await f.tick();
+  assert.equal(result.state,'complete');assert.equal(analyticsCalls,0);
+  assert.deepEqual(result.personal_analytics,{state:'unavailable',reason:'run_budget'});
+  assert.equal(f.calls.filter(call=>call==='rules.evaluate').length,1);
+});
+
+test('slow source loading cannot spend the driver remaining time on analytics before rule evaluation',async()=>{
+  const reserve=2*RUNNER_LIMITS.request_ms+1000;
+  for(const remaining of [40000,reserve-1,reserve]) {
+    const f=fixture(),inputs=[];let analyticsCalls=0,arrived=false;
+    f.dependencies.analytics={version:1,refresh:async()=>{
+      analyticsCalls++;f.advance(LIMITS.analytics_refresh_ms);
+      return {state:'saved',period_days:30,captured_at:new Date(f.at()).toISOString()};
+    }};
+    const evaluate=f.dependencies.rules.evaluate;
+    f.dependencies.rules.evaluate=async context=>{f.advance(20000);return evaluate(context);};
+    const api={getFiles:async()=>{
+      f.advance(80000);
+      return {canonical_modules:{'lib/private-config':'export const ownerTelegramId=42;','lib/runtime':
+        'export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;\nexport const PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION=1;\nexport const PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION=1;\nexport function createPrivateBackgroundMonitoringAccess() {}'}};
+    },runFunction:async(_sources,input,{timeoutMs})=>{
+      const at=f.at(),stage=f.state().background_monitoring?.run.stage;
+      inputs.push({input:{...input},stage,at});
+      if(stage==='analytics'&&remaining===40000) {
+        assert.equal(f.state().background_monitoring.run.deadline-f.at(),120000,
+          'The worker still sees 120 seconds although source loading consumed 80 driver seconds.');
+      }
+      const result=await createBackgroundMonitoringWorker(f.dependencies).tick(input);
+      assert.ok(f.at()-at<=timeoutMs,'Every request completes within the remaining driver allowance.');
+      if(!arrived&&f.state().background_monitoring?.run.stage==='analytics') {
+        arrived=true;f.advance(START+RUNNER_LIMITS.duration_ms-remaining-f.at());
+      }
+      return {result};
+    }};
+    const result=await runBackgroundMonitoring({api,enabled:true,random:()=>RUNNER,
+      now:f.at,monotonic:()=>f.at()-START,sleep:async ms=>f.advance(ms)});
+    const skip=remaining<reserve,analyticsTick=inputs.find(call=>call.stage==='analytics');
+    assert.equal(result.state,'complete');assert.ok(arrived);assert.ok(analyticsTick);
+    assert.equal(analyticsTick.input.skip_analytics,skip?true:undefined);
+    assert.equal(analyticsCalls,skip?0:1);
+    assert.equal(f.calls.filter(call=>call==='rules.evaluate').length,1);
+    assert.ok(f.at()<START+RUNNER_LIMITS.duration_ms);
+    assert.equal(f.state().background_monitoring.state,'complete');
+    assert.equal(result.personal_analytics.state,skip?'unavailable':'saved');
+    if(skip)assert.equal(result.personal_analytics.reason,'run_budget');
+  }
+});
+
+test('the final runner request skips optional analytics and still completes rule evaluation',async()=>{
+  const f=fixture();let analyticsCalls=0;
+  f.dependencies.analytics={version:1,refresh:async()=>{analyticsCalls++;throw Error('must not request');}};
+  await f.until('analytics');const inputs=[];
+  const result=await runBackgroundMonitoring({enabled:true,random:()=>RUNNER,limits:{steps:1},now:f.at,monotonic:()=>f.at()-START,
+    api:{getFiles:async()=>({canonical_modules:{'lib/private-config':'export const ownerTelegramId=42;','lib/runtime':
+      'export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;\nexport const PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION=1;\nexport const PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION=1;\nexport function createPrivateBackgroundMonitoringAccess() {}'}}),
+      runFunction:async(_sources,input)=>{inputs.push(input);return {result:await createBackgroundMonitoringWorker(f.dependencies).tick(input)};}},
+    sleep:async ms=>f.advance(ms)});
+  assert.equal(result.state,'complete');assert.equal(analyticsCalls,0);
+  assert.deepEqual(inputs,[{runner_id:RUNNER,skip_analytics:true}]);
+  assert.deepEqual(result.personal_analytics,{state:'unavailable',reason:'run_budget'});
+  assert.equal(f.calls.filter(call=>call==='rules.evaluate').length,1);
 });
 
 test('pre-upgrade evaluation checkpoints refresh analytics once without repeating gift or history work', async () => {
