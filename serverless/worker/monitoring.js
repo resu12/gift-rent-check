@@ -6,20 +6,34 @@ export const BACKGROUND_MONITORING_LIMITS = Object.freeze({
   lease_ms: 120000, history_steps: 100, history_resumes: 3, manual_retry_ms: 60000,
   gift_resumes: 1, gift_resume_ms: 300000, gift_history_reserve_ms: 300000, gift_attempts: 20, gift_daily_attempts: 1000,
   dashboard_prepare_ms: 25000, dashboard_prepare_age_ms: 5 * 60 * 1000,
+  analytics_refresh_ms: 60000, analytics_evaluation_reserve_ms: 60000,
 });
 const STATES = new Set(['running', 'complete', 'partial', 'paused', 'blocked', 'failed']);
 const REASONS = new Set(['monitoring_paused', 'no_enabled_gifts', 'rules_changed', 'scope_changed',
   'gift_update_running', 'collection_running', 'gift_refresh_partial', 'history_partial',
   'history_limit', 'history_start_uncertain', 'history_changed', 'gift_refresh_changed',
   'request_failed', 'run_deadline', 'history_stopped']);
-const STAGES = new Set(['gift_start', 'gift_poll', 'history_start', 'history_poll', 'evaluate', 'done']);
-const INTENTS = new Set(['gift_start', 'gift_step', 'gift_resume', 'history_start', 'history_step', 'history_resume', 'evaluate']);
+const STAGES = new Set(['gift_start', 'gift_poll', 'history_start', 'history_poll', 'analytics', 'evaluate', 'done']);
+const INTENTS = new Set(['gift_start', 'gift_step', 'gift_resume', 'history_start', 'history_step', 'history_resume', 'analytics_refresh', 'evaluate']);
+const ANALYTICS_STATES = new Set(['saved', 'fresh', 'busy', 'limited', 'unavailable']);
+const ANALYTICS_REASONS = new Set(['wallet_missing', 'no_login', 'active_refresh', 'website_busy', 'cooldown', 'request_limit', 'refresh_failed', 'run_budget']);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const clone = value => JSON.parse(JSON.stringify(value));
 const iso = at => new Date(at).toISOString();
 const time = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? Date.parse(value) : null;
 const millis = value => Number.isSafeInteger(value) && value > 0 && value < 8640000000000000 - BACKGROUND_MONITORING_LIMITS.cadence_ms;
 const count = value => Number.isSafeInteger(value) && value >= 0;
+// Never persist or log provider HTML, cookies, error text or account details.
+function analyticsResult(value) {
+  if (!object(value) || !ANALYTICS_STATES.has(value.state)
+    || value.period_days !== undefined && ![30, 365].includes(value.period_days)
+    || value.reason !== undefined && !ANALYTICS_REASONS.has(value.reason)
+    || ['captured_at', 'retry_at'].some(key => value[key] !== undefined && !millis(time(value[key])))
+    || ['saved', 'fresh'].includes(value.state) && (![30, 365].includes(value.period_days) || !millis(time(value.captured_at))))
+    throw new BackgroundMonitoringError('BACKGROUND_ANALYTICS_INVALID');
+  return Object.fromEntries(['state', 'period_days', 'captured_at', 'reason', 'retry_at']
+    .filter(key => value[key] !== undefined).map(key => [key, value[key]]));
+}
 // Hourly wake-ups do not imply hourly checks. Also protect saved ledgers from
 // the old fixed-slot schedule, which could follow a late run less than 6h later.
 const automaticDue = ledger => Math.max(time(ledger.next_check_at) ?? 0,
@@ -65,6 +79,7 @@ function validate(value) {
     || run.deadline !== run.started_at + BACKGROUND_MONITORING_LIMITS.run_ms
     || !count(run.claim_generation) || !count(run.next_action_at) || !count(run.history_steps) || !count(run.history_resumes)
     || run.last_runner_id !== undefined && (typeof run.last_runner_id !== 'string' || !/^[a-f0-9]{64}$/.test(run.last_runner_id))
+    || run.personal_analytics_period_days !== undefined && ![30, 365].includes(run.personal_analytics_period_days)
     || !count(run.gift_resumes ?? 0) || (run.gift_resumes ?? 0) > BACKGROUND_MONITORING_LIMITS.gift_resumes
     || run.history_after_at !== null && !millis(run.history_after_at)
     || run.history_steps > BACKGROUND_MONITORING_LIMITS.history_steps || run.history_resumes > BACKGROUND_MONITORING_LIMITS.history_resumes
@@ -77,6 +92,7 @@ function validate(value) {
     || run.lease !== null && (!object(run.lease) || !/^[a-f0-9]{64}:\d+$/.test(run.lease.token ?? '') || !millis(run.lease.until))) {
     throw new BackgroundMonitoringError('BACKGROUND_STATE_INVALID');
   }
+  if (run.personal_analytics !== undefined && run.personal_analytics !== null) analyticsResult(run.personal_analytics);
   return value;
 }
 
@@ -87,6 +103,7 @@ export function projectBackgroundMonitoring(value, now = Date.now()) {
   const result = Object.fromEntries(['version', 'cadence_hours', 'state', 'last_started_at', 'last_finished_at',
     'last_success_at', 'next_check_at', 'reason'].map(key => [key, ledger[key]]));
   result.next_check_at = iso(automaticDue(ledger));
+  if (ledger.run.personal_analytics) result.personal_analytics = analyticsResult(ledger.run.personal_analytics);
   if (ledger.state === 'running') {
     result.run_deadline_at = iso(ledger.run.deadline);
     // Allow a minute for the next driver request after the current lease or
@@ -105,13 +122,15 @@ export function projectBackgroundMonitoring(value, now = Date.now()) {
  * tick performs at most one provider step. It never resumes an unidentified job.
  */
 export function createBackgroundMonitoringWorker({repository, clock, captureScope, assertScope,
-  rules, gifts, history, dashboard}) {
+  rules, gifts, history, analytics, dashboard}) {
   for (const fn of [repository?.read, repository?.append, clock, captureScope, assertScope,
     rules?.status, rules?.evaluate, gifts?.status, gifts?.start, gifts?.step,
     history?.status, history?.start, history?.step, history?.resume]) {
     if (typeof fn !== 'function') throw new BackgroundMonitoringError('BACKGROUND_CONFIGURATION');
   }
   const now = async () => {const at = await clock(); if (!millis(at)) throw new BackgroundMonitoringError('BACKGROUND_CLOCK_INVALID'); return at;};
+  const hasAnalytics = analytics?.version === 1 && typeof analytics.refresh === 'function';
+  const afterHistory = () => hasAnalytics ? 'analytics' : 'evaluate';
   const context = run => ({run_id: run.id, session_id: run.session_id, scope: clone(run.scope),
     lease: clone(run.lease), gift_run_id: run.gift_run_id, history_job_id: run.history_job_id,
     gift_start_address: run.gift_start_address ?? null, deadline: run.deadline});
@@ -119,6 +138,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     state: state ?? ledger?.state ?? 'disabled', server_time: iso(at),
     ...(retryAt !== null ? {retry_at: iso(Math.max(at, retryAt))} : {}),
     ...Object.fromEntries(['checked', 'total', 'proposals'].filter(key => count(ledger?.run?.[key])).map(key => [key, ledger.run[key]])),
+    ...(ledger?.run?.personal_analytics ? {personal_analytics: analyticsResult(ledger.run.personal_analytics)} : {}),
     background_monitoring: projectBackgroundMonitoring(ledger, at),
   });
   async function status({runner_id} = {}) {
@@ -324,20 +344,20 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
         // Follow it with a fresh incremental head before certifying this cycle.
         const started = time(job.created_at);
         if (started !== null && Math.floor(started / 1000) * 1000 >= run.history_after_at) {
-          run.history_complete = true; run.stage = 'evaluate'; run.next_action_at = at;
+          run.history_complete = true; run.stage = afterHistory(); run.next_action_at = at;
         } else {
           run.previous_history_job_id = job.id; run.history_job_id = null;
           run.stage = 'history_start'; run.next_action_at = at;
         }
       }
       else if (job.state === 'failed' || job.stop_requested || run.next_action_at >= run.deadline) {
-        ledger.reason = job.stop_requested ? 'history_stopped' : 'history_partial'; run.stage = 'evaluate'; run.next_action_at = at;
+        ledger.reason = job.stop_requested ? 'history_stopped' : 'history_partial'; run.stage = afterHistory(); run.next_action_at = at;
       }
     });
   }
-  async function tick({runner_id, retry = false} = {}) {
+  async function tick({runner_id, retry = false, skip_analytics = false} = {}) {
     if (typeof runner_id !== 'string' || !/^[a-f0-9]{64}$/.test(runner_id)) throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
-    if (typeof retry !== 'boolean') throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
+    if (typeof retry !== 'boolean' || typeof skip_analytics !== 'boolean') throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
     let claim;
     for (let n = 0; n < 12; n++) {
       const saved = await repository.read(), at = await now(), old = validate(saved.state.background_monitoring);
@@ -455,11 +475,11 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       if (claim.stage === 'history_start') {
         const saved = await repository.read(), at = await now();
         if (claim.history_steps >= BACKGROUND_MONITORING_LIMITS.history_steps) {
-          const row = await release(claim, ledger => {ledger.reason = 'history_limit'; ledger.run.stage = 'evaluate'; ledger.run.next_action_at = at;});
+          const row = await release(claim, ledger => {ledger.reason = 'history_limit'; ledger.run.stage = afterHistory(); ledger.run.next_action_at = at;});
           return reply(row, at, null, at);
         }
         if (busyCollection(saved.state, claim, at)) {
-          const row = await release(claim, ledger => {ledger.reason = 'collection_running'; ledger.run.stage = 'evaluate'; ledger.run.next_action_at = at;});
+          const row = await release(claim, ledger => {ledger.reason = 'collection_running'; ledger.run.stage = afterHistory(); ledger.run.next_action_at = at;});
           return reply(row, at, null, at);
         }
         const prior = saved.state.job;
@@ -492,7 +512,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
           const row = await saveHistory(claim, result); return reply(row, at, row.run.next_action_at > at ? 'waiting' : null, row.run.next_action_at || null);
         }
         if (claim.history_steps >= BACKGROUND_MONITORING_LIMITS.history_steps) {
-          const row = await release(claim, ledger => {ledger.reason = 'history_limit'; ledger.run.stage = 'evaluate'; ledger.run.next_action_at = at;});
+          const row = await release(claim, ledger => {ledger.reason = 'history_limit'; ledger.run.stage = afterHistory(); ledger.run.next_action_at = at;});
           return reply(row, at, null, at);
         }
         // getJobs' requires_resume is a UI hint whenever no request owns a
@@ -504,7 +524,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
         if (resume && (claim.history_resumes >= BACKGROUND_MONITORING_LIMITS.history_resumes
           || !['duration_limit', 'invocation_limit', 'daily_limit', 'provider_wait'].includes(saved.state.job.reason)
             && !expiredInvocation)) {
-          const row = await release(claim, ledger => {ledger.reason = 'history_partial'; ledger.run.stage = 'evaluate'; ledger.run.next_action_at = at;});
+          const row = await release(claim, ledger => {ledger.reason = 'history_partial'; ledger.run.stage = afterHistory(); ledger.run.next_action_at = at;});
           return reply(row, at, null, at);
         }
         const prepared = await intent(claim, resume ? 'history_resume' : 'history_step');
@@ -512,6 +532,52 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
         claim = prepared.run;
         result = await history[resume ? 'resume' : 'step']({job_id: claim.history_job_id}, context(claim));
         const row = await saveHistory(claim, result); return reply(row, await now(), null, row.run.next_action_at || null);
+      }
+      // A pre-upgrade checkpoint can already be at evaluation. Move it through
+      // the new stage once; a saved outcome prevents re-running this work.
+      const analyticsReserve = BACKGROUND_MONITORING_LIMITS.analytics_refresh_ms + BACKGROUND_MONITORING_LIMITS.analytics_evaluation_reserve_ms;
+      const skipOptional = skip_analytics || await now() + analyticsReserve > claim.deadline;
+      if (claim.stage === 'evaluate' && hasAnalytics && !claim.personal_analytics && !skipOptional) {
+        const row = await release(claim, (ledger, at) => {ledger.run.stage = 'analytics'; ledger.run.next_action_at = at;});
+        return reply(row, await now());
+      }
+      if (claim.stage === 'analytics' || claim.stage === 'evaluate' && hasAnalytics && !claim.personal_analytics && skipOptional) {
+        let skip = skipOptional;
+        let outcome;
+        if (!hasAnalytics) throw new BackgroundMonitoringError('BACKGROUND_CONFIGURATION');
+        if (!skip) {
+          const prepared = await intent(claim, 'analytics_refresh');
+          if (prepared.stopped) return reply(prepared.stopped, await now());
+          claim = prepared.run;
+          // Claim persistence and authorization also consume server time.
+          skip = await now() + analyticsReserve > claim.deadline;
+        }
+        if (skip) {
+          outcome = {state: 'unavailable', reason: 'run_budget'};
+          // Skipping optional work must not consume the driver's last request
+          // slot. Save the outcome under this lease and evaluate in this tick.
+          const row = await update(claim, ledger => {
+            ledger.run.personal_analytics = outcome; ledger.run.stage = 'evaluate'; ledger.run.intent = null;
+          });
+          claim = row.run;
+        } else {
+          try {outcome = analyticsResult(await analytics.refresh(context(claim)));}
+          catch (error) {
+            // Independent analytics availability must not fail an otherwise
+            // complete gift/rule check. Authorization and cancellation fences
+            // always escape this optional-stage handler.
+            if (error?.code === 'BACKGROUND_LEASE_LOST' || error?.code === 'BACKGROUND_PAUSED'
+              || error?.code === 'BACKGROUND_RULES_CHANGED'
+              || /(?:SCOPE|WALLET|CREDENTIAL|ACCOUNT)_CHANGED|BACKGROUND_SCOPE/.test(error?.code ?? '')) throw error;
+            outcome = {state: 'unavailable', reason: 'refresh_failed'};
+          }
+          const checked = await gate(claim);
+          if (checked.stop) return reply(await finish(claim, 'paused', checked.stop), await now());
+          const row = await release(claim, (ledger, at) => {
+            ledger.run.personal_analytics = outcome; ledger.run.stage = 'evaluate'; ledger.run.next_action_at = at;
+          });
+          return reply(row, await now());
+        }
       }
       if (claim.stage === 'evaluate') {
         const prepared = await intent(claim, 'evaluate');

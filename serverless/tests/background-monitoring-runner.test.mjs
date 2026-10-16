@@ -6,7 +6,7 @@ import {adminModuleSources} from '../tools/admin-module-sources.mjs';
 
 const token='app123:synthetic_test_secret',runner='a'.repeat(64),start=Date.parse('2026-10-14T12:00:00.000Z');
 const canonical={'lib/private-config':'export const ownerTelegramId=42;',
-  'lib/runtime':'export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;\nexport const PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION=1;\nexport function createPrivateBackgroundMonitoringAccess() {}',
+  'lib/runtime':'export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;\nexport const PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION=1;\nexport const PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION=1;\nexport function createPrivateBackgroundMonitoringAccess() {}',
   'lib/existing':'export const value=1;','endpoints/unrelated':'private source not needed'};
 const local={coreSource:"import {value} from './existing.js';\nexport const core=value;",
   entrypointSource:"import {core} from '../lib/background-monitoring.js';\nexport default async()=>core;"};
@@ -61,6 +61,36 @@ test('administrative transport pins the official get/run protocol, identity and 
   for(const prewarm_only of [false,'true',1,null,{}])assert.throws(()=>api.runFunction({}, {runner_id:runner,prewarm_only}));
   for(const input of [{retry:true},{retry:false},{status_only:true}])assert.throws(()=>api.runFunction({}, {runner_id:runner,prewarm_only:true,...input}));
   assert.equal(requests.length,5);
+  for(const skip_analytics of ['true',1,null,{},[]])assert.throws(()=>api.runFunction({}, {runner_id:runner,skip_analytics}));
+  for(const skip_analytics of [true,false]) {
+    for(const mode of [{status_only:true},{prewarm_only:true}])assert.throws(()=>api.runFunction({}, {runner_id:runner,...mode,skip_analytics}));
+    await api.runFunction({}, {runner_id:runner,skip_analytics});
+    assert.deepEqual(JSON.parse(requests.at(-1).options.body).args,{runner_id:runner,skip_analytics});
+  }
+  assert.equal(requests.length,7);
+});
+
+test('runner reserves two bounded requests before allowing optional analytics',async()=>{
+  const reserve=2*RUNNER_LIMITS.request_ms+1000;
+  for(const [remaining,steps,skip] of [[reserve-1,2,true],[reserve,2,false],[reserve+1,2,false],[reserve+1,1,true]]) {
+    const f=fixture([{state:'complete'}],{limits:{duration_ms:remaining,steps}});
+    assert.equal((await f.run()).state,'complete');
+    const input=f.calls.find(call=>call.operation==='run').input;
+    assert.deepEqual(input,{runner_id:runner,...(skip?{skip_analytics:true}:{})});
+  }
+});
+
+test('analytics budget uses elapsed monotonic time including source loading despite wall-clock changes',async()=>{
+  const reserve=2*RUNNER_LIMITS.request_ms+1000;
+  for(const [elapsed,wallShift,skip] of [[80000,-3600000,true],[0,3600000,false]]) {
+    let monotonic=0,wall=start;
+    const f=fixture([{state:'complete'}],{limits:{duration_ms:reserve+79000},now:()=>wall,monotonic:()=>monotonic});
+    f.args.api.getFiles=async()=>{monotonic+=elapsed;wall+=wallShift;return {canonical_modules:canonical};};
+    assert.equal((await f.run()).state,'complete');
+    const call=f.calls.find(row=>row.operation==='run');
+    assert.deepEqual(call.input,{runner_id:runner,...(skip?{skip_analytics:true}:{})});
+    assert.equal(call.value.timeoutMs,Math.min(RUNNER_LIMITS.request_ms,reserve+79000-elapsed));
+  }
 });
 
 test('acknowledged completion prepares the dashboard once in a separate bounded optional request',async()=>{
@@ -290,6 +320,34 @@ test('terminal worker states and bare busy responses do not trigger further call
   for(const state of ['complete','partial','paused','disabled','blocked','failed','busy']) {
     const f=fixture([{state}]);assert.equal((await f.run()).state,state);assert.equal(f.calls.length,2);assert.deepEqual(f.waits,[]);
   }
+});
+
+test('personal analytics capability is required before loading or executing the worker',async()=>{
+  const marker='export const PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION=1;';
+  for(const check of [false,true])for(const capability of ['',`// ${marker}`,marker.replace('export ',''),marker.replace('const','let'),
+    ...['0','2','-1','null','NaN','"1"'].map(value=>marker.replace('VERSION=1',`VERSION=${value}`))]) {
+    let loads=0,requests=0;
+    const f=fixture([],{check,loadSources:()=>{loads++;return local;},api:{
+      getFiles:async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime'].replace(marker,capability)}}),
+      runFunction:async()=>{requests++;throw Error('must not execute');}}});
+    await assert.rejects(f.run(),{message:'BACKGROUND_MONITORING_STOPPED'});
+    assert.equal(loads,0);assert.equal(requests,0);
+  }
+});
+
+test('personal analytics logs expose bounded outcomes without provider details',async()=>{
+  const personal_analytics={state:'saved',period_days:30,captured_at:new Date(start).toISOString(),cookie:token,html:'private'};
+  const safe={state:'saved',period_days:30,captured_at:new Date(start).toISOString()};
+  const f=fixture([{state:'complete',personal_analytics}]);
+  assert.deepEqual(await f.run(),{state:'complete',personal_analytics:safe});
+  assert.deepEqual(f.output,[{state:'complete',personal_analytics:safe}]);
+  for(const row of [{state:'saved',period_days:30},{state:'fresh',period_days:365,captured_at:'bad'},
+    {state:'unavailable',reason:token},{state:'saved',period_days:90,captured_at:safe.captured_at},
+    {state:'limited',retry_at:'bad'},null]) {
+    if(row!==null)assert.throws(()=>monitoringSummary({state:'complete',personal_analytics:row}));
+  }
+  const partial=fixture([{state:'running',personal_analytics:safe}],{limits:{steps:1}});
+  assert.deepEqual(await partial.run(),{state:'partial',personal_analytics:safe});
 });
 
 test('deadline and step caps keep durable future work pending instead of calling early',async()=>{
