@@ -40,6 +40,8 @@ Rule evaluation buffers at most 25,000 history records and 16 MiB of their raw J
 
 Logs contain fixed status names, counts, dates, and sanitized failure categories, stages and HTTP status codes. Provider responses, addresses, gifts, credentials, private source, and remote error messages are not printed or uploaded as artifacts. A `partial` result means the runner reached a bound or saved work for a later wake-up; `blocked` or `failed` makes the workflow fail so the operator can investigate.
 
+After this runner's completed check is acknowledged, a deployed runtime advertising `PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1` can prepare one compact dashboard in a separate, best-effort request. It uses the most recently built valid pricing selection (or Actual rentals, Last 30 days), retaining account, wallet, reset and recognition boundaries. The request gets a 30-second transport allowance and a 25-second work deadline, must fit the existing runner budget, and is not retried. It reads saved records and writes only derived dashboard cache entries; it cannot refresh providers or change prices or monitoring results. Logs separately report `dashboard_preparation: prepared`, `skipped` or `failed`. A preparation failure leaves the successful monitoring outcome intact. Older runtimes skip this optional step. Both the updated Telegram runtime and the reviewed runner on the default branch are required to enable it.
+
 ## Credential trust and repository protection
 
 `TGCLOUD_TOKEN` is the full Telegram app administration credential, **not a restricted monitoring token**. Someone who obtains it can administer the app beyond this worker. The worker intentionally uses a narrow fixed operation, but that does not reduce the credential's underlying authority.

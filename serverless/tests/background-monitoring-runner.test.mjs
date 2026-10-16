@@ -56,6 +56,48 @@ test('administrative transport pins the official get/run protocol, identity and 
   for(const status_only of [false,'true',1,null,{}])assert.throws(()=>api.runFunction({}, {runner_id:runner,status_only}));
   for(const retry of [true,false])assert.throws(()=>api.runFunction({}, {runner_id:runner,status_only:true,retry}));
   assert.equal(requests.length,4);
+  await api.runFunction({}, {runner_id:runner,prewarm_only:true});
+  assert.deepEqual(JSON.parse(requests[4].options.body).args,{runner_id:runner,prewarm_only:true});
+  for(const prewarm_only of [false,'true',1,null,{}])assert.throws(()=>api.runFunction({}, {runner_id:runner,prewarm_only}));
+  for(const input of [{retry:true},{retry:false},{status_only:true}])assert.throws(()=>api.runFunction({}, {runner_id:runner,prewarm_only:true,...input}));
+  assert.equal(requests.length,5);
+});
+
+test('acknowledged completion prepares the dashboard once in a separate bounded optional request',async()=>{
+  const f=fixture([{state:'complete',checked:2,total:2,runner_acknowledged:true},{state:'prepared',private_data:token}]);
+  f.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']+'\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;'}});
+  assert.deepEqual(await f.run(),{state:'complete',checked:2,total:2});
+  assert.deepEqual(f.calls.map(call=>call.input),[{runner_id:runner},{runner_id:runner,prewarm_only:true}]);
+  assert.equal(f.calls[1].value.timeoutMs,RUNNER_LIMITS.prewarm_ms);
+  assert.deepEqual(f.output,[{state:'complete',checked:2,total:2},{dashboard_preparation:'prepared'}]);
+});
+
+test('dashboard preparation errors never retry or convert a saved monitoring success to failure',async()=>{
+  for(const failure of [new MonitoringAdminError('network_error','prewarm'),{state:'failed'},{arbitrary:token}]) {
+    const f=fixture([{state:'complete',runner_acknowledged:true},failure]);
+    f.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']+'\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;'}});
+    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.equal(f.calls.length,2);assert.deepEqual(f.waits,[]);
+    assert.deepEqual(f.output,[{state:'complete'},{dashboard_preparation:'failed'}]);
+  }
+});
+
+test('dashboard preparation is skipped for old runtimes, unacknowledged cycles and exhausted budgets',async()=>{
+  for(const mode of ['old_runtime','unacknowledged','partial','time','steps']) {
+    const f=fixture([{state:mode==='partial'?'partial':'complete',runner_acknowledged:mode!=='unacknowledged'}],
+      mode==='time'?{limits:{duration_ms:RUNNER_LIMITS.prewarm_ms-1}}:mode==='steps'?{limits:{steps:1}}:{});
+    f.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']+(mode==='old_runtime'?'':'\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;')}});
+    assert.equal((await f.run()).state,mode==='partial'?'partial':'complete');
+    assert.equal(f.calls.length,1);assert.equal(f.output.length,1);
+  }
+});
+
+test('acknowledged lost-response recovery can prepare once without replaying the completed tick',async()=>{
+  const f=fixture([new MonitoringAdminError('network_error','tick'),{state:'complete',runner_acknowledged:true},{state:'skipped'}]);
+  f.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']+'\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;'}});
+  assert.deepEqual(await f.run(),{state:'complete'});
+  assert.deepEqual(f.calls.map(call=>call.input),[{runner_id:runner},{runner_id:runner,status_only:true},{runner_id:runner,prewarm_only:true}]);
+  assert.deepEqual(f.output.at(-1),{dashboard_preparation:'skipped'});
 });
 
 test('timeouts and remote errors are bounded and never echoed or retried',async()=>{

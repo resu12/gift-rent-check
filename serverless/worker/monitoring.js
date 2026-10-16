@@ -5,6 +5,7 @@ export const BACKGROUND_MONITORING_LIMITS = Object.freeze({
   cadence_ms: 6 * 60 * 60 * 1000, run_ms: 20 * 60 * 1000,
   lease_ms: 120000, history_steps: 100, history_resumes: 3, manual_retry_ms: 60000,
   gift_resumes: 1, gift_resume_ms: 300000, gift_history_reserve_ms: 300000, gift_attempts: 20, gift_daily_attempts: 1000,
+  dashboard_prepare_ms: 25000, dashboard_prepare_age_ms: 5 * 60 * 1000,
 });
 const STATES = new Set(['running', 'complete', 'partial', 'paused', 'blocked', 'failed']);
 const REASONS = new Set(['monitoring_paused', 'no_enabled_gifts', 'rules_changed', 'scope_changed',
@@ -104,7 +105,7 @@ export function projectBackgroundMonitoring(value, now = Date.now()) {
  * tick performs at most one provider step. It never resumes an unidentified job.
  */
 export function createBackgroundMonitoringWorker({repository, clock, captureScope, assertScope,
-  rules, gifts, history}) {
+  rules, gifts, history, dashboard}) {
   for (const fn of [repository?.read, repository?.append, clock, captureScope, assertScope,
     rules?.status, rules?.evaluate, gifts?.status, gifts?.start, gifts?.step,
     history?.status, history?.start, history?.step, history?.resume]) {
@@ -131,6 +132,29 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     if (runner_id !== undefined) result.runner_acknowledged = Boolean(ledger &&
       (ledger.run.last_runner_id === runner_id || ledger.run.id.startsWith(runner_id + ':')));
     return result;
+  }
+  // A separate invocation prepares derived display data only AFTER a successful
+  // run has been saved. It cannot claim/extend a run or repeat provider work.
+  // The hosting callback must bound its reads and fence any cache write to this
+  // exact completed run and scope. An old runtime simply lacks this capability.
+  async function prewarm({runner_id} = {}) {
+    if (typeof runner_id !== 'string' || !/^[a-f0-9]{64}$/.test(runner_id))
+      throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
+    if (dashboard?.version !== 1 || typeof dashboard.prewarm !== 'function') return {state: 'skipped'};
+    const saved = await repository.read(), at = await now(), ledger = validate(saved.state.background_monitoring);
+    const eligible = row => row?.state === 'complete' && row.run.stage === 'done'
+      && row.run.gift_complete && row.run.history_complete && row.run.lease === null
+      && (row.run.last_runner_id === runner_id || row.run.id.startsWith(runner_id + ':'))
+      && row.last_success_at === row.last_finished_at && time(row.last_finished_at) <= at
+      && time(row.last_finished_at) > at - BACKGROUND_MONITORING_LIMITS.dashboard_prepare_age_ms;
+    if (!eligible(ledger)) return {state: 'skipped'};
+    const input = {...context(ledger.run), prewarm_only: true, deadline: at + BACKGROUND_MONITORING_LIMITS.dashboard_prepare_ms};
+    await assertScope(ledger.run.scope, input);
+    const result = await dashboard.prewarm(input);
+    const current = validate((await repository.read()).state.background_monitoring);
+    await assertScope(ledger.run.scope, input);
+    if (!eligible(current) || current.run.id !== ledger.run.id || await now() > input.deadline) return {state: 'skipped'};
+    return {state: result?.prepared === true ? 'prepared' : 'skipped'};
   }
   async function append(saved, ledger, at, {allowScopeChange = false} = {}) {
     if (!allowScopeChange) await assertScope(ledger.run.scope, context(ledger.run));
@@ -499,7 +523,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
           const complete = ledger.run.gift_complete && ledger.run.history_complete;
           finished(ledger, at, complete ? 'complete' : 'partial', complete ? null : ledger.reason ?? 'history_partial');
         });
-        return reply(row, await now());
+        return {...reply(row, await now()), runner_acknowledged: true};
       }
       throw new BackgroundMonitoringError('BACKGROUND_STATE_INVALID');
     } catch (error) {
@@ -519,5 +543,5 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       }
     }
   }
-  return {tick, status};
+  return {tick, status, prewarm};
 }

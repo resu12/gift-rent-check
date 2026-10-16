@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createBackgroundMonitoringWorker, projectBackgroundMonitoring, BACKGROUND_MONITORING_LIMITS as LIMITS} from '../worker/monitoring.js';
+import {readFileSync} from 'node:fs';
+import vm from 'node:vm';
+import {createBackgroundMonitoringWorker, projectBackgroundMonitoring, BackgroundMonitoringError, BACKGROUND_MONITORING_LIMITS as LIMITS} from '../worker/monitoring.js';
 import {createCloudEngine} from '../tgcloud/lib/cloud-engine.js';
 import {streamedBody} from './fixtures/http-response.mjs';
 import {runBackgroundMonitoring,MonitoringAdminError} from '../tools/run-background-monitoring.mjs';
@@ -110,6 +112,81 @@ test('background worker refreshes gifts, then bounded history, then evaluates an
   assert.equal(result.background_monitoring.last_success_at, result.background_monitoring.last_finished_at);
   assert.equal(result.background_monitoring.next_check_at, '2026-10-14T18:00:00.000Z');
   assert.ok(f.events.every(event => event.records.length === 0 && event.raw_body === null));
+});
+
+test('dashboard preparation follows a saved completion in a separate provider-free operation', async () => {
+  const f = fixture(); let prepared;
+  f.dependencies.dashboard = {version: 1, prewarm: async context => {
+    assert.equal(f.state().background_monitoring.state, 'complete');
+    assert.equal(context.lease, null); assert.equal(context.prewarm_only, true);
+    assert.equal(context.deadline, f.at() + LIMITS.dashboard_prepare_ms);
+    prepared = context; return {prepared: true, private_dashboard: 'must not be returned'};
+  }};
+  const result = await f.complete(); assert.equal(result.runner_acknowledged, true);
+  assert.equal(prepared, undefined, 'The completing provider invocation never builds a dashboard.');
+  const before = f.state(), revision = f.revision(), calls = [...f.calls];
+  assert.deepEqual(await createBackgroundMonitoringWorker(f.dependencies).prewarm({runner_id: RUNNER}), {state: 'prepared'});
+  assert.equal(prepared.run_id, before.background_monitoring.run.id);
+  assert.deepEqual(f.state(), before); assert.equal(f.revision(), revision); assert.deepEqual(f.calls, calls);
+});
+
+test('dashboard preparation passes its terminal-run context through the real bridge scope guard', async () => {
+  const f = fixture(); await f.complete();
+  const before = f.state(), revision = f.revision(), calls = [...f.calls], contexts = [];
+  const assertScope = f.dependencies.assertScope;
+  let prepared;
+  const source = readFileSync(new URL('../worker/entrypoint.js', import.meta.url), 'utf8')
+    .replace(/^import[^\n]+\n/gm, '').replace('export default async function', 'return async function');
+  const create = vm.runInNewContext(`(function(createPrivateBackgroundMonitoringAccess,PRIVATE_BACKGROUND_MONITORING_VERSION,PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION,createBackgroundMonitoringWorker,BackgroundMonitoringError){${source}})`);
+  const entrypoint = create(check => ({...f.dependencies,
+    assertScope: async (scope, context) => {
+      await assertScope(scope); contexts.push(context); await check(context);
+    },
+    dashboard: {version: 1, prewarm: async context => {
+      await check(context); prepared = context; return {prepared: true};
+    }},
+  }), 1, 1, createBackgroundMonitoringWorker, BackgroundMonitoringError);
+  assert.deepEqual(await entrypoint({runner_id: RUNNER, prewarm_only: true}, {background_worker: 'price-monitoring-v1'}), {state: 'prepared'});
+  assert.equal(contexts.length, 2);
+  assert.ok(contexts.every(context => context === prepared), 'Both scope checks use the same preparation context as the cache callback.');
+  assert.equal(prepared.prewarm_only, true); assert.equal(prepared.lease, null);
+  assert.equal(prepared.run_id, before.background_monitoring.run.id);
+  assert.equal(prepared.deadline, f.at() + LIMITS.dashboard_prepare_ms);
+  assert.deepEqual(f.state(), before); assert.equal(f.revision(), revision); assert.deepEqual(f.calls, calls);
+});
+
+test('dashboard preparation skips unacknowledged, incomplete, expired and unsupported runs', async () => {
+  for (const mode of ['other_runner', 'incomplete', 'expired', 'old_runtime', 'unsupported_version']) {
+    const f = fixture(); await f.complete(); let calls = 0;
+    if (mode !== 'old_runtime') f.dependencies.dashboard = {version: mode === 'unsupported_version' ? 2 : 1,
+      prewarm: async () => {calls++; return {prepared: true};}};
+    if (mode === 'incomplete') f.mutate(state => {state.background_monitoring.run.history_complete = false;});
+    if (mode === 'expired') f.advance(LIMITS.dashboard_prepare_age_ms);
+    const before = f.state(), revision = f.revision();
+    assert.deepEqual(await createBackgroundMonitoringWorker(f.dependencies).prewarm({runner_id: mode === 'other_runner' ? OTHER : RUNNER}), {state: 'skipped'});
+    assert.equal(calls, 0); assert.deepEqual(f.state(), before); assert.equal(f.revision(), revision);
+  }
+});
+
+test('dashboard preparation never changes successful monitoring on cache failure or scope changes', async () => {
+  for (const mode of ['failure', 'scope_before', 'scope_after', 'replaced', 'deadline']) {
+    const f = fixture(); await f.complete(); const completed = copy(f.state().background_monitoring); let calls = 0;
+    f.dependencies.dashboard = {version: 1, prewarm: async () => {
+      calls++;
+      if (mode === 'failure') throw Error('cache unavailable');
+      if (mode === 'scope_after') f.changeScope({wallet_revision: 1});
+      if (mode === 'replaced') f.mutate(state => {state.background_monitoring.run.id = OTHER + ':' + START;});
+      if (mode === 'deadline') f.advance(LIMITS.dashboard_prepare_ms + 1);
+      return {prepared: true};
+    }};
+    if (mode === 'scope_before') f.changeScope({wallet_revision: 1});
+    const operation = () => createBackgroundMonitoringWorker(f.dependencies).prewarm({runner_id: RUNNER});
+    if (['failure', 'scope_before', 'scope_after'].includes(mode)) await assert.rejects(operation);
+    else assert.deepEqual(await operation(), {state: 'skipped'});
+    if (mode === 'scope_before') assert.equal(calls, 0);
+    assert.equal(f.state().background_monitoring.state, 'complete');
+    assert.equal(f.state().background_monitoring.last_success_at, completed.last_success_at);
+  }
 });
 
 test('the live getJobs requires_resume hint does not restart a healthy history invocation', async () => {
