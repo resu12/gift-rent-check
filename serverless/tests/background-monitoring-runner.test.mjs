@@ -103,12 +103,19 @@ test('acknowledged completion prepares the dashboard once in a separate bounded 
 });
 
 test('dashboard preparation errors never retry or convert a saved monitoring success to failure',async()=>{
-  for(const failure of [new MonitoringAdminError('network_error','prewarm'),{state:'failed'},{arbitrary:token}]) {
+  for(const [failure,expected] of [
+    [new MonitoringAdminError('network_error','prewarm'),{error:'network_error'}],
+    [Object.assign(new MonitoringAdminError('remote_error','prewarm',400,'execution',400),{description:token,parameters:{log:[token]}}),
+      {error:'remote_error',http_status:400,remote_error:'execution',remote_code:400}],
+    [Error(token),{error:'unexpected_error'}],
+    [{state:'failed'},{error:'invalid_result'}],[{arbitrary:token},{error:'invalid_result'}],
+  ]) {
     const f=fixture([{state:'complete',runner_acknowledged:true},failure]);
     f.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']+'\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;'}});
     assert.deepEqual(await f.run(),{state:'complete'});
     assert.equal(f.calls.length,2);assert.deepEqual(f.waits,[]);
-    assert.deepEqual(f.output,[{state:'complete'},{dashboard_preparation:'failed'}]);
+    assert.deepEqual(f.output,[{state:'complete'},{dashboard_preparation:'failed',...expected,stage:'prewarm'}]);
+    assert.ok(!JSON.stringify(f.output).includes(token));
   }
 });
 
@@ -376,6 +383,15 @@ test('CLI failure logs contain only safe enums even when the administrative fail
 test('transport diagnostics distinguish HTTP errors, malformed envelopes and remote execution failures without bodies',async()=>{
   for(const [response,expected] of [
     [new Response(token,{status:502}),{reason:'http_error',http_status:502}],
+    [new Response(token,{status:400}),{reason:'http_error',http_status:400}],
+    [Response.json({secret:token},{status:403}),{reason:'http_error',http_status:403}],
+    [Response.json({ok:true,result:{secret:token}},{status:400}),{reason:'http_error',http_status:400}],
+    [Response.json({ok:false,error_type:'CODE_RUN_FAILED',error_code:400,description:token,parameters:{log:[token]}},{status:400}),
+      {reason:'remote_error',http_status:400,remote_error:'execution',remote_code:400}],
+    [Response.json({ok:false,error_type:'ENDPOINT_ERROR',error_code:token,description:token},{status:400}),
+      {reason:'remote_error',http_status:400,remote_error:'endpoint'}],
+    [Response.json({ok:false,error_type:token,error_code:999999999,description:token},{status:400}),
+      {reason:'remote_error',http_status:400,remote_error:'other'}],
     [new Response('{'+token),{reason:'invalid_json',http_status:200}],
     [Response.json({ok:true,secret:token}),{reason:'invalid_envelope',http_status:200}],
     [Response.json({ok:true,secret:token},{status:500}),{reason:'invalid_envelope',http_status:500}],
@@ -394,15 +410,40 @@ test('transport diagnostics distinguish HTTP errors, malformed envelopes and rem
 });
 
 test('an explicit execution error is never recovered regardless of its HTTP status',async()=>{
-  for(const status of [200,500]) {
+  for(const status of [200,400,500])for(const error_type of ['INTERNAL','CODE_RUN_FAILED']) {
     let writes=0;
     const api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async(url)=>{
       if(url.endsWith('/get'))return Response.json({ok:true,result:{canonical_modules:canonical}});
-      writes++;return Response.json({ok:false,error_type:'INTERNAL',error_code:500,description:token},{status});
+      writes++;return Response.json({ok:false,error_type,error_code:500,description:token},{status});
     }});
     const f=fixture([],{api,retry:true});await assert.rejects(f.run(),error=>error.reason==='remote_error'&&error.http_status===status);
     assert.equal(writes,1);assert.deepEqual(f.waits,[]);
   }
+});
+
+test('unknown and oversized client-error bodies preserve HTTP failures without retrying',async()=>{
+  for(const body of [token,JSON.stringify({ok:true,result:{secret:token}}),'x'.repeat(RUNNER_LIMITS.response_bytes+1)]) {
+    let writes=0;
+    const api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async(url)=>{
+      if(url.endsWith('/get'))return Response.json({ok:true,result:{canonical_modules:canonical}});
+      writes++;return new Response(body,{status:400});
+    }});
+    const f=fixture([],{api,retry:true});
+    await assert.rejects(f.run(),error=>error.reason==='http_error'&&error.http_status===400&&!JSON.stringify(error).includes(token));
+    assert.equal(writes,1);assert.deepEqual(f.waits,[]);
+  }
+});
+
+test('CLI execution-error diagnostics never include the host description or parameters',async t=>{
+  let executions=0;t.mock.method(globalThis,'fetch',async url=>{
+    if(url.endsWith('/get'))return Response.json({ok:true,result:{canonical_modules:canonical}});
+    executions++;return Response.json({ok:false,error_type:'CODE_RUN_FAILED',error_code:400,description:token,
+      parameters:{log:[token],module:token,time:0.012}},{status:400});
+  });
+  const output=[],exit=await monitoringMain({args:['--app-id','123'],env:{BACKGROUND_MONITORING_ENABLED:'true',TGCLOUD_TOKEN:token},emit:value=>output.push(value)});
+  assert.equal(exit,1);assert.equal(executions,1);
+  assert.deepEqual(output,[{state:'failed',error:'remote_error',stage:'tick',http_status:400,remote_error:'execution',remote_code:400}]);
+  assert.ok(!JSON.stringify(output).includes(token));
 });
 
 test('timeouts bound header and body reads even when a transport ignores abort',async()=>{
@@ -412,6 +453,10 @@ test('timeouts bound header and body reads even when a transport ignores abort',
   const body=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async()=>new Response(new ReadableStream({cancel(){cancelled=true;}}))});
   await assert.rejects(body.runFunction({}, {runner_id:runner},{timeoutMs:5}),error=>error.reason==='request_timeout'&&error.stage==='tick');
   assert.equal(cancelled,true);
+  let errorCancelled=false;
+  const errorBody=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async()=>new Response(new ReadableStream({cancel(){errorCancelled=true;}}),{status:400})});
+  await assert.rejects(errorBody.runFunction({}, {runner_id:runner},{timeoutMs:5}),error=>error.reason==='http_error'&&error.http_status===400&&error.stage==='tick');
+  assert.equal(errorCancelled,true);
 });
 
 test('actual worker sources fit the administrative closure without reading local ignored configuration',()=>{

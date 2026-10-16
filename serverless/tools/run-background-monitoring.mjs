@@ -20,7 +20,7 @@ export class MonitoringAdminError extends Error {
     super('BACKGROUND_MONITORING_STOPPED');
     this.reason=reasons.has(reason)?reason:'unexpected_error';this.stage=stages.has(stage)?stage:'runner';
     if(Number.isInteger(httpStatus)&&httpStatus>=100&&httpStatus<=599)this.http_status=httpStatus;
-    if(['internal','endpoint','other'].includes(remoteError))this.remote_error=remoteError;
+    if(['internal','endpoint','execution','other'].includes(remoteError))this.remote_error=remoteError;
     if(Number.isInteger(remoteCode)&&remoteCode>=100&&remoteCode<=599)this.remote_code=remoteCode;
   }
 }
@@ -57,7 +57,8 @@ async function responseJson(response,maxBytes,stage,signal) {
   finally {signal.removeEventListener('abort',abort);cancel(reader);}
   let envelope;try{envelope=JSON.parse(Buffer.concat(chunks).toString('utf8'));}catch{fail('invalid_json',stage,response.status);}
   if(object(envelope)&&envelope.ok===false)fail('remote_error',stage,response.status,
-    envelope.error_type==='INTERNAL'?'internal':envelope.error_type==='ENDPOINT_ERROR'?'endpoint':'other',envelope.error_code);
+    envelope.error_type==='INTERNAL'?'internal':envelope.error_type==='ENDPOINT_ERROR'?'endpoint'
+      :envelope.error_type==='CODE_RUN_FAILED'?'execution':'other',envelope.error_code);
   if(!object(envelope)||envelope.ok!==true||!Object.hasOwn(envelope,'result'))fail('invalid_envelope',stage,response.status);
   return envelope.result;
 }
@@ -72,13 +73,25 @@ export function createMonitoringAdminApi({token,appId,env=process.env,fetch:requ
     if(!bounded(timeoutMs,RUNNER_LIMITS.request_ms))fail('invalid_request',stage);
     const controller=new AbortController();let timer,response;
     const timeout=new Promise((_,reject)=>{timer=setTimeout(()=>{controller.abort();cancel(response?.body);
-      reject(new MonitoringAdminError('request_timeout',stage,response?.status));},timeoutMs);});
+      // Once a client-error status is known, a stalled error body must not
+      // turn that non-retryable response into a recoverable timeout.
+      reject(new MonitoringAdminError(response?.status>=400&&response.status<=499?'http_error':'request_timeout',stage,response?.status));},timeoutMs);});
     const work=(async()=>{
       response=await request(base+path,{method:body===undefined?'GET':'POST',redirect:'error',signal:controller.signal,
         headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})});
       if(controller.signal.aborted){cancel(response?.body);fail('request_timeout',stage,response?.status);}
       if(response?.redirected||response?.status>=300&&response.status<400)fail('http_error',stage,response?.status);
       if(!response?.ok) {
+        if(response?.status>=400&&response.status<=499&&response.body) {
+          // The host also returns execution-error envelopes with HTTP 400.
+          // Retain only their fixed diagnostic fields; unknown bodies keep
+          // the original non-retryable HTTP classification.
+          try {await responseJson(response,maxBytes,stage,controller.signal);}
+          catch(error) {
+            if(error instanceof MonitoringAdminError&&error.reason==='remote_error')throw error;
+            if(controller.signal.aborted)fail('http_error',stage,response.status);
+          }
+        }
         if(response?.status>=500&&response.status<=599) {
           // A hosting execution error is not a transient gateway failure, even
           // if it is returned with HTTP 500 rather than an HTTP 200 envelope.
@@ -214,7 +227,7 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
           const prepared=await api.runFunction(sources,{runner_id:runner,prewarm_only:true},{timeoutMs:cap.prewarm_ms});
           if(!['prepared','skipped'].includes(prepared?.result?.state))fail('invalid_result','prewarm');
           emit({dashboard_preparation:prepared.result.state});
-        } catch {emit({dashboard_preparation:'failed'});}
+        } catch(error) {emit({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm'});}
       }
       return summary;
     }
