@@ -112,6 +112,56 @@ test('background worker refreshes gifts, then bounded history, then evaluates an
   assert.ok(f.events.every(event => event.records.length === 0 && event.raw_body === null));
 });
 
+test('dashboard preparation follows a saved completion in a separate provider-free operation', async () => {
+  const f = fixture(); let prepared;
+  f.dependencies.dashboard = {version: 1, prewarm: async context => {
+    assert.equal(f.state().background_monitoring.state, 'complete');
+    assert.equal(context.lease, null); assert.equal(context.prewarm_only, true);
+    assert.equal(context.deadline, f.at() + LIMITS.dashboard_prepare_ms);
+    prepared = context; return {prepared: true, private_dashboard: 'must not be returned'};
+  }};
+  const result = await f.complete(); assert.equal(result.runner_acknowledged, true);
+  assert.equal(prepared, undefined, 'The completing provider invocation never builds a dashboard.');
+  const before = f.state(), revision = f.revision(), calls = [...f.calls];
+  assert.deepEqual(await createBackgroundMonitoringWorker(f.dependencies).prewarm({runner_id: RUNNER}), {state: 'prepared'});
+  assert.equal(prepared.run_id, before.background_monitoring.run.id);
+  assert.deepEqual(f.state(), before); assert.equal(f.revision(), revision); assert.deepEqual(f.calls, calls);
+});
+
+test('dashboard preparation skips unacknowledged, incomplete, expired and unsupported runs', async () => {
+  for (const mode of ['other_runner', 'incomplete', 'expired', 'old_runtime', 'unsupported_version']) {
+    const f = fixture(); await f.complete(); let calls = 0;
+    if (mode !== 'old_runtime') f.dependencies.dashboard = {version: mode === 'unsupported_version' ? 2 : 1,
+      prewarm: async () => {calls++; return {prepared: true};}};
+    if (mode === 'incomplete') f.mutate(state => {state.background_monitoring.run.history_complete = false;});
+    if (mode === 'expired') f.advance(LIMITS.dashboard_prepare_age_ms);
+    const before = f.state(), revision = f.revision();
+    assert.deepEqual(await createBackgroundMonitoringWorker(f.dependencies).prewarm({runner_id: mode === 'other_runner' ? OTHER : RUNNER}), {state: 'skipped'});
+    assert.equal(calls, 0); assert.deepEqual(f.state(), before); assert.equal(f.revision(), revision);
+  }
+});
+
+test('dashboard preparation never changes successful monitoring on cache failure or scope changes', async () => {
+  for (const mode of ['failure', 'scope_before', 'scope_after', 'replaced', 'deadline']) {
+    const f = fixture(); await f.complete(); const completed = copy(f.state().background_monitoring); let calls = 0;
+    f.dependencies.dashboard = {version: 1, prewarm: async () => {
+      calls++;
+      if (mode === 'failure') throw Error('cache unavailable');
+      if (mode === 'scope_after') f.changeScope({wallet_revision: 1});
+      if (mode === 'replaced') f.mutate(state => {state.background_monitoring.run.id = OTHER + ':' + START;});
+      if (mode === 'deadline') f.advance(LIMITS.dashboard_prepare_ms + 1);
+      return {prepared: true};
+    }};
+    if (mode === 'scope_before') f.changeScope({wallet_revision: 1});
+    const operation = () => createBackgroundMonitoringWorker(f.dependencies).prewarm({runner_id: RUNNER});
+    if (['failure', 'scope_before', 'scope_after'].includes(mode)) await assert.rejects(operation);
+    else assert.deepEqual(await operation(), {state: 'skipped'});
+    if (mode === 'scope_before') assert.equal(calls, 0);
+    assert.equal(f.state().background_monitoring.state, 'complete');
+    assert.equal(f.state().background_monitoring.last_success_at, completed.last_success_at);
+  }
+});
+
 test('the live getJobs requires_resume hint does not restart a healthy history invocation', async () => {
   const f = fixture(); await f.until('history_poll');
   const context = f.state().background_monitoring.run;

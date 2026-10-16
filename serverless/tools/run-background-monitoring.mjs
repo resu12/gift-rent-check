@@ -10,11 +10,11 @@ import {adminModuleSources} from './admin-module-sources.mjs';
 import {requireId,validateAuthenticatedDestination,validateServerlessEnvironment} from './destination.mjs';
 
 export const MONITORING_ENDPOINT='endpoints/backgroundMonitoringTick';
-export const RUNNER_LIMITS=Object.freeze({duration_ms:20*60*1000,steps:200,request_ms:90000,source_bytes:8*1024*1024,response_bytes:1024*1024,sleep_ms:60000,recoveries:3});
+export const RUNNER_LIMITS=Object.freeze({duration_ms:20*60*1000,steps:200,request_ms:90000,source_bytes:8*1024*1024,response_bytes:1024*1024,sleep_ms:60000,recoveries:3,prewarm_ms:30000});
 const states=new Set(['running','waiting','busy','complete','paused','disabled','partial','blocked','failed']);
 const object=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 const reasons=new Set(['invalid_request','invalid_response','invalid_json','invalid_envelope','invalid_result','response_too_large','network_error','request_timeout','http_error','remote_error','capability_missing','source_error','unacknowledged_status','recovery_exhausted','unexpected_error']);
-const stages=new Set(['configuration','get_files','sources','tick','status','runner']);
+const stages=new Set(['configuration','get_files','sources','tick','status','prewarm','runner']);
 export class MonitoringAdminError extends Error {
   constructor(reason,stage='runner',httpStatus,remoteError,remoteCode) {
     super('BACKGROUND_MONITORING_STOPPED');
@@ -96,11 +96,12 @@ export function createMonitoringAdminApi({token,appId,env=process.env,fetch:requ
   return {
     getFiles:({timeoutMs}={})=>call('/get',undefined,RUNNER_LIMITS.source_bytes,'get_files',timeoutMs),
     runFunction:(sources,input,{timeoutMs}={})=>{
-      if(!object(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only'].includes(key))
+      if(!object(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only'].includes(key))
         ||typeof input.runner_id!=='string'||!/^[0-9a-f]{64}$/.test(input.runner_id)
         ||Object.hasOwn(input,'retry')&&typeof input.retry!=='boolean'
-        ||Object.hasOwn(input,'status_only')&&(input.status_only!==true||Object.hasOwn(input,'retry')))fail('invalid_request','configuration');
-      return call('/run',{module:MONITORING_ENDPOINT,sources,args:input,ctx:{background_worker:'price-monitoring-v1'}},RUNNER_LIMITS.response_bytes,input.status_only?'status':'tick',timeoutMs);
+        ||Object.hasOwn(input,'status_only')&&(input.status_only!==true||Object.hasOwn(input,'retry'))
+        ||Object.hasOwn(input,'prewarm_only')&&(input.prewarm_only!==true||Object.hasOwn(input,'retry')||Object.hasOwn(input,'status_only')))fail('invalid_request','configuration');
+      return call('/run',{module:MONITORING_ENDPOINT,sources,args:input,ctx:{background_worker:'price-monitoring-v1'}},RUNNER_LIMITS.response_bytes,input.prewarm_only?'prewarm':input.status_only?'status':'tick',timeoutMs);
     },
   };
 }
@@ -142,6 +143,7 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
   if(typeof runtime!=='string'||!/^\s*export\s+const\s+PRIVATE_BACKGROUND_MONITORING_VERSION\s*=\s*1\s*;/m.test(runtime)
     ||!/^\s*export\s+const\s+PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION\s*=\s*1\s*;/m.test(runtime)
     ||!/^\s*export\s+function\s+createPrivateBackgroundMonitoringAccess\s*\(/m.test(runtime))fail('capability_missing','sources');
+  const canPrewarm=/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION\s*=\s*1\s*;/m.test(runtime);
   const {coreSource,entrypointSource}=loadSources();
   const sources=adminModuleSources(deployed.canonical_modules,{'lib/background-monitoring':coreSource},MONITORING_ENDPOINT,entrypointSource);
   if(check){const result={state:'ready',modules:Object.keys(sources).length};emit(result);return result;}
@@ -181,7 +183,22 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
     }
     summary=observed;
     statusOnly=false;emit(summary);
-    if(!['running','waiting','busy'].includes(summary.state)||summary.state==='busy'&&!summary.retry_at)return summary;
+    if(!['running','waiting','busy'].includes(summary.state)||summary.state==='busy'&&!summary.retry_at) {
+      // Best effort, at most once, in its OWN hosting request. Never turn a
+      // saved successful check into a failure because preparing display data
+      // failed or its response was lost. Old runtimes and old-cycle completion
+      // replies cannot authorize this extra work. Reserve the entire 30s read
+      // budget and count the request against the invocation's step limit.
+      if(summary.state==='complete'&&response.result.runner_acknowledged===true&&canPrewarm
+        &&step+1<cap.steps&&remaining()>=cap.prewarm_ms) {
+        try {
+          const prepared=await api.runFunction(sources,{runner_id:runner,prewarm_only:true},{timeoutMs:cap.prewarm_ms});
+          if(!['prepared','skipped'].includes(prepared?.result?.state))fail('invalid_result','prewarm');
+          emit({dashboard_preparation:prepared.result.state});
+        } catch {emit({dashboard_preparation:'failed'});}
+      }
+      return summary;
+    }
     const current=now();if(!Number.isSafeInteger(current)||current<=0)fail();
     // A running step already commits the provider's next permitted time.
     // Do not add another second after network/host work has consumed that
