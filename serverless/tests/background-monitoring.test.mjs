@@ -10,7 +10,7 @@ import {runBackgroundMonitoring,MonitoringAdminError,RUNNER_LIMITS} from '../too
 const START = Date.parse('2026-10-14T12:00:00Z'), RUNNER = 'a'.repeat(64), OTHER = 'b'.repeat(64);
 const address = n => `0:${n.toString(16).padStart(64, '0')}`, copy = value => structuredClone(value);
 function deferred() {let resolve; const promise = new Promise(done => {resolve = done;}); return {promise, resolve};}
-function fixture() {
+function fixture({continuations = false} = {}) {
   let at = START, revision = 0, state = {job: null, unrelated: {retained: true}}, nextGift = 1, nextJob = 1;
   let scope = {wallet: address(1), wallet_revision: 0, credential_version: 1, session_generation: 1};
   const policy = {wallet: address(1), paused: false, policies: [2, 3].map(n => ({nft_address: address(n), enabled: true, paused: false})), proposals: []};
@@ -19,7 +19,12 @@ function fixture() {
     async read() {return {revision, state: copy(state)};},
     async append(expected, event, walletFence = null) {
       if (expected !== revision || walletFence !== null && walletFence !== scope.wallet_revision) return false;
-      state = copy(event.state); events.push(copy(event)); revision++; return true;
+      const next = copy(event.state);
+      // Existing cases also protect compatibility with pre-continuation durable
+      // checkpoints. New continuation cases explicitly keep the current shape.
+      if (!continuations && next.background_monitoring?.run.id !== state.background_monitoring?.run.id)
+        delete next.background_monitoring.run.continuation;
+      state = next; events.push(copy(event)); revision++; return true;
     },
   };
   const contextCheck = context => {
@@ -208,61 +213,68 @@ test('an old evaluation checkpoint with insufficient server time never needs an 
   assert.equal(f.calls.filter(call=>call==='rules.evaluate').length,1);
 });
 
-test('slow source loading cannot spend the driver remaining time on analytics before rule evaluation',async()=>{
-  const reserve=2*RUNNER_LIMITS.request_ms+1000;
-  for(const remaining of [40000,reserve-1,reserve]) {
-    const f=fixture(),inputs=[];let analyticsCalls=0,arrived=false;
+test('slow source loading checkpoints analytics for a new runner instead of losing rule evaluation',async()=>{
+  const reserve=2*RUNNER_LIMITS.request_ms+RUNNER_LIMITS.prewarm_ms+RUNNER_LIMITS.analytics_handoff_ms;
+  for(const remaining of [40000,reserve-1,reserve,400000]) {
+    const f=fixture({continuations:true}),inputs=[],output=[];let analyticsCalls=0,arrived=false,sourceDelay=true;
     f.dependencies.analytics={version:1,refresh:async()=>{
       analyticsCalls++;f.advance(LIMITS.analytics_refresh_ms);
       return {state:'saved',period_days:30,captured_at:new Date(f.at()).toISOString()};
     }};
     const evaluate=f.dependencies.rules.evaluate;
     f.dependencies.rules.evaluate=async context=>{f.advance(20000);return evaluate(context);};
+    f.dependencies.dashboard={version:1,prewarm:async()=>({prepared:true})};
     const api={getFiles:async()=>{
-      f.advance(80000);
+      if(sourceDelay)f.advance(80000);sourceDelay=false;
       return {canonical_modules:{'lib/private-config':'export const ownerTelegramId=42;','lib/runtime':
-        'export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;\nexport const PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION=1;\nexport const PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION=1;\nexport function createPrivateBackgroundMonitoringAccess() {}'}};
+        'export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;\nexport const PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION=1;\nexport const PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION=1;\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;\nexport function createPrivateBackgroundMonitoringAccess() {}'}};
     },runFunction:async(_sources,input,{timeoutMs})=>{
       const at=f.at(),stage=f.state().background_monitoring?.run.stage;
       inputs.push({input:{...input},stage,at});
-      if(stage==='analytics'&&remaining===40000) {
-        assert.equal(f.state().background_monitoring.run.deadline-f.at(),120000,
-          'The worker still sees 120 seconds although source loading consumed 80 driver seconds.');
-      }
-      const result=await createBackgroundMonitoringWorker(f.dependencies).tick(input);
+      const worker=createBackgroundMonitoringWorker(f.dependencies);
+      const result=await worker[input.status_only?'status':input.prewarm_only?'prewarm':'tick'](input);
       assert.ok(f.at()-at<=timeoutMs,'Every request completes within the remaining driver allowance.');
       if(!arrived&&f.state().background_monitoring?.run.stage==='analytics') {
         arrived=true;f.advance(START+RUNNER_LIMITS.duration_ms-remaining-f.at());
       }
       return {result};
     }};
-    const result=await runBackgroundMonitoring({api,enabled:true,random:()=>RUNNER,
+    let result=await runBackgroundMonitoring({api,enabled:true,random:()=>RUNNER,emit:value=>output.push(value),
       now:f.at,monotonic:()=>f.at()-START,sleep:async ms=>f.advance(ms)});
-    const skip=remaining<reserve,analyticsTick=inputs.find(call=>call.stage==='analytics');
-    assert.equal(result.state,'complete');assert.ok(arrived);assert.ok(analyticsTick);
-    assert.equal(analyticsTick.input.skip_analytics,skip?true:undefined);
-    assert.equal(analyticsCalls,skip?0:1);
+    assert.ok(arrived);assert.ok(f.at()<START+RUNNER_LIMITS.duration_ms);
+    const frozen=f.state().background_monitoring.run;
+    assert.ok(inputs.every(call=>call.input.skip_analytics===undefined));
+    if(remaining<400000) {
+      assert.equal(result.state,'partial');assert.equal(output.some(row=>row.dashboard_preparation),false);
+      assert.equal(f.calls.filter(call=>call==='rules.evaluate').length,0);
+      assert.equal(analyticsCalls,remaining>=reserve?1:0);
+      if(remaining>=RUNNER_LIMITS.request_ms)assert.equal(result.continuation_pending,true);
+      f.advance(Math.max(frozen.deadline+1,frozen.continuation.resume_at)-f.at());
+      result=await runBackgroundMonitoring({api,enabled:true,random:()=>OTHER,emit:value=>output.push(value),
+        now:f.at,monotonic:()=>f.at()-START,sleep:async ms=>f.advance(ms)});
+      assert.equal(f.state().background_monitoring.run.id,frozen.id);
+      assert.equal(f.state().background_monitoring.run.history_after_at,frozen.history_after_at);
+    }
+    assert.equal(result.state,'complete');assert.equal(analyticsCalls,1);
     assert.equal(f.calls.filter(call=>call==='rules.evaluate').length,1);
-    assert.ok(f.at()<START+RUNNER_LIMITS.duration_ms);
-    assert.equal(f.state().background_monitoring.state,'complete');
-    assert.equal(result.personal_analytics.state,skip?'unavailable':'saved');
-    if(skip)assert.equal(result.personal_analytics.reason,'run_budget');
+    assert.equal(result.personal_analytics.state,'saved');
+    assert.equal(output.filter(row=>row.dashboard_preparation==='prepared').length,1);
   }
 });
 
-test('the final runner request skips optional analytics and still completes rule evaluation',async()=>{
+test('a runner with only a status request left cannot start optional analytics or mutate the checkpoint',async()=>{
   const f=fixture();let analyticsCalls=0;
   f.dependencies.analytics={version:1,refresh:async()=>{analyticsCalls++;throw Error('must not request');}};
-  await f.until('analytics');const inputs=[];
+  await f.until('analytics');const inputs=[],before=f.state();
   const result=await runBackgroundMonitoring({enabled:true,random:()=>RUNNER,limits:{steps:1},now:f.at,monotonic:()=>f.at()-START,
     api:{getFiles:async()=>({canonical_modules:{'lib/private-config':'export const ownerTelegramId=42;','lib/runtime':
       'export const PRIVATE_BACKGROUND_MONITORING_VERSION=1;\nexport const PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION=1;\nexport const PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION=1;\nexport function createPrivateBackgroundMonitoringAccess() {}'}}),
-      runFunction:async(_sources,input)=>{inputs.push(input);return {result:await createBackgroundMonitoringWorker(f.dependencies).tick(input)};}},
+      runFunction:async(_sources,input)=>{inputs.push(input);return {result:await createBackgroundMonitoringWorker(f.dependencies).status(input)};}},
     sleep:async ms=>f.advance(ms)});
-  assert.equal(result.state,'complete');assert.equal(analyticsCalls,0);
-  assert.deepEqual(inputs,[{runner_id:RUNNER,skip_analytics:true}]);
-  assert.deepEqual(result.personal_analytics,{state:'unavailable',reason:'run_budget'});
-  assert.equal(f.calls.filter(call=>call==='rules.evaluate').length,1);
+  assert.equal(result.state,'partial');assert.equal(analyticsCalls,0);
+  assert.deepEqual(inputs,[{runner_id:RUNNER,status_only:true}]);
+  assert.deepEqual(f.state(),before);
+  assert.equal(f.calls.filter(call=>call==='rules.evaluate').length,0);
 });
 
 test('pre-upgrade evaluation checkpoints refresh analytics once without repeating gift or history work', async () => {
@@ -1247,4 +1259,238 @@ test('a delayed old runner cannot acknowledge or overwrite a newer lease', async
   assert.equal(replacement.state, 'running'); const revision = f.revision();
   wait.resolve(); await first; assert.equal(f.revision(), revision);
   assert.equal(f.calls.filter(c => c === 'gifts.start').length, 1);
+});
+
+test('continuation hands off a full history segment without changing the cycle or admitting its old runner', async () => {
+  const f = fixture({continuations: true}); await f.until('history_poll');
+  f.mutate(saved => {saved.background_monitoring.run.history_steps = LIMITS.history_steps;});
+  const before = f.state().background_monitoring.run;
+  const pending = await f.tick(); assert.equal(pending.state, 'partial'); assert.equal(pending.continuation_pending, true);
+  assert.equal(f.state().background_monitoring.state, 'running');
+  assert.equal(f.state().background_monitoring.run.stage, 'history_poll');
+  assert.equal(f.state().background_monitoring.run.lease, null);
+  assert.equal(pending.background_monitoring.last_finished_at, null);
+  const revision = f.revision(), calls = f.calls.length;
+  assert.equal((await f.tick(OTHER)).continuation_pending, true);
+  f.advance(LIMITS.continuation_retry_ms);
+  assert.equal((await f.tick()).continuation_pending, true);
+  assert.equal(f.revision(), revision); assert.equal(f.calls.length, calls);
+  assert.equal((await f.tick(OTHER)).state, 'running');
+  const after = f.state().background_monitoring.run;
+  for (const key of ['id', 'session_id', 'started_at', 'history_after_at', 'gift_run_id', 'history_job_id'])
+    assert.equal(after[key], before[key], key);
+  assert.deepEqual(after.scope, before.scope); assert.deepEqual(after.targets, before.targets);
+  assert.equal(after.continuation.segment, 2); assert.equal(after.history_steps, 101);
+  assert.equal(after.continuation.history_steps_base, 100);
+  assert.ok(after.claim_generation > before.claim_generation);
+  assert.equal(after.last_runner_id, OTHER);
+  assert.equal(f.calls.filter(call => call === 'gifts.start').length, 1);
+  assert.equal(f.calls.filter(call => call === 'history.start').length, 1);
+});
+
+test('yield-only is a provider-free checkpoint and cannot create, revive or bypass an active lease', async () => {
+  for (const mode of ['empty', 'legacy', 'complete', 'live', 'ready']) {
+    const f = fixture({continuations: mode !== 'legacy'}), worker = createBackgroundMonitoringWorker(f.dependencies);
+    if (mode === 'complete') await f.complete();
+    else if (mode !== 'empty') await f.until('history_poll');
+    if (mode === 'live') f.mutate(saved => {saved.background_monitoring.run.lease = {token: `${RUNNER}:99`, until: f.at() + 10000};});
+    const before = f.state(), revision = f.revision(), calls = f.calls.length;
+    const result = await worker.tick({runner_id: RUNNER, yield_only: true});
+    assert.equal(f.calls.length, calls, mode);
+    if (mode === 'ready') {
+      assert.equal(result.continuation_pending, true); assert.equal(f.revision(), revision + 1);
+      assert.deepEqual(f.state().job, before.job);
+      assert.equal(f.state().background_monitoring.run.history_steps, before.background_monitoring.run.history_steps);
+    } else {
+      assert.deepEqual(f.state(), before, mode); assert.equal(f.revision(), revision);
+      if (mode === 'live') assert.equal(result.state, 'busy');
+    }
+  }
+});
+
+test('a committed handoff survives a lost response and read-only recovery acknowledges only its runner', async () => {
+  const f = fixture({continuations: true}); await f.until('history_poll');
+  const worker = createBackgroundMonitoringWorker(f.dependencies), append = f.repository.append;
+  f.repository.append = async (...args) => {
+    const committed = await append(...args);
+    if (committed && args[1].state.background_monitoring.run.continuation.pending) throw new MonitoringAdminError('network_error', 'tick');
+    return committed;
+  };
+  await assert.rejects(worker.tick({runner_id: RUNNER, yield_only: true}), error => error instanceof MonitoringAdminError);
+  const revision = f.revision(), calls = f.calls.length;
+  const saved = await worker.status({runner_id: RUNNER});
+  assert.equal(saved.continuation_pending, true); assert.equal(saved.runner_acknowledged, true);
+  assert.equal((await worker.status({runner_id: OTHER})).runner_acknowledged, false);
+  assert.equal((await f.tick()).continuation_pending, true);
+  assert.equal(f.revision(), revision); assert.equal(f.calls.length, calls);
+});
+
+test('expired segments resume on the next scheduled runner without extending cycle identity or six-hour cadence', async () => {
+  for (const previousOwnerReturns of [false, true]) {
+    const f = fixture({continuations: true}); await f.until('history_poll');
+    const original = f.state().background_monitoring;
+    f.advance(original.run.deadline + 1 - f.at());
+    if (previousOwnerReturns) {
+      assert.equal((await f.tick()).continuation_pending, true);
+      f.advance(LIMITS.continuation_retry_ms);
+    }
+    assert.equal((await f.tick(OTHER)).state, 'running');
+    const resumed = f.state().background_monitoring;
+    assert.equal(resumed.run.id, original.run.id); assert.equal(resumed.run.continuation.segment, 2);
+    assert.equal(resumed.run.started_at, original.run.started_at);
+    assert.equal(resumed.run.deadline, f.at() + LIMITS.run_ms);
+    assert.equal(resumed.next_check_at, original.next_check_at);
+    assert.equal(f.calls.filter(call => call === 'history.resume').length, 1);
+  }
+});
+
+test('pending continuation preserves provider waits and expires at the absolute cycle boundary', async () => {
+  const f = fixture({continuations: true}); await f.until('history_poll');
+  f.mutate(saved => {saved.job.next_allowed_at = START + LIMITS.run_ms + 60000;});
+  const pending = await f.tick(); assert.equal(pending.continuation_pending, true);
+  const calls = f.calls.length, revision = f.revision();
+  f.advance(LIMITS.run_ms); assert.equal((await f.tick(OTHER)).continuation_pending, true);
+  assert.equal(f.calls.length, calls); assert.equal(f.revision(), revision);
+  // Even a corrupt/outdated provider wait beyond the hard age cannot keep an
+  // otherwise valid continuation alive indefinitely or extend the public ETA.
+  f.mutate(saved => {saved.background_monitoring.run.next_action_at = START + LIMITS.continuation_cycle_ms + 86400000;});
+  assert.equal((await f.status()).retry_at, new Date(START + LIMITS.continuation_cycle_ms).toISOString());
+  f.advance(START + LIMITS.continuation_cycle_ms - f.at());
+  const publicExpired = await f.status();
+  assert.equal(publicExpired.continuation_pending, undefined);
+  assert.equal(publicExpired.background_monitoring.continuation_pending, undefined);
+  assert.equal(publicExpired.background_monitoring.reason, 'run_deadline');
+  assert.equal(publicExpired.retry_at, new Date(START + LIMITS.cadence_ms).toISOString());
+  const expired = await f.tick(OTHER);
+  assert.equal(expired.state, 'partial'); assert.equal(expired.continuation_pending, undefined);
+  assert.equal(expired.background_monitoring.reason, 'run_deadline');
+  assert.equal(f.state().background_monitoring.run.stage, 'done'); assert.equal(f.calls.length, calls);
+});
+
+test('continuation has at most twelve segments even when runners repeatedly hand off early', async () => {
+  const f = fixture({continuations: true}); await f.until('history_poll');
+  f.dependencies.history.step = async () => ({job: f.state().job});
+  const worker = createBackgroundMonitoringWorker(f.dependencies);
+  let runner = RUNNER;
+  for (let segment = 1; segment <= LIMITS.continuation_segments; segment++) {
+    const result = await worker.tick({runner_id: runner, yield_only: true});
+    assert.equal(f.state().background_monitoring.run.continuation.segment, segment);
+    if (segment === LIMITS.continuation_segments) {
+      assert.equal(result.state, 'partial'); assert.equal(result.continuation_pending, undefined);
+      assert.equal(result.background_monitoring.reason, 'history_limit');
+    } else {
+      assert.equal(result.continuation_pending, true); f.advance(LIMITS.continuation_retry_ms);
+      runner = (segment + 1).toString(16).padStart(64, '0');
+      assert.equal((await f.tick(runner)).state, 'running');
+    }
+  }
+  assert.equal(f.calls.includes('rules.evaluate'), false);
+});
+
+test('continuation refuses changed authorization, rules, exact history jobs, stopped work and target metadata', async () => {
+  for (const mode of ['scope', 'pause', 'rules', 'job', 'targets', 'stop']) {
+    const f = fixture({continuations: true}); await f.until('history_poll');
+    await createBackgroundMonitoringWorker(f.dependencies).tick({runner_id: RUNNER, yield_only: true});
+    if (mode === 'scope') f.changeScope({credential_version: 2});
+    else if (mode === 'pause') f.policy.paused = true;
+    else if (mode === 'rules') f.policy.policies[0].enabled = false;
+    else f.mutate(saved => {
+      if (mode === 'job') saved.job.id++;
+      if (mode === 'targets') saved.job.background_history.targets = [address(2)];
+      if (mode === 'stop') {saved.job.state = 'partial'; saved.job.reason = 'stopped_by_you'; saved.job.stop_requested = true;}
+    });
+    const before = f.calls.filter(call => /^(gifts|history)\./.test(call));
+    f.advance(LIMITS.continuation_retry_ms);
+    const result = await f.tick(OTHER);
+    assert.equal(result.state, mode === 'stop' ? 'partial' : ['pause', 'rules'].includes(mode) ? 'paused' : 'blocked', mode);
+    assert.equal(result.continuation_pending, undefined);
+    assert.deepEqual(f.calls.filter(call => /^(gifts|history)\./.test(call)), before);
+    assert.equal(f.calls.includes('rules.evaluate'), false);
+  }
+});
+
+test('an uncertain history start is blocked rather than replayed during a handoff', async () => {
+  const f = fixture({continuations: true}); await f.until('history_start');
+  f.mutate(saved => {saved.background_monitoring.run.intent = 'history_start';});
+  const result = await createBackgroundMonitoringWorker(f.dependencies).tick({runner_id: RUNNER, yield_only: true});
+  assert.equal(result.state, 'blocked'); assert.equal(result.background_monitoring.reason, 'history_start_uncertain');
+  assert.equal(f.calls.includes('history.start'), false); assert.equal(result.continuation_pending, undefined);
+});
+
+test('new segments cannot reset the daily history quota or auto-resume an explicitly stopped job', async () => {
+  for (const delay of [0, 1000, LIMITS.run_ms + 1000]) {
+    const f = fixture({continuations: true}); await f.until('history_poll');
+    f.mutate(saved => {saved.job.state = 'partial'; saved.job.reason = 'daily_limit'; saved.job.next_allowed_at = f.at() + delay;});
+    const first = await f.tick(); assert.equal(first.continuation_pending, undefined);
+    assert.equal(f.state().background_monitoring.run.stage, 'evaluate');
+    const result = await f.tick(); assert.equal(result.state, 'partial');
+    assert.equal(result.background_monitoring.reason, 'history_partial');
+    assert.equal(f.calls.includes('history.resume'), false); assert.equal(f.calls.includes('history.step'), false);
+    assert.equal(f.calls.filter(call => call === 'rules.evaluate').length, 1);
+  }
+});
+
+test('low server analytics budget yields without inventing an unavailable report', async () => {
+  for (const slowAuthorization of [false, true]) {
+    const f = fixture({continuations: true}); let refreshed = 0, delayed = false;
+    f.dependencies.analytics = {version: 1, refresh: async () => {
+      refreshed++; return {state: 'saved', period_days: 30, captured_at: new Date(f.at()).toISOString()};
+    }};
+    await f.until('analytics');
+    const reserve = LIMITS.analytics_refresh_ms + LIMITS.analytics_evaluation_reserve_ms + LIMITS.dashboard_prepare_ms;
+    f.advance(f.state().background_monitoring.run.deadline - f.at() - reserve + (slowAuthorization ? 0 : 1));
+    const status = f.dependencies.rules.status;
+    f.dependencies.rules.status = async () => {
+      if (slowAuthorization && !delayed && f.state().background_monitoring.run.intent === 'analytics_refresh') {delayed = true; f.advance(1000);}
+      return status();
+    };
+    const pending = await f.tick(); assert.equal(pending.continuation_pending, true);
+    assert.equal(pending.personal_analytics, undefined); assert.equal(refreshed, 0);
+    assert.equal(f.state().background_monitoring.run.stage, 'analytics');
+    f.advance(LIMITS.continuation_retry_ms); await f.tick(OTHER);
+    const result = await f.tick(OTHER); assert.equal(result.state, 'complete');
+    assert.equal(refreshed, 1); assert.equal(result.personal_analytics.state, 'saved');
+    assert.equal(f.calls.filter(call => call === 'rules.evaluate').length, 1);
+  }
+});
+
+test('stale responses cannot overwrite a newer continuation claim', async () => {
+  const f = fixture({continuations: true}); await f.until('history_poll');
+  const committed = deferred(), release = deferred(), step = f.dependencies.history.step;
+  let first = true;
+  f.dependencies.history.step = async (...args) => {
+    const result = await step(...args);
+    if (first) {first = false; committed.resolve(); await release.promise;}
+    return result;
+  };
+  const old = f.tick(); await committed.promise;
+  const original = f.state().background_monitoring.run;
+  f.advance(original.deadline + 1 - f.at());
+  await f.tick(OTHER); await f.tick(OTHER);
+  const before = f.state(), revision = f.revision();
+  release.resolve(); await old;
+  assert.deepEqual(f.state(), before); assert.equal(f.revision(), revision);
+  assert.equal(f.state().background_monitoring.run.id, original.id);
+  assert.ok(f.state().background_monitoring.run.claim_generation > original.claim_generation);
+  assert.equal(f.calls.filter(call => call === 'history.step').length, 2);
+});
+
+test('malformed continuation metadata cannot reset counters or extend segment and cycle deadlines', async () => {
+  for (const change of [
+    run => {run.continuation.version = 2;}, run => {run.continuation.segment = 13;},
+    run => {run.continuation.segment_started_at++; run.deadline++;},
+    run => {run.deadline++;}, run => {run.continuation.history_steps_base = 1;},
+    run => {run.history_steps = LIMITS.history_steps + 1;},
+    run => {run.continuation.history_resumes_base = -1;},
+    run => {run.continuation.pending = true;},
+    run => {run.continuation.resume_at = START;},
+    run => {run.continuation.segment = 2;},
+    run => {run.continuation.segment = 2; run.continuation.segment_started_at = START + LIMITS.continuation_cycle_ms; run.deadline = run.continuation.segment_started_at;},
+  ]) {
+    const f = fixture({continuations: true}); await f.tick(); f.mutate(saved => change(saved.background_monitoring.run));
+    const calls = f.calls.length;
+    await assert.rejects(f.status(), /BACKGROUND_STATE_INVALID/);
+    await assert.rejects(f.tick(OTHER), /BACKGROUND_STATE_INVALID/);
+    assert.equal(f.calls.length, calls);
+  }
 });

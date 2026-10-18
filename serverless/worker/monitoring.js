@@ -7,6 +7,8 @@ export const BACKGROUND_MONITORING_LIMITS = Object.freeze({
   gift_resumes: 1, gift_resume_ms: 300000, gift_history_reserve_ms: 300000, gift_attempts: 20, gift_daily_attempts: 1000,
   dashboard_prepare_ms: 25000, dashboard_prepare_age_ms: 5 * 60 * 1000,
   analytics_refresh_ms: 60000, analytics_evaluation_reserve_ms: 60000,
+  continuation_segments: 12, continuation_cycle_ms: 4 * 60 * 60 * 1000,
+  continuation_retry_ms: 60000, continuation_request_reserve_ms: 90000,
 });
 const STATES = new Set(['running', 'complete', 'partial', 'paused', 'blocked', 'failed']);
 const REASONS = new Set(['monitoring_paused', 'no_enabled_gifts', 'rules_changed', 'scope_changed',
@@ -23,6 +25,36 @@ const iso = at => new Date(at).toISOString();
 const time = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? Date.parse(value) : null;
 const millis = value => Number.isSafeInteger(value) && value > 0 && value < 8640000000000000 - BACKGROUND_MONITORING_LIMITS.cadence_ms;
 const count = value => Number.isSafeInteger(value) && value >= 0;
+const continuation = run => run?.continuation;
+const pendingContinuation = ledger => ledger?.state === 'running' && continuation(ledger.run)?.pending === true;
+const cycleDeadline = run => run.started_at + BACKGROUND_MONITORING_LIMITS.continuation_cycle_ms;
+const activeContinuation = (ledger, at) => pendingContinuation(ledger) && cycleDeadline(ledger.run) > at;
+const continuationRetry = run => Math.min(cycleDeadline(run), Math.max(run.next_action_at, run.continuation.resume_at));
+const segmentSteps = run => run.history_steps - (continuation(run)?.history_steps_base ?? 0);
+const segmentResumes = run => run.history_resumes - (continuation(run)?.history_resumes_base ?? 0);
+function validContinuation(run, state) {
+  const value = continuation(run), limits = BACKGROUND_MONITORING_LIMITS;
+  if (value === undefined) return run.deadline === run.started_at + limits.run_ms
+    && run.history_steps <= limits.history_steps && run.history_resumes <= limits.history_resumes;
+  return object(value) && value.version === 1 && Number.isSafeInteger(value.segment)
+    && value.segment >= 1 && value.segment <= limits.continuation_segments
+    && millis(value.segment_started_at) && value.segment_started_at >= run.started_at
+    && value.segment_started_at < cycleDeadline(run)
+    && (value.segment === 1 ? value.segment_started_at === run.started_at
+      && value.history_steps_base === 0 && value.history_resumes_base === 0 : value.segment_started_at > run.started_at)
+    && run.deadline === Math.min(value.segment_started_at + limits.run_ms, cycleDeadline(run))
+    && count(value.history_steps_base) && value.history_steps_base <= run.history_steps
+    && count(value.history_resumes_base) && value.history_resumes_base <= run.history_resumes
+    && segmentSteps(run) <= limits.history_steps && segmentResumes(run) <= limits.history_resumes
+    && run.history_steps <= limits.history_steps * value.segment
+    && run.history_resumes <= limits.history_resumes * value.segment
+    && typeof value.pending === 'boolean'
+    && (value.pending ? state === 'running' && run.stage !== 'done' && run.lease === null
+      && millis(value.pending_at) && value.pending_at >= value.segment_started_at
+      && millis(value.resume_at) && value.resume_at >= value.pending_at
+      && /^[a-f0-9]{64}$/.test(value.yielded_by ?? '')
+      : value.pending_at === null && value.resume_at === 0 && value.yielded_by === null);
+}
 // Never persist or log provider HTML, cookies, error text or account details.
 function analyticsResult(value) {
   if (!object(value) || !ANALYTICS_STATES.has(value.state)
@@ -76,13 +108,12 @@ function validate(value) {
     || !object(run) || typeof run.id !== 'string' || !/^[a-f0-9]{64}:\d+$/.test(run.id)
     || typeof run.session_id !== 'string' || !/^background_[a-f0-9]{64}_\d+$/.test(run.session_id)
     || !validScope(run.scope) || !STAGES.has(run.stage) || !millis(run.started_at) || !millis(run.deadline)
-    || run.deadline !== run.started_at + BACKGROUND_MONITORING_LIMITS.run_ms
+    || !validContinuation(run, value.state)
     || !count(run.claim_generation) || !count(run.next_action_at) || !count(run.history_steps) || !count(run.history_resumes)
     || run.last_runner_id !== undefined && (typeof run.last_runner_id !== 'string' || !/^[a-f0-9]{64}$/.test(run.last_runner_id))
     || run.personal_analytics_period_days !== undefined && ![30, 365].includes(run.personal_analytics_period_days)
     || !count(run.gift_resumes ?? 0) || (run.gift_resumes ?? 0) > BACKGROUND_MONITORING_LIMITS.gift_resumes
     || run.history_after_at !== null && !millis(run.history_after_at)
-    || run.history_steps > BACKGROUND_MONITORING_LIMITS.history_steps || run.history_resumes > BACKGROUND_MONITORING_LIMITS.history_resumes
     || !['gift_run_id', 'history_job_id', 'previous_history_job_id'].every(key => run[key] === null || Number.isSafeInteger(run[key]) && run[key] > 0)
     || run.intent !== null && !INTENTS.has(run.intent)
     || !Array.isArray(run.targets) || run.targets.length > 250 || run.targets.some(nft => !/^0:[a-f0-9]{64}$/.test(nft))
@@ -103,15 +134,19 @@ export function projectBackgroundMonitoring(value, now = Date.now()) {
   const result = Object.fromEntries(['version', 'cadence_hours', 'state', 'last_started_at', 'last_finished_at',
     'last_success_at', 'next_check_at', 'reason'].map(key => [key, ledger[key]]));
   result.next_check_at = iso(automaticDue(ledger));
+  if (activeContinuation(ledger, now)) {
+    result.state = 'partial'; result.reason = 'history_partial'; result.continuation_pending = true;
+    result.next_check_at = iso(continuationRetry(ledger.run));
+  }
   if (ledger.run.personal_analytics) result.personal_analytics = analyticsResult(ledger.run.personal_analytics);
-  if (ledger.state === 'running') {
+  if (ledger.state === 'running' && !pendingContinuation(ledger)) {
     result.run_deadline_at = iso(ledger.run.deadline);
     // Allow a minute for the next driver request after the current lease or
     // provider wait. Expose a display deadline, never the lease identity.
     result.activity_expires_at = iso(Math.min(ledger.run.deadline,
       Math.max(ledger.run.started_at, ledger.run.next_action_at, ledger.run.lease?.until ?? 0) + 60000));
   }
-  if (ledger.state === 'running' && ledger.run.deadline <= now) {result.state = 'partial'; result.reason = 'run_deadline';}
+  if (ledger.state === 'running' && ledger.run.deadline <= now && !activeContinuation(ledger, now)) {result.state = 'partial'; result.reason = 'run_deadline';}
   return result;
 }
 
@@ -135,10 +170,12 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     lease: clone(run.lease), gift_run_id: run.gift_run_id, history_job_id: run.history_job_id,
     gift_start_address: run.gift_start_address ?? null, deadline: run.deadline});
   const reply = (ledger, at, state = null, retryAt = null) => ({
-    state: state ?? ledger?.state ?? 'disabled', server_time: iso(at),
+    state: activeContinuation(ledger, at) ? 'partial' : state ?? ledger?.state ?? 'disabled', server_time: iso(at),
     ...(retryAt !== null ? {retry_at: iso(Math.max(at, retryAt))} : {}),
     ...Object.fromEntries(['checked', 'total', 'proposals'].filter(key => count(ledger?.run?.[key])).map(key => [key, ledger.run[key]])),
     ...(ledger?.run?.personal_analytics ? {personal_analytics: analyticsResult(ledger.run.personal_analytics)} : {}),
+    ...(activeContinuation(ledger, at) ? {continuation_pending: true,
+      retry_at: iso(Math.max(at, continuationRetry(ledger.run)))} : {}),
     background_monitoring: projectBackgroundMonitoring(ledger, at),
   });
   async function status({runner_id} = {}) {
@@ -146,6 +183,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
     const saved = await repository.read(), at = await now(), ledger = validate(saved.state.background_monitoring);
     const result = reply(ledger, at, ledger?.state === 'running' && ledger.run.deadline <= at ? 'partial' : null, ledger?.state === 'running'
+      && !(continuation(ledger.run) && cycleDeadline(ledger.run) <= at)
       ? Math.max(ledger.run.next_action_at, ledger.run.lease?.until ?? 0, at) : ledger ? automaticDue(ledger) : null);
     // A lost initial response may precede the claim. Never let a recovery read
     // mistake the preceding cycle's completion for this runner's outcome.
@@ -204,12 +242,30 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     if (state === 'complete') ledger.last_success_at = iso(at);
     ledger.run.stage = 'done'; ledger.run.intent = null; ledger.run.lease = null;
     ledger.run.next_action_at = 0;
+    if (continuation(ledger.run)) Object.assign(ledger.run.continuation,
+      {pending: false, pending_at: null, resume_at: 0, yielded_by: null});
     ledger.next_check_at = iso(automaticDue(ledger));
   };
   const finish = (claim, state, reason, options) => update(claim, (ledger, at) => finished(ledger, at, state, reason), options);
   const release = (claim, change = () => {}) => update(claim, (ledger, at) => {
     change(ledger, at); ledger.run.intent = null; ledger.run.lease = null;
   });
+  const continuationLimit = (run, at) => at >= cycleDeadline(run) ? 'run_deadline'
+    : run.continuation.segment >= BACKGROUND_MONITORING_LIMITS.continuation_segments ? 'history_limit' : null;
+  const markPending = (ledger, at, runner) => {
+    const limit = continuationLimit(ledger.run, at);
+    if (limit) {finished(ledger, at, 'partial', limit); return;}
+    Object.assign(ledger.run.continuation, {pending: true, pending_at: at,
+      resume_at: Math.min(cycleDeadline(ledger.run), Math.max(at + BACKGROUND_MONITORING_LIMITS.continuation_retry_ms, ledger.run.next_action_at)), yielded_by: runner});
+    ledger.run.lease = null;
+  };
+  const yieldRun = claim => update(claim, (ledger, at) => markPending(ledger, at, claim.last_runner_id));
+  const resumeSegment = (ledger, at) => {
+    Object.assign(ledger.run.continuation, {segment: ledger.run.continuation.segment + 1, segment_started_at: at,
+      history_steps_base: ledger.run.history_steps, history_resumes_base: ledger.run.history_resumes,
+      pending: false, pending_at: null, resume_at: 0, yielded_by: null});
+    ledger.run.deadline = Math.min(at + BACKGROUND_MONITORING_LIMITS.run_ms, cycleDeadline(ledger.run));
+  };
   async function gate(claim) {
     await assertScope(claim.scope, context(claim));
     const current = await rules.status(context(claim)), targets = activeTargets(current);
@@ -350,21 +406,36 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
           run.stage = 'history_start'; run.next_action_at = at;
         }
       }
-      else if (job.state === 'failed' || job.stop_requested || run.next_action_at >= run.deadline) {
+      else if (job.state === 'failed' || job.stop_requested) {
         ledger.reason = job.stop_requested ? 'history_stopped' : 'history_partial'; run.stage = afterHistory(); run.next_action_at = at;
+      } else if (selected.reason === 'daily_limit') {
+        // A new runner segment does not restore the provider's daily allowance.
+        ledger.reason = 'history_partial'; run.stage = afterHistory(); run.next_action_at = at;
+      } else if (run.next_action_at >= run.deadline) {
+        if (continuation(run) && selected.reason !== 'daily_limit' && run.next_action_at < cycleDeadline(run))
+          markPending(ledger, at, claim.last_runner_id);
+        else {ledger.reason = 'history_partial'; run.stage = afterHistory(); run.next_action_at = at;}
       }
     });
   }
-  async function tick({runner_id, retry = false, skip_analytics = false} = {}) {
+  async function tick({runner_id, retry = false, skip_analytics = false, yield_only = false} = {}) {
     if (typeof runner_id !== 'string' || !/^[a-f0-9]{64}$/.test(runner_id)) throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
-    if (typeof retry !== 'boolean' || typeof skip_analytics !== 'boolean') throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
-    let claim;
+    if (typeof retry !== 'boolean' || typeof skip_analytics !== 'boolean' || typeof yield_only !== 'boolean') throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
+    let claim, resumed = false;
     for (let n = 0; n < 12; n++) {
+      resumed = false;
       const saved = await repository.read(), at = await now(), old = validate(saved.state.background_monitoring);
       let ledger;
+      // Budget handoff is metadata only. It never claims a new cycle, revives
+      // a terminal/legacy run, or executes an uncertain provider operation.
+      if (yield_only && (!old || old.state !== 'running' || !continuation(old.run)))
+        return reply(old, at, null, old ? automaticDue(old) : null);
       if (old?.state === 'running') {
         if (old.run.lease?.until > at) return reply(old, at, 'busy', old.run.lease.until);
-        if (old.run.next_action_at > at && old.run.deadline > at) return reply(old, at, 'waiting', Math.min(old.run.next_action_at, old.run.deadline));
+        if (pendingContinuation(old) && at < cycleDeadline(old.run) && (yield_only || old.run.continuation.yielded_by === runner_id
+          || old.run.continuation.resume_at > at)) return reply(old, at);
+        if (!yield_only && !pendingContinuation(old) && old.run.next_action_at > at && old.run.deadline > at)
+          return reply(old, at, 'waiting', Math.min(old.run.next_action_at, old.run.deadline));
         ledger = clone(old);
         // A terminal checkpoint returned before claiming must acknowledge its
         // writer too. Intermediate cleanup before a retry/due cycle must not.
@@ -379,9 +450,31 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
           if (await append(saved, ledger, at) && automaticDue(ledger) > at && !retry) return reply(ledger, at);
           continue;
         }
-        if (ledger.run.deadline <= at) {
+        if (pendingContinuation(ledger)) {
+          const limit = continuationLimit(ledger.run, at);
+          if (limit) {
+            finished(ledger, at, 'partial', limit);
+            if (await append(saved, ledger, at)) return reply(ledger, at);
+            continue;
+          }
+          resumeSegment(ledger, at); resumed = true;
+        } else if (ledger.run.deadline <= at && continuation(ledger.run)) {
+          markPending(ledger, at, old.run.last_runner_id ?? old.run.id.split(':')[0]);
+          if (ledger.state !== 'running' || yield_only || ledger.run.continuation.yielded_by === runner_id) {
+            if (await append(saved, ledger, at)) return reply(ledger, at);
+            continue;
+          }
+          // A different scheduled invocation can pick up an expired segment
+          // immediately after its lease, without waiting another six hours.
+          resumeSegment(ledger, at); resumed = true;
+        } else if (ledger.run.deadline <= at) {
           finished(ledger, at, 'partial', 'run_deadline');
           if (await append(saved, ledger, at) && automaticDue(ledger) > at && !retry) return reply(ledger, at);
+          continue;
+        }
+        if (yield_only) {
+          markPending(ledger, at, runner_id);
+          if (await append(saved, ledger, at)) return reply(ledger, at);
           continue;
         }
       } else {
@@ -410,6 +503,8 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
             next_gift_start_address: sameScope ? nextGiftAddress(saved.state, old.run) : null,
             previous_history_job_id: sameScope ? old.run.history_job_id ?? old.run.previous_history_job_id : null,
             history_steps: 0, history_resumes: 0, gift_resumes: 0, gift_complete: false, history_complete: false,
+            continuation: {version: 1, segment: 1, segment_started_at: at, history_steps_base: 0,
+              history_resumes_base: 0, pending: false, pending_at: null, resume_at: 0, yielded_by: null},
             history_after_at: null,
             checked: null, total: null, proposals: null,
           }};
@@ -425,6 +520,17 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       const enabled = await gate(claim);
       if (enabled.stop) return reply(await finish(claim, 'paused', enabled.stop), await now());
       if (!claim.targets.length) claim = (await update(claim, ledger => {ledger.run.targets = enabled.targets;})).run;
+      if (resumed && claim.stage === 'history_poll') {
+        const selected = (await repository.read()).state.job;
+        if (selected?.id !== claim.history_job_id || selected.kind !== 'rental_prices'
+          || selected.background_history?.version !== 1
+          || canonical(selected.background_history.targets) !== canonical([...claim.targets].sort()))
+          return reply(await finish(claim, 'blocked', 'history_changed'), await now());
+        if (selected.stop_requested || selected.reason === 'stopped_by_you')
+          return reply(await finish(claim, 'partial', 'history_stopped'), await now());
+      }
+      if (continuation(claim) && await now() + BACKGROUND_MONITORING_LIMITS.continuation_request_reserve_ms > claim.deadline)
+        return reply(await yieldRun(claim), await now());
       let result;
       if (claim.stage === 'gift_start') {
         const saved = await repository.read(), at = await now(), active = saved.state.gift_refresh?.run;
@@ -474,7 +580,8 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       }
       if (claim.stage === 'history_start') {
         const saved = await repository.read(), at = await now();
-        if (claim.history_steps >= BACKGROUND_MONITORING_LIMITS.history_steps) {
+        if (segmentSteps(claim) >= BACKGROUND_MONITORING_LIMITS.history_steps) {
+          if (continuation(claim)) return reply(await yieldRun(claim), at);
           const row = await release(claim, ledger => {ledger.reason = 'history_limit'; ledger.run.stage = afterHistory(); ledger.run.next_action_at = at;});
           return reply(row, at, null, at);
         }
@@ -508,10 +615,12 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
         const status = await history.status(context(claim));
         result = {job: status?.jobs?.find(job => job.id === claim.history_job_id)};
         const job = jobResult(result, claim), at = await now();
-        if (job.state === 'complete' || job.state === 'failed' || job.stop_requested || waitAt(job.progress?.next_allowed_at, at) > at) {
+        if (job.state === 'complete' || job.state === 'failed' || job.stop_requested || saved.state.job.reason === 'daily_limit'
+          || waitAt(job.progress?.next_allowed_at, at) > at) {
           const row = await saveHistory(claim, result); return reply(row, at, row.run.next_action_at > at ? 'waiting' : null, row.run.next_action_at || null);
         }
-        if (claim.history_steps >= BACKGROUND_MONITORING_LIMITS.history_steps) {
+        if (segmentSteps(claim) >= BACKGROUND_MONITORING_LIMITS.history_steps) {
+          if (continuation(claim)) return reply(await yieldRun(claim), at);
           const row = await release(claim, ledger => {ledger.reason = 'history_limit'; ledger.run.stage = afterHistory(); ledger.run.next_action_at = at;});
           return reply(row, at, null, at);
         }
@@ -521,7 +630,9 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
         const expiredInvocation = ['running', 'queued'].includes(saved.state.job.state)
           && millis(saved.state.job.invocation_deadline) && saved.state.job.invocation_deadline <= at;
         const resume = job.state === 'partial' || expiredInvocation;
-        if (resume && (claim.history_resumes >= BACKGROUND_MONITORING_LIMITS.history_resumes
+        if (resume && segmentResumes(claim) >= BACKGROUND_MONITORING_LIMITS.history_resumes && continuation(claim))
+          return reply(await yieldRun(claim), at);
+        if (resume && (segmentResumes(claim) >= BACKGROUND_MONITORING_LIMITS.history_resumes
           || !['duration_limit', 'invocation_limit', 'daily_limit', 'provider_wait'].includes(saved.state.job.reason)
             && !expiredInvocation)) {
           const row = await release(claim, ledger => {ledger.reason = 'history_partial'; ledger.run.stage = afterHistory(); ledger.run.next_action_at = at;});
@@ -535,8 +646,11 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       }
       // A pre-upgrade checkpoint can already be at evaluation. Move it through
       // the new stage once; a saved outcome prevents re-running this work.
-      const analyticsReserve = BACKGROUND_MONITORING_LIMITS.analytics_refresh_ms + BACKGROUND_MONITORING_LIMITS.analytics_evaluation_reserve_ms;
+      const analyticsReserve = BACKGROUND_MONITORING_LIMITS.analytics_refresh_ms + BACKGROUND_MONITORING_LIMITS.analytics_evaluation_reserve_ms
+        + (continuation(claim) ? BACKGROUND_MONITORING_LIMITS.dashboard_prepare_ms : 0);
       const skipOptional = skip_analytics || await now() + analyticsReserve > claim.deadline;
+      if (continuation(claim) && hasAnalytics && !claim.personal_analytics && skipOptional)
+        return reply(await yieldRun(claim), await now());
       if (claim.stage === 'evaluate' && hasAnalytics && !claim.personal_analytics && !skipOptional) {
         const row = await release(claim, (ledger, at) => {ledger.run.stage = 'analytics'; ledger.run.next_action_at = at;});
         return reply(row, await now());
@@ -553,6 +667,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
           skip = await now() + analyticsReserve > claim.deadline;
         }
         if (skip) {
+          if (continuation(claim)) return reply(await yieldRun(claim), await now());
           outcome = {state: 'unavailable', reason: 'run_budget'};
           // Skipping optional work must not consume the driver's last request
           // slot. Save the outcome under this lease and evaluate in this tick.

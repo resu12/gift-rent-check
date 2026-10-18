@@ -109,10 +109,11 @@ export function createMonitoringAdminApi({token,appId,env=process.env,fetch:requ
   return {
     getFiles:({timeoutMs}={})=>call('/get',undefined,RUNNER_LIMITS.source_bytes,'get_files',timeoutMs),
     runFunction:(sources,input,{timeoutMs}={})=>{
-      if(!object(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','skip_analytics'].includes(key))
+      if(!object(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','skip_analytics','yield_only'].includes(key))
         ||typeof input.runner_id!=='string'||!/^[0-9a-f]{64}$/.test(input.runner_id)
         ||Object.hasOwn(input,'retry')&&typeof input.retry!=='boolean'
         ||Object.hasOwn(input,'skip_analytics')&&(typeof input.skip_analytics!=='boolean'||Object.hasOwn(input,'status_only')||Object.hasOwn(input,'prewarm_only'))
+        ||Object.hasOwn(input,'yield_only')&&(typeof input.yield_only!=='boolean'||['retry','status_only','prewarm_only','skip_analytics'].some(key=>Object.hasOwn(input,key)))
         ||Object.hasOwn(input,'status_only')&&(input.status_only!==true||Object.hasOwn(input,'retry'))
         ||Object.hasOwn(input,'prewarm_only')&&(input.prewarm_only!==true||Object.hasOwn(input,'retry')||Object.hasOwn(input,'status_only')))fail('invalid_request','configuration');
       return call('/run',{module:MONITORING_ENDPOINT,sources,args:input,ctx:{background_worker:'price-monitoring-v1'}},RUNNER_LIMITS.response_bytes,input.prewarm_only?'prewarm':input.status_only?'status':'tick',timeoutMs);
@@ -130,6 +131,11 @@ export function monitoringSummary(value) {
     if(!date(value[field]))fail();result[field]=value[field];
   }
   if(result.state==='waiting'&&!result.retry_at)fail();
+  if(Object.hasOwn(value,'continuation_pending')) {
+    if(typeof value.continuation_pending!=='boolean'
+      ||value.continuation_pending&&(value.state!=='partial'||!result.retry_at))fail();
+    result.continuation_pending=value.continuation_pending;
+  }
   if(value.personal_analytics!==undefined&&value.personal_analytics!==null) {
     const row=value.personal_analytics;
     if(!object(row)||!['saved','fresh','busy','limited','unavailable'].includes(row.state)
@@ -200,27 +206,30 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
       if(remaining()<=0)break;
       recoveries++;
     }
-    // A manual launch can recover a terminal incomplete run once. Continuing
-    // that launch never repeatedly bypasses due times or terminal safeguards.
-    // The runner clock starts before /get; a worker's later deadline cannot
-    // account for that skew. Optional analytics must leave two complete host
-    // request allowances (this tick plus evaluation) and a small handoff margin.
-    // This veto never extends a deadline and is recomputed after each response.
-    const skipAnalytics=remaining()<2*cap.request_ms+cap.analytics_handoff_ms||cap.steps-step<2;
-    const input={runner_id:runner,...(statusOnly?{status_only:true}:{
-      ...(retry===true&&!tickAttempted?{retry:true}:{}),...(skipAnalytics?{skip_analytics:true}:{})})};
-    if(!statusOnly)tickAttempted=true;
+    // The local clock includes source download/recovery time, unlike the
+    // worker's segment deadline. Leave one full host request for checkpointing
+    // and the separate cache-preparation allowance before starting more work.
+    // An exhausted source download can only inspect status, never claim a run.
+    const workFits=remaining()>=2*cap.request_ms+cap.prewarm_ms+cap.analytics_handoff_ms&&cap.steps-step>=2;
+    const budgetInspection=!tickAttempted&&!workFits;
+    const readOnly=statusOnly||budgetInspection;
+    const yieldOnly=!readOnly&&!workFits;
+    if(yieldOnly&&remaining()<cap.request_ms)break;
+    const input={runner_id:runner,...(readOnly?{status_only:true}:yieldOnly?{yield_only:true}:{
+      ...(retry===true&&!tickAttempted?{retry:true}:{})})};
+    if(!readOnly)tickAttempted=true;
     let response;
     try {response=await api.runFunction(sources,input,{timeoutMs:requestTime()});}
     catch(error) {
       if(!recoverable(error))throw error;
       emit({state:'recovering',...diagnostic(error)});
-      if(recoveries>=cap.recoveries)fail('recovery_exhausted',statusOnly?'status':'tick');
+      if(recoveries>=cap.recoveries)fail('recovery_exhausted',readOnly?'status':'tick');
       statusOnly=true;continue;
     }
     // /run returns an envelope containing the endpoint's result. Its logs,
     // errors and any unrelated fields are intentionally never forwarded.
-    let observed;try {observed=monitoringSummary(response?.result);}catch{fail('invalid_result',statusOnly?'status':'tick');}
+    let observed;try {observed=monitoringSummary(response?.result);}catch{fail('invalid_result',readOnly?'status':'tick');}
+    if(budgetInspection) {summary=observed;break;}
     // A previous cycle's terminal ledger may be visible before an uncertain
     // tick claims its run. Only acknowledge terminal results for this runner;
     // otherwise keep reading without replaying the tick or claiming success.
@@ -229,6 +238,9 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
     }
     summary=observed;
     statusOnly=false;emit(summary);
+    // This segment is durably handed off. A later scheduled runner may resume;
+    // this invocation must not reacquire it or prepare a not-yet-complete view.
+    if(summary.continuation_pending===true)return summary;
     if(!['running','waiting','busy'].includes(summary.state)||summary.state==='busy'&&!summary.retry_at) {
       // Best effort, at most once, in its OWN hosting request. Never turn a
       // saved successful check into a failure because preparing display data
@@ -245,6 +257,9 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
       }
       return summary;
     }
+    // Legacy workers treat yield_only as a read. Never turn such a response
+    // into another provider tick or repeatedly renew a yielded segment.
+    if(yieldOnly)break;
     const current=now();if(!Number.isSafeInteger(current)||current<=0)fail();
     // A running step already commits the provider's next permitted time.
     // Do not add another second after network/host work has consumed that
@@ -258,7 +273,7 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
     if(retryAt-current>=remaining())break;
     while(now()<retryAt&&remaining()>0)await sleep(Math.min(cap.sleep_ms,retryAt-now(),remaining()));
   }
-  const result={state:'partial',...Object.fromEntries(Object.entries(summary).filter(([key])=>['checked','total','proposals','retry_at','personal_analytics'].includes(key)))};
+  const result={state:'partial',...Object.fromEntries(Object.entries(summary).filter(([key])=>['checked','total','proposals','retry_at','personal_analytics','continuation_pending'].includes(key)))};
   emit(result);return result;
 }
 

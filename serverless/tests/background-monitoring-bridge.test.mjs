@@ -16,7 +16,7 @@ function bridge(options={}) {
     .replace(/^import[^\n]+\n/gm,'').replace('export default async function','return async function');
   const create=vm.runInNewContext(`(function(createPrivateBackgroundMonitoringAccess,PRIVATE_BACKGROUND_MONITORING_VERSION,PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION,PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION,createBackgroundMonitoringWorker,BackgroundMonitoringError){${source}})`);
   return {call:create(check=>{accesses++;guard=check;return access;},version,scopedHistoryVersion,personalAnalyticsVersion,
-    candidate=>{assert.equal(candidate,access);return {tick:async input=>({state:'complete',runner:input.runner_id,retry:input.retry,skip_analytics:input.skip_analytics}),status:async input=>({state:'running',read_only:true,acknowledgement_for:input.runner_id}),prewarm:async input=>({state:'prepared',runner:input.runner_id})};},BackgroundMonitoringError),
+    candidate=>{assert.equal(candidate,access);return {tick:async input=>({state:'complete',runner:input.runner_id,retry:input.retry,skip_analytics:input.skip_analytics,yield_only:input.yield_only}),status:async input=>({state:'running',read_only:true,acknowledgement_for:input.runner_id}),prewarm:async input=>({state:'prepared',runner:input.runner_id})};},BackgroundMonitoringError),
     accesses:()=>accesses,guard:context=>guard(context)};
 }
 const input={runner_id:'a'.repeat(64)}, admin={background_worker:'price-monitoring-v1'};
@@ -27,6 +27,9 @@ test('ordinary Mini App contexts and arbitrary worker actions never obtain owner
     [{...input,action:'prepare'},admin],[{...input,user_id:12345},admin],[{runner_id:'invalid'},admin],
     ...['true',1,null,{}].map(retry=>[{...input,retry},admin]),
     ...['true',1,null,{},[]].map(skip_analytics=>[{...input,skip_analytics},admin]),
+    ...['true',1,null,{},[]].map(yield_only=>[{...input,yield_only},admin]),
+    ...[true,false].flatMap(yield_only=>[{retry:true},{retry:false},{status_only:true},{prewarm_only:true},{skip_analytics:true},{skip_analytics:false}]
+      .map(other=>[{...input,...other,yield_only},admin])),
     ...[true,false].flatMap(skip_analytics=>[
       [{...input,status_only:true,skip_analytics},admin],[{...input,prewarm_only:true,skip_analytics},admin]]),
     ...[false,'true',1,null,{}].map(status_only=>[{...input,status_only},admin]),
@@ -54,6 +57,8 @@ test('administrative bridge invokes only the fixed worker tick',async()=>{
   assert.equal((await f.call({...input,retry:false},admin)).retry,false);
   assert.equal((await f.call({...input,skip_analytics:true},admin)).skip_analytics,true);
   assert.equal((await f.call({...input,skip_analytics:false},admin)).skip_analytics,false);
+  assert.equal((await f.call({...input,yield_only:true},admin)).yield_only,true);
+  assert.equal((await f.call({...input,yield_only:false},admin)).yield_only,false);
 });
 
 test('personal analytics requires both the supported runtime protocol and implementation',async()=>{
