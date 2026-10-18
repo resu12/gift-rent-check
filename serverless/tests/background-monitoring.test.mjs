@@ -1430,6 +1430,121 @@ test('new segments cannot reset the daily history quota or auto-resume an explic
   }
 });
 
+function historyQuotaStatus(f, budget) {
+  const status = f.dependencies.history.status;
+  f.dependencies.history.status = async context => {
+    const result = await status(context);
+    return {jobs: result.jobs.map(job => ({...job, progress: {...job.progress, marketapp_budget: budget()}}))};
+  };
+}
+
+test('a later scheduled cycle resumes its daily-limited cursor after the rolling allowance recovers', async () => {
+  const f = fixture({continuations: true}); await f.until('history_poll');
+  const available = f.at() + LIMITS.cadence_ms - 1000;
+  historyQuotaStatus(f, () => ({rolling_24h_used: f.at() < available ? 500 : 499,
+    rolling_24h_limit: 500, available_at: f.at() < available ? new Date(available).toISOString() : null}));
+  f.mutate(saved => {
+    saved.attempts = [START - 1, START];
+    saved.job.state = 'partial'; saved.job.reason = 'daily_limit'; saved.job.pages = 1;
+  });
+  const prior = f.state().job;
+  assert.equal((await f.complete()).state, 'partial');
+  assert.equal(f.calls.includes('history.resume'), false);
+  f.advance(Date.parse(f.state().background_monitoring.next_check_at) - f.at());
+  await f.until('history_poll');
+  assert.equal(f.state().job.id, prior.id, 'The later cycle adopts only its acknowledged job');
+  const result = await f.tick();
+  assert.equal(result.state, 'running'); assert.equal(f.state().job.id, prior.id);
+  assert.equal(f.state().job.pages, prior.pages, 'Resume must retain the exact saved cursor');
+  assert.equal(f.calls.filter(call => call === 'history.resume').length, 1);
+  assert.deepEqual(f.state().attempts, [START - 1, START], 'The worker never clears provider quota accounting');
+  assert.equal((await f.complete()).state, 'complete');
+  assert.equal(f.calls.filter(call => call === 'history.start').length, 2,
+    'Finish the old traversal, then obtain fresh coverage for this cycle');
+});
+
+test('actual collector rolling quota recovers across scheduled cycles without restarting its paused traversal', async () => {
+  const f = fixture({continuations: true}), ctx = {initData: {user: {id: 42}}}, collection = address(30);
+  f.mutate(saved => Object.assign(saved, {version: 2, next_job_id: 1,
+    attempts: Array(499).fill(START - 23 * 3600000), next_allowed_at: 0}));
+  f.repository.records = async () => [{kind: 'portfolio', record: {
+    nft_address: address(2), is_portfolio: true, collection_address: collection}}];
+  f.repository.jobs = async () => f.state().job ? [f.state().job] : [];
+  const requests = [], resumed = [];
+  const collector = createCloudEngine({repository: f.repository, ownerTelegramId: 42,
+    marketappToken: 'synthetic', now: f.at, fetch: async url => {
+      requests.push(new URL(url).pathname);
+      return Response.json(requests.at(-1) === '/v1/collections/gifts/'
+        ? [{address: collection, name: 'Gift', extra_data: {}}] : {cursor: null, items: []});
+    }});
+  f.dependencies.history = {
+    status: () => collector.getJobs(ctx),
+    start: async input => {
+      const result = await collector.startJob(ctx, input);
+      // The trusted runtime stamps this scope; older portable engines used by
+      // GitHub's test checkout do not have that optional constructor hook.
+      f.mutate(saved => {saved.job.background_history = {version: 1, targets: [...saved.background_monitoring.run.targets].sort()};});
+      return result;
+    },
+    step: input => collector.stepJob(ctx, input),
+    resume: input => {resumed.push(input.job_id); return collector.resumeJob(ctx, input);},
+  };
+  assert.equal((await f.complete()).state, 'partial');
+  const paused = f.state().job;
+  assert.equal(paused.reason, 'daily_limit'); assert.equal(paused.pages, 1);
+  assert.equal(f.state().attempts.length, 500); assert.equal(requests.length, 1);
+  const exhausted = (await collector.getJobs(ctx)).jobs[0].progress;
+  assert.ok(exhausted.next_allowed_at <= f.at(), 'Request pacing already elapsed while the daily quota is still exhausted');
+  assert.equal(exhausted.marketapp_budget.rolling_24h_used, 500);
+  f.advance(Date.parse(f.state().background_monitoring.next_check_at) - f.at());
+  assert.equal((await f.complete()).state, 'complete');
+  assert.deepEqual(resumed, [paused.id]);
+  assert.deepEqual(requests, ['/v1/collections/gifts/', '/v1/rent/gifts/history/',
+    '/v1/collections/gifts/', '/v1/rent/gifts/history/']);
+  assert.equal(f.state().attempts.length, 4, 'Only the collector expires old attempts and charges the four actual requests');
+});
+
+test('daily-limit recovery requires fresh valid quota evidence rather than an elapsed request wait', async () => {
+  const ready = {rolling_24h_used: 499, rolling_24h_limit: 500, available_at: null};
+  for (const budget of [undefined, {}, {...ready, rolling_24h_used: 500}, {...ready, rolling_24h_used: -1},
+    {...ready, rolling_24h_used: '499'}, {...ready, rolling_24h_limit: 0}, {...ready, rolling_24h_limit: 501},
+    {...ready, available_at: undefined}, {...ready, available_at: 'invalid'},
+    {...ready, available_at: new Date(START + LIMITS.cadence_ms).toISOString()}]) {
+    const f = fixture({continuations: true}); await f.until('history_poll');
+    f.mutate(saved => {saved.job.state = 'partial'; saved.job.reason = 'daily_limit'; saved.job.next_allowed_at = 0;});
+    historyQuotaStatus(f, () => budget);
+    assert.equal((await f.complete()).state, 'partial');
+    assert.equal(f.calls.includes('history.resume'), false); assert.equal(f.calls.includes('history.step'), false);
+  }
+});
+
+test('recovered daily allowance still respects the existing provider request wait before Resume', async () => {
+  const f = fixture({continuations: true}); await f.until('history_poll');
+  historyQuotaStatus(f, () => ({rolling_24h_used: 499, rolling_24h_limit: 500,
+    available_at: new Date(f.at() - 1000).toISOString()}));
+  f.mutate(saved => {saved.job.state = 'partial'; saved.job.reason = 'daily_limit'; saved.job.next_allowed_at = f.at() + 1000;});
+  assert.equal((await f.tick()).state, 'waiting'); assert.equal(f.calls.includes('history.resume'), false);
+  f.advance(); assert.equal((await f.tick()).state, 'running');
+  assert.equal(f.calls.filter(call => call === 'history.resume').length, 1);
+});
+
+test('quota consumed after status is honored by Resume without a provider step or another segment', async () => {
+  const f = fixture({continuations: true}); await f.until('history_poll');
+  historyQuotaStatus(f, () => ({rolling_24h_used: 499, rolling_24h_limit: 500, available_at: null}));
+  f.mutate(saved => {saved.job.state = 'partial'; saved.job.reason = 'daily_limit';});
+  let resumes = 0;
+  f.dependencies.history.resume = async (input, context) => {
+    resumes++; assert.equal(input.job_id, f.state().job.id);
+    assert.equal(context.lease.token, f.state().background_monitoring.run.lease.token);
+    return {job: {...f.state().job, progress: {next_allowed_at: 0, marketapp_budget: {
+      rolling_24h_used: 500, rolling_24h_limit: 500, available_at: new Date(f.at() + 3600000).toISOString()}}}};
+  };
+  const result = await f.complete();
+  assert.equal(result.state, 'partial'); assert.equal(result.continuation_pending, undefined);
+  assert.equal(resumes, 1); assert.equal(f.calls.includes('history.step'), false);
+  assert.equal(f.state().background_monitoring.run.continuation.segment, 1);
+});
+
 test('low server analytics budget yields without inventing an unavailable report', async () => {
   for (const slowAuthorization of [false, true]) {
     const f = fixture({continuations: true}); let refreshed = 0, delayed = false;
