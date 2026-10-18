@@ -3,7 +3,7 @@
 // and provider request. This worker has no transaction or notification API.
 export const BACKGROUND_MONITORING_LIMITS = Object.freeze({
   cadence_ms: 6 * 60 * 60 * 1000, run_ms: 20 * 60 * 1000,
-  lease_ms: 120000, history_steps: 100, history_resumes: 3, manual_retry_ms: 60000,
+  lease_ms: 120000, history_steps: 100, history_resumes: 3, history_daily_attempts: 500, manual_retry_ms: 60000,
   gift_resumes: 1, gift_resume_ms: 300000, gift_history_reserve_ms: 300000, gift_attempts: 20, gift_daily_attempts: 1000,
   dashboard_prepare_ms: 25000, dashboard_prepare_age_ms: 5 * 60 * 1000,
   analytics_refresh_ms: 60000, analytics_evaluation_reserve_ms: 60000,
@@ -386,6 +386,17 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       || run.history_job_id !== null && job.id !== run.history_job_id) throw new BackgroundMonitoringError('BACKGROUND_HISTORY_INVALID');
     return job;
   }
+  function historyDailyAvailable(job, at) {
+    const budget = job.progress?.marketapp_budget, available = time(budget?.available_at);
+    // next_allowed_at is only a request/lease wait, not proof that the daily
+    // allowance recovered. Read current quota evidence before resuming the
+    // same saved cursor; Resume still enforces the provider's atomic budget.
+    return object(budget) && count(job.progress?.next_allowed_at)
+      && count(budget.rolling_24h_used) && Number.isSafeInteger(budget.rolling_24h_limit)
+      && budget.rolling_24h_limit > 0 && budget.rolling_24h_limit <= BACKGROUND_MONITORING_LIMITS.history_daily_attempts
+      && budget.rolling_24h_used < budget.rolling_24h_limit
+      && (budget.available_at === null || millis(available) && available <= at);
+  }
   async function saveHistory(claim, result) {
     const job = jobResult(result, claim);
     const selected = (await repository.read()).state.job;
@@ -408,11 +419,11 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       }
       else if (job.state === 'failed' || job.stop_requested) {
         ledger.reason = job.stop_requested ? 'history_stopped' : 'history_partial'; run.stage = afterHistory(); run.next_action_at = at;
-      } else if (selected.reason === 'daily_limit') {
+      } else if (selected.reason === 'daily_limit' && !historyDailyAvailable(job, at)) {
         // A new runner segment does not restore the provider's daily allowance.
         ledger.reason = 'history_partial'; run.stage = afterHistory(); run.next_action_at = at;
       } else if (run.next_action_at >= run.deadline) {
-        if (continuation(run) && selected.reason !== 'daily_limit' && run.next_action_at < cycleDeadline(run))
+        if (continuation(run) && run.next_action_at < cycleDeadline(run))
           markPending(ledger, at, claim.last_runner_id);
         else {ledger.reason = 'history_partial'; run.stage = afterHistory(); run.next_action_at = at;}
       }
@@ -615,7 +626,8 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
         const status = await history.status(context(claim));
         result = {job: status?.jobs?.find(job => job.id === claim.history_job_id)};
         const job = jobResult(result, claim), at = await now();
-        if (job.state === 'complete' || job.state === 'failed' || job.stop_requested || saved.state.job.reason === 'daily_limit'
+        if (job.state === 'complete' || job.state === 'failed' || job.stop_requested
+          || saved.state.job.reason === 'daily_limit' && !historyDailyAvailable(job, at)
           || waitAt(job.progress?.next_allowed_at, at) > at) {
           const row = await saveHistory(claim, result); return reply(row, at, row.run.next_action_at > at ? 'waiting' : null, row.run.next_action_at || null);
         }
