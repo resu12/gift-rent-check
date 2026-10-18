@@ -157,6 +157,95 @@ test('read-only check builds only the needed deployed dependency closure without
   await assert.rejects(missing.run(),/Missing administration dependency/);assert.equal(missing.calls.length,1);
 });
 
+test('an interrupted successful source response retries only the read-only download before starting the worker',async()=>{
+  let reads=0,writes=0,loads=0;
+  const api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async(url)=>{
+    if(url.endsWith('/get')) {
+      assert.equal(loads,0);assert.equal(writes,0);
+      if(++reads===1) {
+        let chunks=0;
+        return new Response(new ReadableStream({pull(controller){
+          if(chunks++===0)controller.enqueue(new TextEncoder().encode('{"ok":true,"result":'));
+          else controller.error(new TypeError(token+' interrupted source body'));
+        }}),{status:200});
+      }
+      return Response.json({ok:true,result:{canonical_modules:canonical}});
+    }
+    writes++;return Response.json({ok:true,result:{result:{state:'complete'}}});
+  }});
+  const f=fixture([],{api,loadSources:()=>{loads++;assert.equal(reads,2);return local;}});
+  assert.deepEqual(await f.run(),{state:'complete'});
+  assert.equal(reads,2);assert.equal(writes,1);assert.equal(loads,1);assert.deepEqual(f.waits,[1000]);
+  assert.deepEqual(f.output,[{state:'recovering',error:'network_error',stage:'get_files',http_status:200},{state:'complete'}]);
+  assert.ok(!JSON.stringify(f.output).includes(token));
+});
+
+test('source recovery has two retries with bounded backoff and preserves the terminal failure diagnostics',async()=>{
+  for(const [reason,httpStatus] of [['network_error',200],['request_timeout',200],['http_error',503]]) {
+    let reads=0,loads=0,writes=0;const failure=new MonitoringAdminError(reason,'get_files',httpStatus);
+    const f=fixture([],{loadSources:()=>{loads++;return local;},api:{
+      getFiles:async()=>{reads++;throw failure;},runFunction:async()=>{writes++;return {result:{state:'complete'}};}}});
+    await assert.rejects(f.run(),error=>error===failure);
+    assert.equal(reads,3);assert.equal(loads,0);assert.equal(writes,0);assert.deepEqual(f.waits,[1000,2000]);
+    assert.deepEqual(f.output,Array.from({length:2},()=>({state:'recovering',error:reason,stage:'get_files',http_status:httpStatus})));
+  }
+});
+
+test('source retries use the original deadline and never start after waiting exhausts it',async()=>{
+  for(const [budget,elapsedBeforeFailure,waitElapsed,expectedReads,expectedWaits] of [
+    [1000,0,1000,1,[]],[2000,1000,1000,1,[]],[2000,0,2100,1,[1000]],
+    [5000,3000,1000,2,[1000]],
+  ]) {
+    let elapsed=0,reads=0;const timeouts=[],waits=[],failure=new MonitoringAdminError('network_error','get_files',200);
+    const f=fixture([],{limits:{duration_ms:budget},monotonic:()=>elapsed,sleep:async ms=>{waits.push(ms);elapsed+=waitElapsed;},
+      api:{getFiles:async({timeoutMs})=>{timeouts.push(timeoutMs);reads++;elapsed+=elapsedBeforeFailure;throw failure;},
+        runFunction:async()=>{throw Error('must not execute');}}});
+    await assert.rejects(f.run(),error=>error===failure);
+    assert.equal(reads,expectedReads);assert.deepEqual(waits,expectedWaits);
+    assert.equal(timeouts[0],budget);
+    if(reads===2)assert.equal(timeouts[1],1000);
+  }
+  let readings=0,requests=0;
+  const alreadyExpired=fixture([],{limits:{duration_ms:1},monotonic:()=>readings++===0?0:2,
+    api:{getFiles:async()=>{requests++;return {canonical_modules:canonical};}}});
+  await assert.rejects(alreadyExpired.run(),error=>error.reason==='request_timeout'&&error.stage==='get_files');
+  assert.equal(requests,0);
+});
+
+test('source retries retain elapsed time when deciding whether optional analytics fits',async()=>{
+  let elapsed=0,reads=0,loads=0;const sourceTimeouts=[],inputs=[];
+  const f=fixture([],{limits:{duration_ms:260000},monotonic:()=>elapsed,sleep:async ms=>{elapsed+=ms;},
+    loadSources:()=>{loads++;return local;},api:{
+      getFiles:async({timeoutMs})=>{sourceTimeouts.push(timeoutMs);reads++;elapsed+=80000;
+        if(reads===1)throw new MonitoringAdminError('network_error','get_files',200);
+        return {canonical_modules:canonical};},
+      runFunction:async(_sources,input,{timeoutMs})=>{inputs.push({input,timeoutMs});return {result:{state:'complete'}};}}});
+  assert.deepEqual(await f.run(),{state:'complete'});assert.equal(reads,2);assert.equal(loads,1);
+  assert.deepEqual(sourceTimeouts,[90000,90000]);
+  assert.deepEqual(inputs,[{input:{runner_id:runner,skip_analytics:true},timeoutMs:90000}]);
+});
+
+test('source authentication, malformed responses, size and remote execution failures are not retried',async()=>{
+  const cases=[
+    ...[400,401,403,429].map(status=>[()=>new Response(token,{status}),'http_error',status]),
+    [()=>new Response('{'+token),'invalid_json',200],
+    [()=>Response.json({ok:true,secret:token}),'invalid_envelope',200],
+    [()=>Response.json({ok:true,result:{}}),'invalid_response',undefined],
+    [()=>new Response('x'.repeat(RUNNER_LIMITS.source_bytes+1)),'response_too_large',200],
+    ...[200,400,500].map(status=>[()=>Response.json({ok:false,error_type:'CODE_RUN_FAILED',error_code:400,description:token},{status}),'remote_error',status]),
+  ];
+  for(const [response,reason,status] of cases) {
+    let requests=0,loads=0;
+    const api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async()=>{requests++;return response();}});
+    const f=fixture([],{api,loadSources:()=>{loads++;return local;}});
+    await assert.rejects(f.run(),error=>error.reason===reason&&error.stage==='get_files'&&error.http_status===status);
+    assert.equal(requests,1);assert.equal(loads,0);assert.deepEqual(f.waits,[]);assert.deepEqual(f.output,[]);
+  }
+  const wrongStage=fixture([],{api:{getFiles:async()=>{throw new MonitoringAdminError('network_error','tick',200);}}});
+  await assert.rejects(wrongStage.run(),error=>error.reason==='network_error'&&error.stage==='tick');
+  assert.deepEqual(wrongStage.waits,[]);assert.deepEqual(wrongStage.output,[]);
+});
+
 test('worker waits resume with the same runner ID and sanitized progress only',async()=>{
   const f=fixture([{state:'running',checked:1,total:3,token,items:['gift']},
     {state:'waiting',checked:2,total:3,retry_at:new Date(start+65000).toISOString(),provider_url:'private'},
@@ -377,7 +466,8 @@ test('unknown failures and malformed results stop without a speculative retry',a
 test('CLI failure logs contain only safe enums even when the administrative failure contains secrets',async t=>{
   let requests=0;t.mock.method(globalThis,'fetch',async()=>{requests++;throw Error(token+' private source');});
   const output=[],exit=await monitoringMain({args:['--app-id','123'],env:{BACKGROUND_MONITORING_ENABLED:'true',TGCLOUD_TOKEN:token},emit:value=>output.push(value)});
-  assert.equal(exit,1);assert.deepEqual(output,[{state:'failed',error:'network_error',stage:'get_files'}]);assert.equal(requests,1);
+  assert.equal(exit,1);assert.deepEqual(output,[{state:'recovering',error:'network_error',stage:'get_files'},
+    {state:'recovering',error:'network_error',stage:'get_files'},{state:'failed',error:'network_error',stage:'get_files'}]);assert.equal(requests,3);
 });
 
 test('transport diagnostics distinguish HTTP errors, malformed envelopes and remote execution failures without bodies',async()=>{
