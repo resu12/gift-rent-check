@@ -68,29 +68,131 @@ test('administrative transport pins the official get/run protocol, identity and 
     assert.deepEqual(JSON.parse(requests.at(-1).options.body).args,{runner_id:runner,skip_analytics});
   }
   assert.equal(requests.length,7);
+  for(const yield_only of ['true',1,null,{},[]])assert.throws(()=>api.runFunction({}, {runner_id:runner,yield_only}));
+  for(const yield_only of [true,false]) {
+    for(const other of [{retry:true},{retry:false},{status_only:true},{prewarm_only:true},{skip_analytics:true},{skip_analytics:false}])
+      assert.throws(()=>api.runFunction({}, {runner_id:runner,...other,yield_only}));
+    await api.runFunction({}, {runner_id:runner,yield_only});
+    assert.deepEqual(JSON.parse(requests.at(-1).options.body).args,{runner_id:runner,yield_only});
+  }
+  assert.equal(requests.length,9);
 });
 
-test('runner reserves two bounded requests before allowing optional analytics',async()=>{
-  const reserve=2*RUNNER_LIMITS.request_ms+1000;
-  for(const [remaining,steps,skip] of [[reserve-1,2,true],[reserve,2,false],[reserve+1,2,false],[reserve+1,1,true]]) {
+test('runner reserves work, durable yield and prewarm budgets before claiming a cycle',async()=>{
+  const reserve=2*RUNNER_LIMITS.request_ms+RUNNER_LIMITS.prewarm_ms+1000;
+  for(const [remaining,steps,inspect] of [[reserve-1,2,true],[reserve,2,false],[reserve+1,2,false],[reserve+1,1,true]]) {
     const f=fixture([{state:'complete'}],{limits:{duration_ms:remaining,steps}});
-    assert.equal((await f.run()).state,'complete');
+    assert.equal((await f.run()).state,inspect?'partial':'complete');
     const input=f.calls.find(call=>call.operation==='run').input;
-    assert.deepEqual(input,{runner_id:runner,...(skip?{skip_analytics:true}:{})});
+    assert.deepEqual(input,{runner_id:runner,...(inspect?{status_only:true}:{})});
   }
 });
 
-test('analytics budget uses elapsed monotonic time including source loading despite wall-clock changes',async()=>{
-  const reserve=2*RUNNER_LIMITS.request_ms+1000;
-  for(const [elapsed,wallShift,skip] of [[80000,-3600000,true],[0,3600000,false]]) {
+test('work budget includes source loading despite wall-clock changes and cannot skip analytics',async()=>{
+  const reserve=2*RUNNER_LIMITS.request_ms+RUNNER_LIMITS.prewarm_ms+1000;
+  for(const [elapsed,wallShift,inspect] of [[80000,-3600000,true],[0,3600000,false]]) {
     let monotonic=0,wall=start;
     const f=fixture([{state:'complete'}],{limits:{duration_ms:reserve+79000},now:()=>wall,monotonic:()=>monotonic});
     f.args.api.getFiles=async()=>{monotonic+=elapsed;wall+=wallShift;return {canonical_modules:canonical};};
-    assert.equal((await f.run()).state,'complete');
+    assert.equal((await f.run()).state,inspect?'partial':'complete');
     const call=f.calls.find(row=>row.operation==='run');
-    assert.deepEqual(call.input,{runner_id:runner,...(skip?{skip_analytics:true}:{})});
+    assert.deepEqual(call.input,{runner_id:runner,...(inspect?{status_only:true}:{})});
     assert.equal(call.value.timeoutMs,Math.min(RUNNER_LIMITS.request_ms,reserve+79000-elapsed));
   }
+});
+
+test('runner checkpoints before exhausting its time or final request and never prewarms a continuation',async()=>{
+  const retry_at=new Date(start+900000).toISOString();
+  for(const mode of ['time','steps']) {
+    let elapsed=0;
+    const f=fixture([{state:'running',checked:161,total:161},
+      {state:'partial',checked:161,total:161,continuation_pending:true,retry_at}],{
+      limits:mode==='time'?{duration_ms:260000}:{steps:2},monotonic:()=>elapsed});
+    f.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']+'\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;'}});
+    const execute=f.args.api.runFunction;
+    f.args.api.runFunction=async(...args)=>{const response=await execute(...args);if(mode==='time'&&!args[1].yield_only)elapsed+=60000;return response;};
+    assert.deepEqual(await f.run(),{state:'partial',checked:161,total:161,continuation_pending:true,retry_at});
+    assert.deepEqual(f.calls.map(call=>call.input),[{runner_id:runner},{runner_id:runner,yield_only:true}]);
+    assert.equal(f.calls[1].value.timeoutMs,RUNNER_LIMITS.request_ms);
+    assert.ok(!f.output.some(row=>Object.hasOwn(row,'dashboard_preparation')));assert.deepEqual(f.waits,[]);
+  }
+});
+
+test('a continuation response is terminal even with ample time and manual retry enabled',async()=>{
+  const pending={state:'partial',continuation_pending:true,retry_at:new Date(start+900000).toISOString()};
+  const f=fixture([pending,{state:'complete',runner_acknowledged:true}],{retry:true});
+  assert.deepEqual(await f.run(),pending);
+  assert.deepEqual(f.calls.filter(row=>row.operation==='run').map(row=>row.input),[{runner_id:runner,retry:true}]);
+  assert.deepEqual(f.waits,[]);assert.deepEqual(f.output,[pending]);
+});
+
+test('an insufficient initial budget cannot retry or prewarm a previously completed cycle',async()=>{
+  const f=fixture([{state:'complete',runner_acknowledged:true,checked:161,total:161}],{
+    retry:true,limits:{duration_ms:200000}});
+  f.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']+'\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;'}});
+  assert.deepEqual(await f.run(),{state:'partial',checked:161,total:161});
+  assert.deepEqual(f.calls.map(row=>row.input),[{runner_id:runner,status_only:true}]);
+  assert.ok(!f.output.some(row=>row.state==='complete'||Object.hasOwn(row,'dashboard_preparation')));
+});
+
+test('lost yield response is reconciled through status without repeating the checkpoint or provider tick',async()=>{
+  let elapsed=0;
+  const pending={state:'partial',continuation_pending:true,retry_at:new Date(start+900000).toISOString(),runner_acknowledged:true};
+  const f=fixture([{state:'running'},new MonitoringAdminError('request_timeout','tick'),pending],{
+    limits:{duration_ms:300000},monotonic:()=>elapsed,sleep:async ms=>{elapsed+=ms;}});
+  const execute=f.args.api.runFunction;
+  f.args.api.runFunction=async(...args)=>{
+    if(!args[1].status_only)elapsed+=90000;
+    return execute(...args);
+  };
+  assert.deepEqual(await f.run(),{state:'partial',continuation_pending:true,retry_at:pending.retry_at});
+  assert.deepEqual(f.calls.filter(row=>row.operation==='run').map(row=>row.input),
+    [{runner_id:runner},{runner_id:runner,yield_only:true},{runner_id:runner,status_only:true}]);
+  assert.ok(!f.output.some(row=>Object.hasOwn(row,'dashboard_preparation')));
+});
+
+test('an old pending continuation cannot acknowledge an uncertain claim by another runner',async()=>{
+  const pending={state:'partial',continuation_pending:true,retry_at:new Date(start+900000).toISOString(),runner_acknowledged:false};
+  const f=fixture([new MonitoringAdminError('network_error','tick'),pending,pending,pending]);
+  await assert.rejects(f.run(),error=>error.reason==='recovery_exhausted');
+  assert.deepEqual(f.calls.filter(row=>row.operation==='run').map(row=>row.input),
+    [{runner_id:runner},...Array.from({length:3},()=>({runner_id:runner,status_only:true}))]);
+  assert.ok(!f.output.some(row=>row.continuation_pending===true));
+});
+
+test('recovered provider ticks wait for the live lease before checkpointing and never claim an unsaved continuation',async()=>{
+  for(const leaseDelay of [20000,100000]) {
+    let elapsed=0;
+    const retry_at=new Date(start+90000+leaseDelay).toISOString();
+    const pending={state:'partial',continuation_pending:true,retry_at:new Date(start+900000).toISOString()};
+    const f=fixture([new MonitoringAdminError('network_error','tick'),{state:'running',retry_at},pending],{
+      limits:{duration_ms:250000},now:()=>start+elapsed,monotonic:()=>elapsed,sleep:async ms=>{elapsed+=ms;}});
+    const execute=f.args.api.runFunction;
+    f.args.api.runFunction=async(...args)=>{if(!args[1].status_only&&!args[1].yield_only)elapsed+=90000;return execute(...args);};
+    const result=await f.run(),inputs=f.calls.filter(row=>row.operation==='run').map(row=>row.input);
+    assert.deepEqual(inputs.slice(0,2),[{runner_id:runner},{runner_id:runner,status_only:true}]);
+    assert.ok(elapsed>=90000+leaseDelay);
+    if(leaseDelay===20000) {
+      assert.deepEqual(result,pending);assert.deepEqual(inputs[2],{runner_id:runner,yield_only:true});
+    } else {
+      assert.equal(inputs.length,2);assert.deepEqual(result,{state:'partial',retry_at});
+    }
+  }
+});
+
+test('a legacy read-only yield reply cannot trigger more work or claim a continuation',async()=>{
+  const f=fixture([{state:'running',checked:1,total:2},{state:'running',checked:1,total:2}],{limits:{steps:2}});
+  assert.deepEqual(await f.run(),{state:'partial',checked:1,total:2});
+  assert.deepEqual(f.calls.filter(row=>row.operation==='run').map(row=>row.input),[{runner_id:runner},{runner_id:runner,yield_only:true}]);
+});
+
+test('only well-formed continuation metadata enters sanitized runner output',()=>{
+  const retry_at=new Date(start+900000).toISOString();
+  assert.deepEqual(monitoringSummary({state:'partial',continuation_pending:true,retry_at,secret:token}),
+    {state:'partial',retry_at,continuation_pending:true});
+  for(const value of [{state:'partial',continuation_pending:true},
+    ...['running','complete','waiting'].map(state=>({state,continuation_pending:true,retry_at})),
+    ...['true',1,null,{}].map(continuation_pending=>({state:'partial',continuation_pending,retry_at}))])assert.throws(()=>monitoringSummary(value));
 });
 
 test('acknowledged completion prepares the dashboard once in a separate bounded optional request',async()=>{
@@ -124,7 +226,7 @@ test('dashboard preparation is skipped for old runtimes, unacknowledged cycles a
     const f=fixture([{state:mode==='partial'?'partial':'complete',runner_acknowledged:mode!=='unacknowledged'}],
       mode==='time'?{limits:{duration_ms:RUNNER_LIMITS.prewarm_ms-1}}:mode==='steps'?{limits:{steps:1}}:{});
     f.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']+(mode==='old_runtime'?'':'\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;')}});
-    assert.equal((await f.run()).state,mode==='partial'?'partial':'complete');
+    assert.equal((await f.run()).state,['partial','time','steps'].includes(mode)?'partial':'complete');
     assert.equal(f.calls.length,1);assert.equal(f.output.length,1);
   }
 });
@@ -212,7 +314,7 @@ test('source retries use the original deadline and never start after waiting exh
   assert.equal(requests,0);
 });
 
-test('source retries retain elapsed time when deciding whether optional analytics fits',async()=>{
+test('slow source retries leave an unclaimed cycle for the next scheduled runner',async()=>{
   let elapsed=0,reads=0,loads=0;const sourceTimeouts=[],inputs=[];
   const f=fixture([],{limits:{duration_ms:260000},monotonic:()=>elapsed,sleep:async ms=>{elapsed+=ms;},
     loadSources:()=>{loads++;return local;},api:{
@@ -220,9 +322,9 @@ test('source retries retain elapsed time when deciding whether optional analytic
         if(reads===1)throw new MonitoringAdminError('network_error','get_files',200);
         return {canonical_modules:canonical};},
       runFunction:async(_sources,input,{timeoutMs})=>{inputs.push({input,timeoutMs});return {result:{state:'complete'}};}}});
-  assert.deepEqual(await f.run(),{state:'complete'});assert.equal(reads,2);assert.equal(loads,1);
+  assert.deepEqual(await f.run(),{state:'partial'});assert.equal(reads,2);assert.equal(loads,1);
   assert.deepEqual(sourceTimeouts,[90000,90000]);
-  assert.deepEqual(inputs,[{input:{runner_id:runner,skip_analytics:true},timeoutMs:90000}]);
+  assert.deepEqual(inputs,[{input:{runner_id:runner,status_only:true},timeoutMs:90000}]);
 });
 
 test('source authentication, malformed responses, size and remote execution failures are not retried',async()=>{
