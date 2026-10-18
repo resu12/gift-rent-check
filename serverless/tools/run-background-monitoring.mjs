@@ -10,7 +10,7 @@ import {adminModuleSources} from './admin-module-sources.mjs';
 import {requireId,validateAuthenticatedDestination,validateServerlessEnvironment} from './destination.mjs';
 
 export const MONITORING_ENDPOINT='endpoints/backgroundMonitoringTick';
-export const RUNNER_LIMITS=Object.freeze({duration_ms:20*60*1000,steps:200,request_ms:90000,source_bytes:8*1024*1024,response_bytes:1024*1024,sleep_ms:60000,recoveries:3,prewarm_ms:30000,analytics_handoff_ms:1000});
+export const RUNNER_LIMITS=Object.freeze({duration_ms:20*60*1000,steps:200,request_ms:90000,source_bytes:8*1024*1024,response_bytes:1024*1024,sleep_ms:60000,source_retries:2,recoveries:3,prewarm_ms:30000,analytics_handoff_ms:1000});
 const states=new Set(['running','waiting','busy','complete','paused','disabled','partial','blocked','failed']);
 const object=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 const reasons=new Set(['invalid_request','invalid_response','invalid_json','invalid_envelope','invalid_result','response_too_large','network_error','request_timeout','http_error','remote_error','capability_missing','source_error','unacknowledged_status','recovery_exhausted','unexpected_error']);
@@ -157,7 +157,21 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
   if(!enabled&&!check){const result={state:'disabled'};emit(result);return result;}
   const began=monotonic(),remaining=()=>Math.floor(cap.duration_ms-(monotonic()-began));
   const requestTime=()=>Math.max(1,Math.min(cap.request_ms,remaining()));
-  const deployed=await api.getFiles({timeoutMs:requestTime()});
+  let deployed;
+  for(let attempt=0;;attempt++) {
+    if(remaining()<=0)fail('request_timeout','get_files');
+    try {deployed=await api.getFiles({timeoutMs:requestTime()});break;}
+    catch(error) {
+      // Only this read-only download is replayed. An interrupted /run may
+      // already have committed a checkpoint and retains status-only recovery.
+      if(!recoverable(error)||error.stage!=='get_files'||attempt>=cap.source_retries)throw error;
+      const backoff=1000*2**attempt;
+      if(backoff>=remaining())throw error;
+      emit({state:'recovering',...diagnostic(error)});
+      await sleep(backoff);
+      if(remaining()<=0)throw error;
+    }
+  }
   if(!object(deployed?.canonical_modules))fail('invalid_response','get_files');
   // The bridge must use the reviewed deployed owner-access implementation.
   // The additive capability keeps existing v1 runners compatible while this
