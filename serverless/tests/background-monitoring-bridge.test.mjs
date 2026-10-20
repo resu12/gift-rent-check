@@ -22,6 +22,63 @@ function bridge(options={}) {
 }
 const input={runner_id:'a'.repeat(64)}, admin={background_worker:'price-monitoring-v1'};
 
+test('split preparation phases require exact exclusive inputs before obtaining owner access',async()=>{
+  const f=bridge();
+  for(const prewarm_stage of ['basis','cards'])for(const extra of [{},{prewarm_only:false},{prewarm_confirm_only:true},
+    {status_only:true},{prewarm_only:true,retry:false},{prewarm_only:true,skip_analytics:false},
+    {prewarm_only:true,yield_only:false},{prewarm_only:true,prewarm_confirm_only:true}])
+    await assert.rejects(f.call({...input,prewarm_stage,...extra},admin),/BACKGROUND_ACCESS_DENIED/);
+  for(const prewarm_stage of [undefined,null,false,1,{},[],'prepare','confirm','Basis','basis '])
+    await assert.rejects(f.call({...input,prewarm_only:true,prewarm_stage},admin),/BACKGROUND_ACCESS_DENIED/);
+  assert.equal(f.accesses(),0);
+});
+
+test('split bridge capability requires both builders and read-only confirmation',async()=>{
+  const dashboard={version:1,prewarm:async()=>{},confirmation_version:1,prepare:async()=>{},confirm:async()=>{},
+    preparation_version:2,prepareBasis:async()=>{},prepareCards:async()=>{}};
+  for(const change of [{preparation_version:1},{preparation_version:undefined},{confirmation_version:0},
+    {prepareBasis:undefined},{prepareCards:undefined},{confirm:undefined}]) {
+    const f=bridge({dashboard:{...dashboard,...change},assertScopeReadOnly:async()=>{}});
+    assert.deepEqual(JSON.parse(JSON.stringify(await f.call({...input,prewarm_only:true,prewarm_stage:'basis'},admin))),
+      {state:'failed',execution_code:'BACKGROUND_PREWARM_UNSUPPORTED'});
+  }
+  const absent=bridge({dashboard});
+  assert.deepEqual(JSON.parse(JSON.stringify(await absent.call({...input,prewarm_only:true,prewarm_stage:'cards'},admin))),
+    {state:'failed',execution_code:'BACKGROUND_PREWARM_UNSUPPORTED'});
+  for(const prewarm_stage of ['basis','cards']) {
+    let received;
+    const f=bridge({dashboard,assertScopeReadOnly:async()=>{},worker:{prewarm:async value=>{received=value;return {state:'pending'};}}});
+    assert.equal((await f.call({...input,prewarm_only:true,prewarm_stage},admin)).state,'pending');
+    assert.deepEqual(received,{...input,prewarm_only:true,prewarm_stage});
+  }
+});
+
+test('split cache guard binds the exact authorized phase without changing cycle or deadline fencing',async()=>{
+  const run={id:input.runner_id+':1',session_id:'session',stage:'done',lease:null,gift_complete:true,history_complete:true};
+  const ledger={state:'complete',run,last_success_at:new Date(900).toISOString(),last_finished_at:new Date(900).toISOString()};
+  const dashboard={version:1,prewarm:async()=>{},confirmation_version:1,prepare:async()=>{},confirm:async()=>{},
+    preparation_version:2,prepareBasis:async()=>{},prepareCards:async()=>{}};
+  for(const prewarm_stage of ['basis','cards']) {
+    const f=bridge({ledger,dashboard,assertScopeReadOnly:async()=>{}});
+    await f.call({...input,prewarm_only:true,prewarm_stage},admin);
+    const context={run_id:run.id,session_id:run.session_id,prewarm_only:true,prepare_stage:prewarm_stage,deadline:26000};
+    await f.guard(context);
+    for(const prepare_stage of [undefined,null,'prepare','confirm',prewarm_stage==='basis'?'cards':'basis'])
+      await assert.rejects(f.guard({...context,prepare_stage}),/BACKGROUND_PREWARM_DENIED/);
+    await assert.rejects(f.guard({...context,confirm_only:true}),/BACKGROUND_PREWARM_DENIED/);
+    await assert.rejects(f.guard({...context,deadline:26001}),/BACKGROUND_PREWARM_DENIED/);
+    await assert.rejects(f.guard({...context,deadline:1000}),/BACKGROUND_PREWARM_TIMEOUT/);
+    await assert.rejects(f.guard({...context,run_id:'other'}),/BACKGROUND_LEASE_LOST/);
+  }
+  for(const mode of ['prewarm_only','prewarm_confirm_only']) {
+    const f=bridge({ledger,dashboard,assertScopeReadOnly:async()=>{}});
+    await f.call({...input,[mode]:true},admin);
+    const context={run_id:run.id,session_id:run.session_id,prewarm_only:true,
+      ...(mode==='prewarm_confirm_only'?{confirm_only:true}:{}),deadline:11000,prepare_stage:'basis'};
+    await assert.rejects(f.guard(context),/BACKGROUND_PREWARM_DENIED/);
+  }
+});
+
 test('ordinary Mini App contexts and arbitrary worker actions never obtain owner access',async()=>{
   const f=bridge();
   for(const [args,ctx] of [[input,{}],[input,{initData:{user:{id:12345}}}],

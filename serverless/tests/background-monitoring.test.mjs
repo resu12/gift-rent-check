@@ -439,6 +439,75 @@ test('staged dashboard work needs a separate read-only confirmation with its own
   assert.deepEqual(f.state(),state);assert.equal(f.revision(),revision);assert.deepEqual(f.calls,providers);
 });
 
+test('split cache preparation has two separately bounded builders and one read-only confirmation',async()=>{
+  const f=fixture();await f.complete();const calls=[];
+  f.dependencies.assertScopeReadOnly=f.dependencies.assertScope;
+  f.dependencies.assertScope=async()=>{throw Error('Mutable scope path forbidden');};
+  f.dependencies.dashboard={version:1,confirmation_version:1,preparation_version:2,
+    prewarm:async()=>{throw Error('Legacy path forbidden');},
+    prepare:async context=>{calls.push(['legacy',copy(context)]);return {staged:true};},
+    prepareBasis:async context=>{calls.push(['basis',copy(context)]);f.advance(24000);return {staged:true};},
+    prepareCards:async context=>{calls.push(['cards',copy(context)]);f.advance(24000);return {staged:true};},
+    confirm:async context=>{calls.push(['confirm',copy(context)]);return {prepared:true};}};
+  const state=f.state(),revision=f.revision(),providers=[...f.calls],worker=createBackgroundMonitoringWorker(f.dependencies),at=f.at();
+  assert.deepEqual(await worker.prewarm({runner_id:RUNNER,prewarm_stage:'basis'}),{state:'pending'});
+  assert.deepEqual(await worker.prewarm({runner_id:RUNNER,prewarm_stage:'cards'}),{state:'pending'});
+  assert.deepEqual(await worker.confirmPreparation({runner_id:RUNNER}),{state:'prepared'});
+  assert.deepEqual(calls.map(([stage,context])=>[stage,context.prepare_stage,context.confirm_only,context.deadline]),[
+    ['basis','basis',undefined,at+25000],['cards','cards',undefined,at+24000+25000],
+    ['confirm',undefined,true,at+48000+10000]]);
+  for(const [,context] of calls) {
+    assert.equal(context.run_id,state.background_monitoring.run.id);
+    assert.equal(context.session_id,state.background_monitoring.run.session_id);
+    assert.equal(context.prewarm_only,true);
+    assert.deepEqual(context.scope,state.background_monitoring.run.scope);
+  }
+  assert.deepEqual(f.state(),state);assert.equal(f.revision(),revision);assert.deepEqual(f.calls,providers);
+  assert.deepEqual(await worker.prewarm({runner_id:RUNNER}),{state:'pending'});
+  assert.equal(calls.at(-1)[0],'legacy');assert.equal(calls.at(-1)[1].prepare_stage,undefined);
+});
+
+test('split preparation refuses invalid stages and unsupported capability without invoking builders',async()=>{
+  const f=fixture();await f.complete();let calls=0;
+  f.dependencies.assertScopeReadOnly=f.dependencies.assertScope;
+  const dashboard={version:1,confirmation_version:1,preparation_version:2,prewarm:async()=>{},prepare:async()=>{},
+    prepareBasis:async()=>{calls++;return {staged:true};},prepareCards:async()=>{calls++;return {staged:true};},
+    confirm:async()=>{calls++;return {prepared:true};}};
+  f.dependencies.dashboard=dashboard;
+  let worker=createBackgroundMonitoringWorker(f.dependencies);
+  for(const prewarm_stage of [undefined,null,1,{},[],'prepare','confirm','Basis'])
+    await assert.rejects(worker.prewarm({runner_id:RUNNER,prewarm_stage}),/BACKGROUND_PREWARM_DENIED/);
+  for(const prewarm_stage of ['basis','cards'])
+    await assert.rejects(worker.confirmPreparation({runner_id:RUNNER,prewarm_stage}),/BACKGROUND_PREWARM_DENIED/);
+  for(const change of [{preparation_version:1},{preparation_version:undefined},{confirmation_version:0},
+    {prepareBasis:undefined},{prepareCards:undefined},{confirm:undefined}]) {
+    f.dependencies.dashboard={...dashboard,...change};worker=createBackgroundMonitoringWorker(f.dependencies);
+    await assert.rejects(worker.prewarm({runner_id:RUNNER,prewarm_stage:'basis'}),/BACKGROUND_PREWARM_UNSUPPORTED/);
+  }
+  assert.equal(calls,0);
+});
+
+test('each split builder requires an explicit staging result and preserves deadline and scope guards',async()=>{
+  for(const stage of ['basis','cards'])for(const mode of ['missing','false','prepared','deadline','scope','replaced']) {
+    const f=fixture();await f.complete();f.dependencies.assertScopeReadOnly=f.dependencies.assertScope;
+    const build=async()=>{
+      if(mode==='deadline')f.advance(LIMITS.dashboard_prepare_ms);
+      if(mode==='scope')f.changeScope({credential_version:2});
+      if(mode==='replaced')f.mutate(state=>{state.background_monitoring.run.id=OTHER+':'+START;});
+      return mode==='missing'?undefined:mode==='false'?{staged:false}:mode==='prepared'?{prepared:true}:{staged:true};
+    };
+    f.dependencies.dashboard={version:1,confirmation_version:1,preparation_version:2,
+      prewarm:async()=>{},prepare:async()=>{},prepareBasis:build,prepareCards:build,confirm:async()=>({prepared:true})};
+    const before=f.state().background_monitoring.last_success_at;
+    const operation=()=>createBackgroundMonitoringWorker(f.dependencies).prewarm({runner_id:RUNNER,prewarm_stage:stage});
+    if(mode==='replaced')assert.deepEqual(await operation(),{state:'skipped'});
+    else await assert.rejects(operation,error=>error.code===(mode==='scope'?'BACKGROUND_SCOPE_CHANGED':
+      mode==='deadline'?'BACKGROUND_PREWARM_TIMEOUT':'BACKGROUND_PREWARM_INCOMPLETE'));
+    assert.equal(f.state().background_monitoring.state,'complete');
+    assert.equal(f.state().background_monitoring.last_success_at,before);
+  }
+});
+
 test('staged cache confirmation recovers a saved response lost after the preparation deadline', async () => {
   const f=fixture();await f.complete();let saved=false;
   f.dependencies.assertScopeReadOnly=f.dependencies.assertScope;

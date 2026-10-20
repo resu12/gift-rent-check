@@ -23,6 +23,169 @@ function confirmationFixture(results,options={}) {
     +'\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;\nexport const PRIVATE_BACKGROUND_DASHBOARD_CONFIRMATION_VERSION=1;'}});
   return f;
 }
+function splitFixture(results,options={}) {
+  const f=confirmationFixture(results,options),getFiles=f.args.api.getFiles;
+  f.args.api.getFiles=async(...args)=>{
+    const result=await getFiles(...args);
+    result.canonical_modules['lib/runtime']+='\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREPARATION_VERSION=2;';
+    return result;
+  };
+  return f;
+}
+
+test('split preparation inputs accept only two explicit stages and cannot enter another operation',async()=>{
+  const requests=[],api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async(_url,options)=>{
+    requests.push(JSON.parse(options.body).args);return Response.json({ok:true,result:{result:{state:'pending'}}});
+  }});
+  for(const prewarm_stage of ['basis','cards']) {
+    await api.runFunction({}, {runner_id:runner,prewarm_only:true,prewarm_stage});
+    for(const other of [{},{status_only:true},{prewarm_confirm_only:true},{prewarm_only:false},
+      {prewarm_only:true,retry:false},{prewarm_only:true,skip_analytics:false},{prewarm_only:true,yield_only:false},
+      {prewarm_only:true,prewarm_confirm_only:true}])
+      assert.throws(()=>api.runFunction({}, {runner_id:runner,prewarm_stage,...other}));
+  }
+  for(const prewarm_stage of [undefined,null,false,1,{},[],'prepare','confirm','Basis','basis '])
+    assert.throws(()=>api.runFunction({}, {runner_id:runner,prewarm_only:true,prewarm_stage}));
+  assert.deepEqual(requests,['basis','cards'].map(prewarm_stage=>({runner_id:runner,prewarm_only:true,prewarm_stage})));
+});
+
+test('split runner stages basis and cards once before independently confirming both artifacts',async()=>{
+  const f=splitFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},{state:'pending'},{state:'prepared'}]);
+  assert.deepEqual(await f.run(),{state:'complete'});
+  assert.deepEqual(f.calls.map(row=>row.input),[{runner_id:runner},
+    {runner_id:runner,prewarm_only:true,prewarm_stage:'basis'},
+    {runner_id:runner,prewarm_only:true,prewarm_stage:'cards'},
+    {runner_id:runner,prewarm_confirm_only:true}]);
+  assert.deepEqual(f.calls.map(row=>row.value.timeoutMs),[90000,30000,30000,15000]);
+  assert.deepEqual(f.output.slice(1),[
+    {dashboard_preparation:'pending',prewarm_phase:'basis'},
+    {dashboard_preparation:'pending',prewarm_phase:'cards'},
+    {dashboard_preparation:'prepared',prewarm_phase:'confirm'}]);
+  assert.deepEqual(f.waits,[]);
+});
+
+test('split runner reserves all three preparation operations and 75 seconds before a new cycle',async()=>{
+  const reserve=2*RUNNER_LIMITS.request_ms+2*RUNNER_LIMITS.prewarm_ms+RUNNER_LIMITS.prewarm_confirm_ms+1000;
+  for(const [remaining,steps,inspect] of [[reserve-1,4,true],[reserve,4,false],[reserve+1,4,false],[reserve+1,3,true]]) {
+    const f=splitFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},{state:'pending'},{state:'prepared'}],
+      {limits:{duration_ms:remaining,steps}});
+    assert.equal((await f.run()).state,inspect?'partial':'complete');
+    assert.deepEqual(f.calls[0].input,{runner_id:runner,...(inspect?{status_only:true}:{})});
+    assert.equal(f.calls.length,inspect?1:4);
+  }
+});
+
+test('split budget includes slow source loading and yields before another analytics tick can consume preparation time',async()=>{
+  const reserve=2*RUNNER_LIMITS.request_ms+2*RUNNER_LIMITS.prewarm_ms+RUNNER_LIMITS.prewarm_confirm_ms+1000;
+  let elapsed=0;
+  const slow=splitFixture([{state:'complete',runner_acknowledged:true}],{
+    limits:{duration_ms:reserve+10000},monotonic:()=>elapsed});
+  const get=slow.args.api.getFiles;
+  slow.args.api.getFiles=async(...args)=>{elapsed+=10001;return get(...args);};
+  assert.deepEqual(await slow.run(),{state:'partial'});
+  assert.deepEqual(slow.calls.map(row=>row.input),[{runner_id:runner,status_only:true}]);
+  assert.ok(!slow.output.some(row=>row.dashboard_preparation));
+  for(const mode of ['time','steps']) {
+    elapsed=0;
+    const pending={state:'partial',continuation_pending:true,retry_at:new Date(start+60000).toISOString()};
+    const f=splitFixture([{state:'running'},pending],{
+      limits:mode==='time'?{duration_ms:reserve+1}:{steps:4},monotonic:()=>elapsed});
+    const execute=f.args.api.runFunction;
+    f.args.api.runFunction=async(...args)=>{const result=await execute(...args);if(mode==='time')elapsed+=2;return result;};
+    assert.deepEqual(await f.run(),pending);
+    assert.deepEqual(f.calls.map(row=>row.input),[{runner_id:runner},{runner_id:runner,yield_only:true}]);
+    assert.ok(!f.calls.some(row=>row.input.skip_analytics));
+    assert.ok(!f.output.some(row=>row.dashboard_preparation));
+  }
+});
+
+test('split terminal preparation requires its full budget and keeps confirmation time after each stage',async()=>{
+  const budget=2*RUNNER_LIMITS.prewarm_ms+RUNNER_LIMITS.prewarm_confirm_ms;
+  for(const remainingAfterTick of [budget-1,budget,budget+1]) {
+    let elapsed=0;
+    const f=splitFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},{state:'pending'},{state:'prepared'}],
+      {limits:{duration_ms:300000},monotonic:()=>elapsed});
+    const execute=f.args.api.runFunction;
+    f.args.api.runFunction=async(...args)=>{const result=await execute(...args);
+      elapsed+=args[1].prewarm_only?30000:!args[1].prewarm_confirm_only?300000-remainingAfterTick:0;return result;};
+    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.equal(f.calls.length,remainingAfterTick<budget?1:4);
+    if(remainingAfterTick>=budget)assert.deepEqual(f.output.at(-1),{dashboard_preparation:'prepared',prewarm_phase:'confirm'});
+  }
+  for(const overrun of [1,30001]) {
+    let elapsed=0;
+    const f=splitFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},{state:'prepared'}],
+      {limits:{duration_ms:300000},monotonic:()=>elapsed});
+    const execute=f.args.api.runFunction;
+    f.args.api.runFunction=async(...args)=>{const result=await execute(...args);
+      elapsed+=args[1].prewarm_stage==='basis'?30000+overrun:!args[1].prewarm_confirm_only?225000:0;return result;};
+    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.ok(!f.calls.some(row=>row.input.prewarm_stage==='cards'));
+    assert.deepEqual(f.output[2],{dashboard_preparation:'failed',error:'request_timeout',stage:'prewarm',prewarm_phase:'cards'});
+    assert.equal(f.calls.length,overrun===1?3:2);
+    assert.equal(f.output.at(-1).prewarm_phase,'confirm');
+    if(overrun===1)assert.equal(f.output.at(-1).preparation_recovered,true);
+    else assert.equal(f.output.at(-1).error,'request_timeout');
+  }
+});
+
+test('split preparation keeps the original ambiguous failure and never repeats a build stage',async()=>{
+  for(const phase of ['basis','cards'])for(const failure of [
+    new MonitoringAdminError('request_timeout','prewarm'),
+    new MonitoringAdminError('remote_error','prewarm',400,'execution',400,{execution_limit:'memory',execution_ms:21293}),
+    {state:'failed',execution_code:'BACKGROUND_PREWARM_TIMEOUT'}]) {
+    const f=splitFixture([{state:'complete',runner_acknowledged:true},
+      phase==='basis'?failure:{state:'pending'},phase==='cards'?failure:{state:'pending'},{state:'prepared'}]);
+    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.deepEqual(f.calls.slice(1).map(row=>row.input.prewarm_stage??'confirm'),['basis','cards','confirm']);
+    const failed=f.output.find(row=>row.dashboard_preparation==='failed');
+    assert.equal(failed.prewarm_phase,phase);
+    assert.deepEqual(f.output.at(-1),{dashboard_preparation:'prepared',prewarm_phase:'confirm',preparation_recovered:true});
+    assert.deepEqual(f.waits,[]);
+  }
+});
+
+test('split guard denials stop subsequent stages and missing artifacts cannot report preparation success',async()=>{
+  for(const phase of ['basis','cards'])for(const code of ['BACKGROUND_PREWARM_DENIED','BACKGROUND_PREWARM_UNSUPPORTED',
+    'BACKGROUND_SCOPE_CHANGED','BACKGROUND_LEASE_LOST','BACKGROUND_ACCESS_DENIED','BACKGROUND_RULES_CHANGED']) {
+    const f=splitFixture([{state:'complete',runner_acknowledged:true},
+      ...(phase==='cards'?[{state:'pending'}]:[]),{state:'failed',execution_code:code},{state:'prepared'}]);
+    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.equal(f.calls.length,phase==='basis'?2:3);
+    assert.equal(f.output.at(-1).execution_code,code);assert.equal(f.output.at(-1).prewarm_phase,phase);
+    assert.ok(!f.output.some(row=>row.dashboard_preparation==='prepared'));
+  }
+  for(const phase of ['basis','cards']) {
+    const skipped=splitFixture([{state:'complete',runner_acknowledged:true},
+      ...(phase==='cards'?[{state:'pending'}]:[]),{state:'skipped'},{state:'prepared'}]);
+    assert.deepEqual(await skipped.run(),{state:'complete'});
+    assert.equal(skipped.calls.length,phase==='basis'?2:3);
+    assert.ok(!skipped.output.some(row=>row.dashboard_preparation==='prepared'));
+  }
+  const missing=splitFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},
+    {state:'failed',execution_code:'BACKGROUND_PREWARM_INCOMPLETE'},
+    {state:'failed',execution_code:'BACKGROUND_PREWARM_INCOMPLETE'}]);
+  assert.deepEqual(await missing.run(),{state:'complete'});
+  assert.equal(missing.calls.length,4);
+  assert.equal(missing.output.at(-1).execution_code,'BACKGROUND_PREWARM_INCOMPLETE');
+  assert.equal(missing.output.at(-1).prewarm_phase,'confirm');
+  assert.ok(!missing.output.some(row=>row.dashboard_preparation==='prepared'));
+});
+
+test('split capability requires exact supported prewarm and confirmation versions and retains legacy behavior',async()=>{
+  for(const [prewarm,confirmation,preparation,phases] of [
+    [1,1,undefined,['prepare','confirm']],[1,1,1,['prepare','confirm']],[1,1,3,['prepare','confirm']],
+    [1,2,2,[undefined]],[1,undefined,2,[undefined]],[undefined,1,2,[]]]) {
+    const f=fixture([{state:'complete',runner_acknowledged:true},
+      ...(phases.length===2?[{state:'pending'},{state:'prepared'}]:[{state:'prepared'}])]);
+    f.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']+
+      [[prewarm,'PREWARM'],[confirmation,'CONFIRMATION'],[preparation,'PREPARATION']]
+        .filter(([value])=>value!==undefined).map(([value,key])=>`\nexport const PRIVATE_BACKGROUND_DASHBOARD_${key}_VERSION=${value};`).join('')}});
+    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.deepEqual(f.output.slice(1).map(row=>row.prewarm_phase),phases);
+    assert.ok(!f.calls.some(row=>Object.hasOwn(row.input??{},'prewarm_stage')));
+  }
+});
 
 test('disabled monitoring does not load credentials modules or contact the host',async()=>{
   const f=fixture([],{enabled:false,loadSources:()=>{throw Error('must not read');},random:()=>{throw Error('must not generate');}});

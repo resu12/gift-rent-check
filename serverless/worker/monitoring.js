@@ -195,10 +195,16 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
   // run has been saved. It cannot claim/extend a run or repeat provider work.
   // The hosting callback must bound its reads and fence any cache write to this
   // exact completed run and scope. An old runtime simply lacks this capability.
-  async function prepareDashboard({runner_id} = {}, confirmOnly = false) {
+  async function prepareDashboard(request = {}, confirmOnly = false) {
+    const {runner_id,prewarm_stage}=request,split=Object.hasOwn(request,'prewarm_stage');
     if (typeof runner_id !== 'string' || !/^[a-f0-9]{64}$/.test(runner_id))
       throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
+    if(split&&(confirmOnly||!['basis','cards'].includes(prewarm_stage)))
+      throw new BackgroundMonitoringError('BACKGROUND_PREWARM_DENIED');
     const staged = dashboard?.confirmation_version === 1;
+    if(split&&(!staged||dashboard?.preparation_version!==2||typeof dashboard.prepareBasis!=='function'
+      ||typeof dashboard.prepareCards!=='function'))
+      throw new BackgroundMonitoringError('BACKGROUND_PREWARM_UNSUPPORTED');
     if ((confirmOnly || staged) && (!staged || typeof dashboard.prepare !== 'function'
       || typeof dashboard.confirm !== 'function' || typeof assertScopeReadOnly !== 'function'))
       throw new BackgroundMonitoringError('BACKGROUND_PREWARM_UNSUPPORTED');
@@ -211,10 +217,13 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       && time(row.last_finished_at) > clockAt - BACKGROUND_MONITORING_LIMITS.dashboard_prepare_age_ms;
     if (!eligible(ledger, at)) return {state: 'skipped'};
     const input = {...context(ledger.run), prewarm_only: true, ...(confirmOnly ? {confirm_only: true} : {}),
+      ...(split?{prepare_stage:prewarm_stage}:{}),
       deadline: at + (confirmOnly ? BACKGROUND_MONITORING_LIMITS.dashboard_confirm_ms : BACKGROUND_MONITORING_LIMITS.dashboard_prepare_ms)};
     const scopeCheck = staged ? assertScopeReadOnly : assertScope;
     await scopeCheck(ledger.run.scope, input);
-    const result = await (confirmOnly ? dashboard.confirm : staged ? dashboard.prepare : dashboard.prewarm)(input);
+    const operation=confirmOnly?dashboard.confirm:split
+      ?prewarm_stage==='basis'?dashboard.prepareBasis:dashboard.prepareCards:staged?dashboard.prepare:dashboard.prewarm;
+    const result = await operation(input);
     const current = validate((await repository.read()).state.background_monitoring);
     await scopeCheck(ledger.run.scope, input);
     const finishedAt = await now();
@@ -224,7 +233,10 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       || finishedAt >= input.deadline) return {state: 'skipped'};
     // Staging is never success: only a separate, read-only check can certify
     // both durable artifacts for this exact completed cycle.
-    if (staged && !confirmOnly) return {state: 'pending'};
+    if (staged && !confirmOnly) {
+      if(split&&result?.staged!==true)throw new BackgroundMonitoringError('BACKGROUND_PREWARM_INCOMPLETE');
+      return {state: 'pending'};
+    }
     if (confirmOnly && result?.prepared !== true) throw new BackgroundMonitoringError('BACKGROUND_PREWARM_INCOMPLETE');
     return {state: result?.prepared === true ? 'prepared' : 'skipped'};
   }
