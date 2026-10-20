@@ -64,6 +64,12 @@ export class MonitoringAdminError extends Error {
   }
 }
 const fail=(reason='invalid_response',stage='runner',httpStatus,remoteError,remoteCode,execution)=>{throw new MonitoringAdminError(reason,stage,httpStatus,remoteError,remoteCode,execution);};
+function preparationFailure(value) {
+  if(value?.state!=='failed')return;
+  if(!object(value)||Object.keys(value).some(key=>!['state','execution_code'].includes(key))
+    ||!executionCodes.has(value.execution_code))return;
+  fail('remote_error','prewarm',undefined,'execution',undefined,{execution_code:value.execution_code});
+}
 const recoverable=error=>error instanceof MonitoringAdminError&&(['network_error','request_timeout'].includes(error.reason)
   ||error.reason==='http_error'&&error.http_status>=500&&error.http_status<=599);
 const confirmablePreparationError=error=>error instanceof MonitoringAdminError
@@ -304,6 +310,7 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
         if(!canConfirm) {
           try {
             const prepared=await api.runFunction(sources,{runner_id:runner,prewarm_only:true},{timeoutMs:cap.prewarm_ms});
+            preparationFailure(prepared?.result);
             if(!['prepared','skipped'].includes(prepared?.result?.state))fail('invalid_result','prewarm');
             emit({dashboard_preparation:prepared.result.state});
           } catch(error) {emit({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm'});}
@@ -311,6 +318,7 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
           let confirm=true,prepareFailed=false;
           try {
             const staged=await api.runFunction(sources,{runner_id:runner,prewarm_only:true},{timeoutMs:cap.prewarm_ms});
+            preparationFailure(staged?.result);
             if(!['pending','skipped'].includes(staged?.result?.state))fail('invalid_result','prewarm');
             emit({dashboard_preparation:staged.result.state,prewarm_phase:'prepare'});
           } catch(error) {
@@ -320,6 +328,7 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
           if(confirm)try {
             if(remaining()<cap.prewarm_confirm_ms)fail('request_timeout','prewarm');
             const confirmed=await api.runFunction(sources,{runner_id:runner,prewarm_confirm_only:true},{timeoutMs:cap.prewarm_confirm_ms});
+            preparationFailure(confirmed?.result);
             if(confirmed?.result?.state!=='prepared')throw new MonitoringAdminError('invalid_result','prewarm',undefined,undefined,undefined,
               {execution_code:confirmed?.result?.state==='skipped'?'BACKGROUND_PREWARM_INCOMPLETE':'BACKGROUND_PREWARM_CONFIRMATION_FAILED'});
             emit({dashboard_preparation:'prepared',prewarm_phase:'confirm',...(prepareFailed?{preparation_recovered:true}:{})});
