@@ -10,26 +10,73 @@ import {adminModuleSources} from './admin-module-sources.mjs';
 import {requireId,validateAuthenticatedDestination,validateServerlessEnvironment} from './destination.mjs';
 
 export const MONITORING_ENDPOINT='endpoints/backgroundMonitoringTick';
-export const RUNNER_LIMITS=Object.freeze({duration_ms:20*60*1000,steps:200,request_ms:90000,source_bytes:8*1024*1024,response_bytes:1024*1024,sleep_ms:60000,source_retries:2,recoveries:3,prewarm_ms:30000,analytics_handoff_ms:1000});
+export const RUNNER_LIMITS=Object.freeze({duration_ms:20*60*1000,steps:200,request_ms:90000,source_bytes:8*1024*1024,response_bytes:1024*1024,sleep_ms:60000,source_retries:2,recoveries:3,prewarm_ms:30000,prewarm_confirm_ms:15000,analytics_handoff_ms:1000});
 const states=new Set(['running','waiting','busy','complete','paused','disabled','partial','blocked','failed']);
 const object=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 const reasons=new Set(['invalid_request','invalid_response','invalid_json','invalid_envelope','invalid_result','response_too_large','network_error','request_timeout','http_error','remote_error','capability_missing','source_error','unacknowledged_status','recovery_exhausted','unexpected_error']);
 const stages=new Set(['configuration','get_files','sources','tick','status','prewarm','runner']);
+const executionCodes=new Set(['BACKGROUND_PREWARM_TIMEOUT','BACKGROUND_PREWARM_DENIED','BACKGROUND_LEASE_LOST',
+  'BACKGROUND_SCOPE_CHANGED','BACKGROUND_ACCESS_DENIED','BACKGROUND_RULES_CHANGED',
+  'BACKGROUND_PREWARM_CONFIRMATION_FAILED','BACKGROUND_PREWARM_INCOMPLETE','BACKGROUND_PREWARM_UNSUPPORTED']);
+const limitCodes=new Map([['CPU_TIME_LIMIT_EXCEEDED','cpu'],['CPU_LIMIT_EXCEEDED','cpu'],
+  ['MEMORY_LIMIT_EXCEEDED','memory'],['OUT_OF_MEMORY','memory'],
+  ['EXECUTION_TIME_LIMIT_EXCEEDED','time'],['TIME_LIMIT_EXCEEDED','time']]);
+const limitDescriptions=new Map([['CPU timer exceeded','cpu'],['CPU time limit exceeded','cpu'],
+  ['Memory limit exceeded','memory'],['Out of memory','memory'],
+  ['Execution time limit exceeded','time'],['Execution timed out','time'],['Time limit exceeded','time']]);
+function executionDiagnosticFields(value) {
+  if(!object(value))return {};
+  const result={};
+  if(Number.isSafeInteger(value.execution_ms)&&value.execution_ms>=0&&value.execution_ms<=RUNNER_LIMITS.request_ms)result.execution_ms=value.execution_ms;
+  if(['cpu','memory','time'].includes(value.execution_limit))result.execution_limit=value.execution_limit;
+  if(executionCodes.has(value.execution_code))result.execution_code=value.execution_code;
+  if(['prepare','confirm'].includes(value.prewarm_phase))result.prewarm_phase=value.prewarm_phase;
+  return result;
+}
+function hostExecutionDiagnostic(envelope) {
+  const parameters=object(envelope.parameters)?envelope.parameters:{},result={};
+  // Preserve only the host's numeric duration. Never retain raw descriptions,
+  // parameters or logs; provider text cannot become a cause by substring match.
+  if(typeof parameters.time==='number'&&Number.isFinite(parameters.time)&&parameters.time>=0
+    &&parameters.time<=RUNNER_LIMITS.request_ms/1000)result.execution_ms=Math.round(parameters.time*1000);
+  if(['prepare','confirm'].includes(parameters.prewarm_phase))result.prewarm_phase=parameters.prewarm_phase;
+  const typedLimit=limitCodes.get(envelope.error_type);
+  if(typedLimit)result.execution_limit=typedLimit;
+  if(envelope.error_type==='CODE_RUN_FAILED') {
+    const description=typeof envelope.description==='string'&&envelope.description.length<=256
+      ?envelope.description.replace(/^(?:Error|Internal error): /,''):null;
+    const limit=limitCodes.get(envelope.error_code)??limitCodes.get(parameters.limit_code)
+      ??limitCodes.get(description)??limitDescriptions.get(description);
+    if(limit)result.execution_limit=limit;
+    const codes=[envelope.error_code,parameters.code,description].filter(code=>executionCodes.has(code));
+    if(codes.length&&codes.every(code=>code===codes[0]))result.execution_code=codes[0];
+  }
+  return executionDiagnosticFields(result);
+}
 export class MonitoringAdminError extends Error {
-  constructor(reason,stage='runner',httpStatus,remoteError,remoteCode) {
+  constructor(reason,stage='runner',httpStatus,remoteError,remoteCode,execution) {
     super('BACKGROUND_MONITORING_STOPPED');
     this.reason=reasons.has(reason)?reason:'unexpected_error';this.stage=stages.has(stage)?stage:'runner';
     if(Number.isInteger(httpStatus)&&httpStatus>=100&&httpStatus<=599)this.http_status=httpStatus;
     if(['internal','endpoint','execution','other'].includes(remoteError))this.remote_error=remoteError;
     if(Number.isInteger(remoteCode)&&remoteCode>=100&&remoteCode<=599)this.remote_code=remoteCode;
+    Object.assign(this,executionDiagnosticFields(execution));
   }
 }
-const fail=(reason='invalid_response',stage='runner',httpStatus,remoteError,remoteCode)=>{throw new MonitoringAdminError(reason,stage,httpStatus,remoteError,remoteCode);};
+const fail=(reason='invalid_response',stage='runner',httpStatus,remoteError,remoteCode,execution)=>{throw new MonitoringAdminError(reason,stage,httpStatus,remoteError,remoteCode,execution);};
 const recoverable=error=>error instanceof MonitoringAdminError&&(['network_error','request_timeout'].includes(error.reason)
   ||error.reason==='http_error'&&error.http_status>=500&&error.http_status<=599);
+const confirmablePreparationError=error=>error instanceof MonitoringAdminError
+  &&![401,403].includes(error.http_status)
+  &&!['BACKGROUND_PREWARM_DENIED','BACKGROUND_PREWARM_UNSUPPORTED','BACKGROUND_SCOPE_CHANGED','BACKGROUND_LEASE_LOST',
+    'BACKGROUND_ACCESS_DENIED','BACKGROUND_RULES_CHANGED'].includes(error.execution_code)
+  &&(['network_error','request_timeout','invalid_response','invalid_json','invalid_envelope','invalid_result','response_too_large'].includes(error.reason)
+    ||error.reason==='http_error'&&error.http_status>=500&&error.http_status<=599
+    ||error.reason==='remote_error'&&(['execution','internal'].includes(error.remote_error)||['cpu','memory','time'].includes(error.execution_limit)));
 function diagnostic(error) {
   if(!(error instanceof MonitoringAdminError))return {error:'unexpected_error',stage:'runner'};
-  return {error:error.reason,stage:error.stage,...Object.fromEntries(['http_status','remote_error','remote_code'].filter(key=>Object.hasOwn(error,key)).map(key=>[key,error[key]]))};
+  return {error:error.reason,stage:error.stage,...Object.fromEntries(['http_status','remote_error','remote_code'].filter(key=>Object.hasOwn(error,key)).map(key=>[key,error[key]])),
+    ...executionDiagnosticFields(error)};
 }
 const bounded=(value,maximum)=>Number.isSafeInteger(value)&&value>0&&value<=maximum;
 const date=value=>typeof value==='string'&&Number.isFinite(Date.parse(value))&&new Date(value).toISOString()===value;
@@ -58,7 +105,7 @@ async function responseJson(response,maxBytes,stage,signal) {
   let envelope;try{envelope=JSON.parse(Buffer.concat(chunks).toString('utf8'));}catch{fail('invalid_json',stage,response.status);}
   if(object(envelope)&&envelope.ok===false)fail('remote_error',stage,response.status,
     envelope.error_type==='INTERNAL'?'internal':envelope.error_type==='ENDPOINT_ERROR'?'endpoint'
-      :envelope.error_type==='CODE_RUN_FAILED'?'execution':'other',envelope.error_code);
+      :envelope.error_type==='CODE_RUN_FAILED'?'execution':'other',envelope.error_code,hostExecutionDiagnostic(envelope));
   if(!object(envelope)||envelope.ok!==true||!Object.hasOwn(envelope,'result'))fail('invalid_envelope',stage,response.status);
   return envelope.result;
 }
@@ -109,14 +156,16 @@ export function createMonitoringAdminApi({token,appId,env=process.env,fetch:requ
   return {
     getFiles:({timeoutMs}={})=>call('/get',undefined,RUNNER_LIMITS.source_bytes,'get_files',timeoutMs),
     runFunction:(sources,input,{timeoutMs}={})=>{
-      if(!object(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','skip_analytics','yield_only'].includes(key))
+      if(!object(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','prewarm_confirm_only','skip_analytics','yield_only'].includes(key))
         ||typeof input.runner_id!=='string'||!/^[0-9a-f]{64}$/.test(input.runner_id)
         ||Object.hasOwn(input,'retry')&&typeof input.retry!=='boolean'
         ||Object.hasOwn(input,'skip_analytics')&&(typeof input.skip_analytics!=='boolean'||Object.hasOwn(input,'status_only')||Object.hasOwn(input,'prewarm_only'))
         ||Object.hasOwn(input,'yield_only')&&(typeof input.yield_only!=='boolean'||['retry','status_only','prewarm_only','skip_analytics'].some(key=>Object.hasOwn(input,key)))
         ||Object.hasOwn(input,'status_only')&&(input.status_only!==true||Object.hasOwn(input,'retry'))
-        ||Object.hasOwn(input,'prewarm_only')&&(input.prewarm_only!==true||Object.hasOwn(input,'retry')||Object.hasOwn(input,'status_only')))fail('invalid_request','configuration');
-      return call('/run',{module:MONITORING_ENDPOINT,sources,args:input,ctx:{background_worker:'price-monitoring-v1'}},RUNNER_LIMITS.response_bytes,input.prewarm_only?'prewarm':input.status_only?'status':'tick',timeoutMs);
+        ||Object.hasOwn(input,'prewarm_only')&&(input.prewarm_only!==true||Object.hasOwn(input,'retry')||Object.hasOwn(input,'status_only'))
+        ||Object.hasOwn(input,'prewarm_confirm_only')&&(input.prewarm_confirm_only!==true
+          ||['retry','status_only','prewarm_only','skip_analytics','yield_only'].some(key=>Object.hasOwn(input,key))))fail('invalid_request','configuration');
+      return call('/run',{module:MONITORING_ENDPOINT,sources,args:input,ctx:{background_worker:'price-monitoring-v1'}},RUNNER_LIMITS.response_bytes,input.prewarm_only||input.prewarm_confirm_only?'prewarm':input.status_only?'status':'tick',timeoutMs);
     },
   };
 }
@@ -190,6 +239,8 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
     ||!/^\s*export\s+const\s+PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION\s*=\s*1\s*;/m.test(runtime)
     ||!/^\s*export\s+function\s+createPrivateBackgroundMonitoringAccess\s*\(/m.test(runtime))fail('capability_missing','sources');
   const canPrewarm=/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION\s*=\s*1\s*;/m.test(runtime);
+  const canConfirm=canPrewarm&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_CONFIRMATION_VERSION\s*=\s*1\s*;/m.test(runtime);
+  const prewarmReserve=cap.prewarm_ms+(canConfirm?cap.prewarm_confirm_ms:0),prewarmOperations=canConfirm?2:1;
   const {coreSource,entrypointSource}=loadSources();
   const sources=adminModuleSources(deployed.canonical_modules,{'lib/background-monitoring':coreSource},MONITORING_ENDPOINT,entrypointSource);
   if(check){const result={state:'ready',modules:Object.keys(sources).length};emit(result);return result;}
@@ -210,7 +261,7 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
     // worker's segment deadline. Leave one full host request for checkpointing
     // and the separate cache-preparation allowance before starting more work.
     // An exhausted source download can only inspect status, never claim a run.
-    const workFits=remaining()>=2*cap.request_ms+cap.prewarm_ms+cap.analytics_handoff_ms&&cap.steps-step>=2;
+    const workFits=remaining()>=2*cap.request_ms+prewarmReserve+cap.analytics_handoff_ms&&cap.steps-step>=prewarmOperations+1;
     const budgetInspection=!tickAttempted&&!workFits;
     const readOnly=statusOnly||budgetInspection;
     const yieldOnly=!readOnly&&!workFits;
@@ -245,15 +296,37 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
       // Best effort, at most once, in its OWN hosting request. Never turn a
       // saved successful check into a failure because preparing display data
       // failed or its response was lost. Old runtimes and old-cycle completion
-      // replies cannot authorize this extra work. Reserve the entire 30s read
-      // budget and count the request against the invocation's step limit.
+      // replies cannot authorize this extra work. New runtimes stage once, then
+      // confirm persisted artifacts in an independent read-only request. Reserve
+      // both requests so a slow preparation cannot consume confirmation's turn.
       if(summary.state==='complete'&&response.result.runner_acknowledged===true&&canPrewarm
-        &&step+1<cap.steps&&remaining()>=cap.prewarm_ms) {
-        try {
-          const prepared=await api.runFunction(sources,{runner_id:runner,prewarm_only:true},{timeoutMs:cap.prewarm_ms});
-          if(!['prepared','skipped'].includes(prepared?.result?.state))fail('invalid_result','prewarm');
-          emit({dashboard_preparation:prepared.result.state});
-        } catch(error) {emit({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm'});}
+        &&step+prewarmOperations<cap.steps&&remaining()>=prewarmReserve) {
+        if(!canConfirm) {
+          try {
+            const prepared=await api.runFunction(sources,{runner_id:runner,prewarm_only:true},{timeoutMs:cap.prewarm_ms});
+            if(!['prepared','skipped'].includes(prepared?.result?.state))fail('invalid_result','prewarm');
+            emit({dashboard_preparation:prepared.result.state});
+          } catch(error) {emit({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm'});}
+        } else {
+          let confirm=true,prepareFailed=false;
+          try {
+            const staged=await api.runFunction(sources,{runner_id:runner,prewarm_only:true},{timeoutMs:cap.prewarm_ms});
+            if(!['pending','skipped'].includes(staged?.result?.state))fail('invalid_result','prewarm');
+            emit({dashboard_preparation:staged.result.state,prewarm_phase:'prepare'});
+          } catch(error) {
+            prepareFailed=true;confirm=confirmablePreparationError(error);
+            emit({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm',prewarm_phase:'prepare'});
+          }
+          if(confirm)try {
+            if(remaining()<cap.prewarm_confirm_ms)fail('request_timeout','prewarm');
+            const confirmed=await api.runFunction(sources,{runner_id:runner,prewarm_confirm_only:true},{timeoutMs:cap.prewarm_confirm_ms});
+            if(confirmed?.result?.state!=='prepared')throw new MonitoringAdminError('invalid_result','prewarm',undefined,undefined,undefined,
+              {execution_code:confirmed?.result?.state==='skipped'?'BACKGROUND_PREWARM_INCOMPLETE':'BACKGROUND_PREWARM_CONFIRMATION_FAILED'});
+            emit({dashboard_preparation:'prepared',prewarm_phase:'confirm',...(prepareFailed?{preparation_recovered:true}:{})});
+          } catch(error) {
+            emit({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm',prewarm_phase:'confirm'});
+          }
+        }
       }
       return summary;
     }

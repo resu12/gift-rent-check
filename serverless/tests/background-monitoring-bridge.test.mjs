@@ -10,13 +10,14 @@ function bridge(options={}) {
   const personalAnalyticsVersion=Object.hasOwn(options,'personalAnalyticsVersion')?options.personalAnalyticsVersion:1;
   let accesses=0, guard;
   const access={repository:{read:async()=>({state:{background_monitoring:ledger}})},clock:async()=>at,
+    assertScopeReadOnly:options.assertScopeReadOnly,
     analytics:Object.hasOwn(options,'analytics')?options.analytics:{version:1,refresh:async()=>{}},
     ...(options.dashboard?{dashboard:options.dashboard}:{})};
   const source=readFileSync(new URL('../worker/entrypoint.js',import.meta.url),'utf8')
     .replace(/^import[^\n]+\n/gm,'').replace('export default async function','return async function');
   const create=vm.runInNewContext(`(function(createPrivateBackgroundMonitoringAccess,PRIVATE_BACKGROUND_MONITORING_VERSION,PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION,PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION,createBackgroundMonitoringWorker,BackgroundMonitoringError){${source}})`);
   return {call:create(check=>{accesses++;guard=check;return access;},version,scopedHistoryVersion,personalAnalyticsVersion,
-    candidate=>{assert.equal(candidate,access);return {tick:async input=>({state:'complete',runner:input.runner_id,retry:input.retry,skip_analytics:input.skip_analytics,yield_only:input.yield_only}),status:async input=>({state:'running',read_only:true,acknowledgement_for:input.runner_id}),prewarm:async input=>({state:'prepared',runner:input.runner_id})};},BackgroundMonitoringError),
+    candidate=>{assert.equal(candidate,access);return {tick:async input=>({state:'complete',runner:input.runner_id,retry:input.retry,skip_analytics:input.skip_analytics,yield_only:input.yield_only}),status:async input=>({state:'running',read_only:true,acknowledgement_for:input.runner_id}),prewarm:async input=>({state:'prepared',runner:input.runner_id}),confirmPreparation:async()=>({state:'prepared',read_only:true})};},BackgroundMonitoringError),
     accesses:()=>accesses,guard:context=>guard(context)};
 }
 const input={runner_id:'a'.repeat(64)}, admin={background_worker:'price-monitoring-v1'};
@@ -93,14 +94,47 @@ test('cache-only guard requires the exact recent successful completed run and bo
   const f=bridge({ledger,dashboard:{version:1,prewarm:async()=>{}}});
   await f.call({...input,prewarm_only:true},admin);
   const context={run_id:run.id,session_id:'session',prewarm_only:true,deadline:26000};await f.guard(context);
-  for(const change of [{run_id:'other'},{session_id:'other'},{deadline:26001},{deadline:1000},{deadline:null}])
+  for(const change of [{run_id:'other'},{session_id:'other'}])
     await assert.rejects(()=>f.guard({...context,...change}),/BACKGROUND_LEASE_LOST/);
+  for(const deadline of [26001,null])await assert.rejects(()=>f.guard({...context,deadline}),/BACKGROUND_PREWARM_DENIED/);
+  await assert.rejects(()=>f.guard({...context,deadline:1000}),/BACKGROUND_PREWARM_TIMEOUT/);
   for(const state of ['running','partial','failed']) {ledger.state=state;await assert.rejects(()=>f.guard(context),/BACKGROUND_LEASE_LOST/);}
   ledger.state='complete';run.history_complete=false;await assert.rejects(()=>f.guard(context),/BACKGROUND_LEASE_LOST/);
   run.history_complete=true;ledger.last_finished_at=new Date(-299000).toISOString();ledger.last_success_at=ledger.last_finished_at;
   await assert.rejects(()=>f.guard(context),/BACKGROUND_LEASE_LOST/);
   const normal=bridge({ledger,dashboard:{version:1,prewarm:async()=>{}}});await normal.call(input,admin);
-  await assert.rejects(()=>normal.guard(context),/BACKGROUND_LEASE_LOST/);
+  await assert.rejects(()=>normal.guard(context),/BACKGROUND_PREWARM_DENIED/);
+});
+
+test('confirmation is an exclusive capability with a distinct read-only deadline',async()=>{
+  const dashboard={version:1,prewarm:async()=>{},confirmation_version:1,prepare:async()=>{},confirm:async()=>{}};
+  const run={id:input.runner_id+':1',session_id:'session',stage:'done',lease:null,gift_complete:true,history_complete:true};
+  const ledger={state:'complete',run,last_success_at:new Date(900).toISOString(),last_finished_at:new Date(900).toISOString()};
+  for(const extra of [{prewarm_only:true},{status_only:true},{retry:false},{yield_only:false},{skip_analytics:false}]) {
+    const f=bridge({dashboard,assertScopeReadOnly:async()=>{}});
+    await assert.rejects(()=>f.call({...input,prewarm_confirm_only:true,...extra},admin),/BACKGROUND_ACCESS_DENIED/);
+    assert.equal(f.accesses(),0);
+  }
+  for(const value of [false,'true',1,null,{}]) {
+    const f=bridge();
+    await assert.rejects(()=>f.call({...input,prewarm_confirm_only:value},admin),/BACKGROUND_ACCESS_DENIED/);
+    assert.equal(f.accesses(),0);
+  }
+  for(const options of [{dashboard},{dashboard:{...dashboard,confirmation_version:0},assertScopeReadOnly:async()=>{}},
+    {dashboard:{...dashboard,confirm:undefined},assertScopeReadOnly:async()=>{}}]) {
+    await assert.rejects(()=>bridge(options).call({...input,prewarm_confirm_only:true},admin),/BACKGROUND_PREWARM_UNSUPPORTED/);
+  }
+  const f=bridge({ledger,dashboard,assertScopeReadOnly:async()=>{}});
+  assert.equal((await f.call({...input,prewarm_confirm_only:true},admin)).read_only,true);
+  const context={run_id:run.id,session_id:run.session_id,prewarm_only:true,confirm_only:true,deadline:11000};
+  await f.guard(context);
+  await assert.rejects(()=>f.guard({...context,deadline:11001}),/BACKGROUND_PREWARM_DENIED/);
+  await assert.rejects(()=>f.guard({...context,deadline:1000}),/BACKGROUND_PREWARM_TIMEOUT/);
+  await assert.rejects(()=>f.guard({...context,confirm_only:false}),/BACKGROUND_PREWARM_DENIED/);
+  await assert.rejects(()=>f.guard({...context,run_id:'other'}),/BACKGROUND_LEASE_LOST/);
+  const prepare=bridge({ledger,dashboard,assertScopeReadOnly:async()=>{}});
+  await prepare.call({...input,prewarm_only:true},admin);
+  await assert.rejects(()=>prepare.guard(context),/BACKGROUND_PREWARM_DENIED/);
 });
 
 test('provider guard rejects replaced, expired and terminal worker claims',async()=>{
