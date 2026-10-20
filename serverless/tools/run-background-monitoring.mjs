@@ -30,7 +30,7 @@ function executionDiagnosticFields(value) {
   if(Number.isSafeInteger(value.execution_ms)&&value.execution_ms>=0&&value.execution_ms<=RUNNER_LIMITS.request_ms)result.execution_ms=value.execution_ms;
   if(['cpu','memory','time'].includes(value.execution_limit))result.execution_limit=value.execution_limit;
   if(executionCodes.has(value.execution_code))result.execution_code=value.execution_code;
-  if(['prepare','confirm'].includes(value.prewarm_phase))result.prewarm_phase=value.prewarm_phase;
+  if(['prepare','basis','cards','confirm'].includes(value.prewarm_phase))result.prewarm_phase=value.prewarm_phase;
   return result;
 }
 function hostExecutionDiagnostic(envelope) {
@@ -39,7 +39,7 @@ function hostExecutionDiagnostic(envelope) {
   // parameters or logs; provider text cannot become a cause by substring match.
   if(typeof parameters.time==='number'&&Number.isFinite(parameters.time)&&parameters.time>=0
     &&parameters.time<=RUNNER_LIMITS.request_ms/1000)result.execution_ms=Math.round(parameters.time*1000);
-  if(['prepare','confirm'].includes(parameters.prewarm_phase))result.prewarm_phase=parameters.prewarm_phase;
+  if(['prepare','basis','cards','confirm'].includes(parameters.prewarm_phase))result.prewarm_phase=parameters.prewarm_phase;
   const typedLimit=limitCodes.get(envelope.error_type);
   if(typedLimit)result.execution_limit=typedLimit;
   if(envelope.error_type==='CODE_RUN_FAILED') {
@@ -162,15 +162,16 @@ export function createMonitoringAdminApi({token,appId,env=process.env,fetch:requ
   return {
     getFiles:({timeoutMs}={})=>call('/get',undefined,RUNNER_LIMITS.source_bytes,'get_files',timeoutMs),
     runFunction:(sources,input,{timeoutMs}={})=>{
-      if(!object(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','prewarm_confirm_only','skip_analytics','yield_only'].includes(key))
+      if(!object(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','prewarm_stage','prewarm_confirm_only','skip_analytics','yield_only'].includes(key))
         ||typeof input.runner_id!=='string'||!/^[0-9a-f]{64}$/.test(input.runner_id)
         ||Object.hasOwn(input,'retry')&&typeof input.retry!=='boolean'
         ||Object.hasOwn(input,'skip_analytics')&&(typeof input.skip_analytics!=='boolean'||Object.hasOwn(input,'status_only')||Object.hasOwn(input,'prewarm_only'))
         ||Object.hasOwn(input,'yield_only')&&(typeof input.yield_only!=='boolean'||['retry','status_only','prewarm_only','skip_analytics'].some(key=>Object.hasOwn(input,key)))
         ||Object.hasOwn(input,'status_only')&&(input.status_only!==true||Object.hasOwn(input,'retry'))
         ||Object.hasOwn(input,'prewarm_only')&&(input.prewarm_only!==true||Object.hasOwn(input,'retry')||Object.hasOwn(input,'status_only'))
+        ||Object.hasOwn(input,'prewarm_stage')&&(!['basis','cards'].includes(input.prewarm_stage)||input.prewarm_only!==true)
         ||Object.hasOwn(input,'prewarm_confirm_only')&&(input.prewarm_confirm_only!==true
-          ||['retry','status_only','prewarm_only','skip_analytics','yield_only'].some(key=>Object.hasOwn(input,key))))fail('invalid_request','configuration');
+          ||['retry','status_only','prewarm_only','prewarm_stage','skip_analytics','yield_only'].some(key=>Object.hasOwn(input,key))))fail('invalid_request','configuration');
       return call('/run',{module:MONITORING_ENDPOINT,sources,args:input,ctx:{background_worker:'price-monitoring-v1'}},RUNNER_LIMITS.response_bytes,input.prewarm_only||input.prewarm_confirm_only?'prewarm':input.status_only?'status':'tick',timeoutMs);
     },
   };
@@ -246,7 +247,8 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
     ||!/^\s*export\s+function\s+createPrivateBackgroundMonitoringAccess\s*\(/m.test(runtime))fail('capability_missing','sources');
   const canPrewarm=/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION\s*=\s*1\s*;/m.test(runtime);
   const canConfirm=canPrewarm&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_CONFIRMATION_VERSION\s*=\s*1\s*;/m.test(runtime);
-  const prewarmReserve=cap.prewarm_ms+(canConfirm?cap.prewarm_confirm_ms:0),prewarmOperations=canConfirm?2:1;
+  const canSplit=canConfirm&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_PREPARATION_VERSION\s*=\s*2\s*;/m.test(runtime);
+  const prewarmReserve=cap.prewarm_ms*(canSplit?2:1)+(canConfirm?cap.prewarm_confirm_ms:0),prewarmOperations=canSplit?3:canConfirm?2:1;
   const {coreSource,entrypointSource}=loadSources();
   const sources=adminModuleSources(deployed.canonical_modules,{'lib/background-monitoring':coreSource},MONITORING_ENDPOINT,entrypointSource);
   if(check){const result={state:'ready',modules:Object.keys(sources).length};emit(result);return result;}
@@ -302,9 +304,9 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
       // Best effort, at most once, in its OWN hosting request. Never turn a
       // saved successful check into a failure because preparing display data
       // failed or its response was lost. Old runtimes and old-cycle completion
-      // replies cannot authorize this extra work. New runtimes stage once, then
-      // confirm persisted artifacts in an independent read-only request. Reserve
-      // both requests so a slow preparation cannot consume confirmation's turn.
+      // replies cannot authorize this extra work. Capable runtimes split the
+      // basis and cards into separate requests, then independently confirm both.
+      // Reserve every phase before starting any optional preparation work.
       if(summary.state==='complete'&&response.result.runner_acknowledged===true&&canPrewarm
         &&step+prewarmOperations<cap.steps&&remaining()>=prewarmReserve) {
         if(!canConfirm) {
@@ -316,14 +318,20 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
           } catch(error) {emit({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm'});}
         } else {
           let confirm=true,prepareFailed=false;
-          try {
-            const staged=await api.runFunction(sources,{runner_id:runner,prewarm_only:true},{timeoutMs:cap.prewarm_ms});
-            preparationFailure(staged?.result);
-            if(!['pending','skipped'].includes(staged?.result?.state))fail('invalid_result','prewarm');
-            emit({dashboard_preparation:staged.result.state,prewarm_phase:'prepare'});
-          } catch(error) {
-            prepareFailed=true;confirm=confirmablePreparationError(error);
-            emit({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm',prewarm_phase:'prepare'});
+          for(const phase of canSplit?['basis','cards']:['prepare']) {
+            if(!confirm)break;
+            try {
+              if(remaining()<cap.prewarm_ms+cap.prewarm_confirm_ms)fail('request_timeout','prewarm');
+              const staged=await api.runFunction(sources,{runner_id:runner,prewarm_only:true,
+                ...(canSplit?{prewarm_stage:phase}:{})},{timeoutMs:cap.prewarm_ms});
+              preparationFailure(staged?.result);
+              if(!['pending','skipped'].includes(staged?.result?.state))fail('invalid_result','prewarm');
+              emit({dashboard_preparation:staged.result.state,prewarm_phase:phase});
+              if(canSplit&&staged.result.state==='skipped')confirm=false;
+            } catch(error) {
+              prepareFailed=true;confirm=confirmablePreparationError(error);
+              emit({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm',prewarm_phase:phase});
+            }
           }
           if(confirm)try {
             if(remaining()<cap.prewarm_confirm_ms)fail('request_timeout','prewarm');
