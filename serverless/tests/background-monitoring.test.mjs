@@ -420,6 +420,57 @@ test('the live getJobs requires_resume hint does not restart a healthy history i
   assert.equal(f.calls.includes('history.resume'), false);
 });
 
+test('staged dashboard work needs a separate read-only confirmation with its own budget', async () => {
+  const f=fixture();await f.complete();const calls=[];
+  f.dependencies.assertScopeReadOnly=f.dependencies.assertScope;
+  f.dependencies.assertScope=async()=>{throw Error('Mutable scope path forbidden');};
+  f.dependencies.dashboard={version:1,confirmation_version:1,
+    prewarm:async()=>{throw Error('Legacy path forbidden');},
+    prepare:async context=>{calls.push(['prepare',copy(context)]);f.advance(24000);return {staged:true};},
+    confirm:async context=>{calls.push(['confirm',copy(context)]);return {prepared:true};}};
+  const state=f.state(),revision=f.revision(),providers=[...f.calls],worker=createBackgroundMonitoringWorker(f.dependencies);
+  assert.deepEqual(await worker.prewarm({runner_id:RUNNER}),{state:'pending'});
+  assert.deepEqual(await worker.confirmPreparation({runner_id:RUNNER}),{state:'prepared'});
+  assert.equal(calls[0][1].confirm_only,undefined);
+  assert.equal(calls[1][1].confirm_only,true);
+  assert.equal(calls[1][1].deadline,f.at()+LIMITS.dashboard_confirm_ms);
+  assert.equal(calls[0][1].run_id,calls[1][1].run_id);
+  assert.equal(calls[0][1].session_id,calls[1][1].session_id);
+  assert.deepEqual(f.state(),state);assert.equal(f.revision(),revision);assert.deepEqual(f.calls,providers);
+});
+
+test('staged cache confirmation recovers a saved response lost after the preparation deadline', async () => {
+  const f=fixture();await f.complete();let saved=false;
+  f.dependencies.assertScopeReadOnly=f.dependencies.assertScope;
+  f.dependencies.dashboard={version:1,confirmation_version:1,prewarm:async()=>{},
+    prepare:async()=>{saved=true;f.advance(LIMITS.dashboard_prepare_ms);return {staged:true};},
+    confirm:async()=>({prepared:saved})};
+  const worker=createBackgroundMonitoringWorker(f.dependencies),before=f.state();
+  await assert.rejects(()=>worker.prewarm({runner_id:RUNNER}),/BACKGROUND_PREWARM_TIMEOUT/);
+  assert.deepEqual(await worker.confirmPreparation({runner_id:RUNNER}),{state:'prepared'});
+  assert.deepEqual(f.state(),before);
+});
+
+test('confirmation fails closed for incomplete artifacts, scope/ledger changes and deadline expiry', async () => {
+  for(const mode of ['missing','scope','replaced','deadline','unsupported','mutable_scope_only']) {
+    const f=fixture();await f.complete();
+    f.dependencies.assertScopeReadOnly=f.dependencies.assertScope;
+    f.dependencies.dashboard={version:1,confirmation_version:1,prewarm:async()=>{},prepare:async()=>({staged:true}),
+      confirm:async()=>{
+        if(mode==='scope')f.changeScope({credential_version:2});
+        if(mode==='replaced')f.mutate(state=>{state.background_monitoring.run.session_id='background_'+OTHER+'_'+START;});
+        if(mode==='deadline')f.advance(LIMITS.dashboard_confirm_ms);
+        return {prepared:mode!=='missing'};
+      }};
+    if(mode==='unsupported')delete f.dependencies.dashboard.confirm;
+    if(mode==='mutable_scope_only')delete f.dependencies.assertScopeReadOnly;
+    const operation=()=>createBackgroundMonitoringWorker(f.dependencies).confirmPreparation({runner_id:RUNNER});
+    if(mode==='replaced')assert.deepEqual(await operation(),{state:'skipped'});
+    else await assert.rejects(operation,error=>/^BACKGROUND_(PREWARM_(INCOMPLETE|TIMEOUT|UNSUPPORTED)|SCOPE_CHANGED)$/.test(error.code));
+    assert.equal(f.state().background_monitoring.state,'complete');
+  }
+});
+
 test('actual CloudEngine history completes through getJobs despite its broad Resume hint', async () => {
   let at = START, revision = 0, state = {version: 2, next_job_id: 1, job: null, attempts: [], next_allowed_at: 0};
   const wallet = address(1), nft = address(2), collection = address(3), ctx = {initData: {user: {id: 42}}};

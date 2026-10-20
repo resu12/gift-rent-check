@@ -5,7 +5,7 @@ export const BACKGROUND_MONITORING_LIMITS = Object.freeze({
   cadence_ms: 6 * 60 * 60 * 1000, run_ms: 20 * 60 * 1000,
   lease_ms: 120000, history_steps: 100, history_resumes: 3, history_daily_attempts: 500, manual_retry_ms: 60000,
   gift_resumes: 1, gift_resume_ms: 300000, gift_history_reserve_ms: 300000, gift_attempts: 20, gift_daily_attempts: 1000,
-  dashboard_prepare_ms: 25000, dashboard_prepare_age_ms: 5 * 60 * 1000,
+  dashboard_prepare_ms: 25000, dashboard_confirm_ms: 10000, dashboard_prepare_age_ms: 5 * 60 * 1000,
   analytics_refresh_ms: 60000, analytics_evaluation_reserve_ms: 60000,
   continuation_segments: 12, continuation_cycle_ms: 4 * 60 * 60 * 1000,
   continuation_retry_ms: 60000, continuation_request_reserve_ms: 90000,
@@ -156,7 +156,7 @@ export function projectBackgroundMonitoring(value, now = Date.now()) {
  * callback must enforce context.scope and context.lease at its own CAS boundary.
  * tick performs at most one provider step. It never resumes an unidentified job.
  */
-export function createBackgroundMonitoringWorker({repository, clock, captureScope, assertScope,
+export function createBackgroundMonitoringWorker({repository, clock, captureScope, assertScope, assertScopeReadOnly,
   rules, gifts, history, analytics, dashboard}) {
   for (const fn of [repository?.read, repository?.append, clock, captureScope, assertScope,
     rules?.status, rules?.evaluate, gifts?.status, gifts?.start, gifts?.step,
@@ -195,25 +195,41 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
   // run has been saved. It cannot claim/extend a run or repeat provider work.
   // The hosting callback must bound its reads and fence any cache write to this
   // exact completed run and scope. An old runtime simply lacks this capability.
-  async function prewarm({runner_id} = {}) {
+  async function prepareDashboard({runner_id} = {}, confirmOnly = false) {
     if (typeof runner_id !== 'string' || !/^[a-f0-9]{64}$/.test(runner_id))
       throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
+    const staged = dashboard?.confirmation_version === 1;
+    if ((confirmOnly || staged) && (!staged || typeof dashboard.prepare !== 'function'
+      || typeof dashboard.confirm !== 'function' || typeof assertScopeReadOnly !== 'function'))
+      throw new BackgroundMonitoringError('BACKGROUND_PREWARM_UNSUPPORTED');
     if (dashboard?.version !== 1 || typeof dashboard.prewarm !== 'function') return {state: 'skipped'};
     const saved = await repository.read(), at = await now(), ledger = validate(saved.state.background_monitoring);
-    const eligible = row => row?.state === 'complete' && row.run.stage === 'done'
+    const eligible = (row, clockAt) => row?.state === 'complete' && row.run.stage === 'done'
       && row.run.gift_complete && row.run.history_complete && row.run.lease === null
       && (row.run.last_runner_id === runner_id || row.run.id.startsWith(runner_id + ':'))
-      && row.last_success_at === row.last_finished_at && time(row.last_finished_at) <= at
-      && time(row.last_finished_at) > at - BACKGROUND_MONITORING_LIMITS.dashboard_prepare_age_ms;
-    if (!eligible(ledger)) return {state: 'skipped'};
-    const input = {...context(ledger.run), prewarm_only: true, deadline: at + BACKGROUND_MONITORING_LIMITS.dashboard_prepare_ms};
-    await assertScope(ledger.run.scope, input);
-    const result = await dashboard.prewarm(input);
+      && row.last_success_at === row.last_finished_at && time(row.last_finished_at) <= clockAt
+      && time(row.last_finished_at) > clockAt - BACKGROUND_MONITORING_LIMITS.dashboard_prepare_age_ms;
+    if (!eligible(ledger, at)) return {state: 'skipped'};
+    const input = {...context(ledger.run), prewarm_only: true, ...(confirmOnly ? {confirm_only: true} : {}),
+      deadline: at + (confirmOnly ? BACKGROUND_MONITORING_LIMITS.dashboard_confirm_ms : BACKGROUND_MONITORING_LIMITS.dashboard_prepare_ms)};
+    const scopeCheck = staged ? assertScopeReadOnly : assertScope;
+    await scopeCheck(ledger.run.scope, input);
+    const result = await (confirmOnly ? dashboard.confirm : staged ? dashboard.prepare : dashboard.prewarm)(input);
     const current = validate((await repository.read()).state.background_monitoring);
-    await assertScope(ledger.run.scope, input);
-    if (!eligible(current) || current.run.id !== ledger.run.id || await now() > input.deadline) return {state: 'skipped'};
+    await scopeCheck(ledger.run.scope, input);
+    const finishedAt = await now();
+    if (staged && finishedAt >= input.deadline) throw new BackgroundMonitoringError('BACKGROUND_PREWARM_TIMEOUT');
+    if (!eligible(current, finishedAt) || current.run.id !== ledger.run.id
+      || current.run.session_id !== ledger.run.session_id || canonical(current.run.scope) !== canonical(ledger.run.scope)
+      || finishedAt >= input.deadline) return {state: 'skipped'};
+    // Staging is never success: only a separate, read-only check can certify
+    // both durable artifacts for this exact completed cycle.
+    if (staged && !confirmOnly) return {state: 'pending'};
+    if (confirmOnly && result?.prepared !== true) throw new BackgroundMonitoringError('BACKGROUND_PREWARM_INCOMPLETE');
     return {state: result?.prepared === true ? 'prepared' : 'skipped'};
   }
+  const prewarm = input => prepareDashboard(input);
+  const confirmPreparation = input => prepareDashboard(input, true);
   async function append(saved, ledger, at, {allowScopeChange = false} = {}) {
     if (!allowScopeChange) await assertScope(ledger.run.scope, context(ledger.run));
     // A changed-scope failure is metadata only. Fence it to the current wallet
@@ -736,5 +752,5 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       }
     }
   }
-  return {tick, status, prewarm};
+  return {tick, status, prewarm, confirmPreparation};
 }

@@ -17,6 +17,12 @@ function fixture(results,options={}) {
     loadSources:()=>local,now:()=>now,monotonic:()=>now-start,sleep:async ms=>{waits.push(ms);now+=ms;},random:()=>runner,emit:value=>output.push(value),...options};
   return {args,calls,output,waits,run:()=>runBackgroundMonitoring(args)};
 }
+function confirmationFixture(results,options={}) {
+  const f=fixture(results,options);
+  f.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']
+    +'\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;\nexport const PRIVATE_BACKGROUND_DASHBOARD_CONFIRMATION_VERSION=1;'}});
+  return f;
+}
 
 test('disabled monitoring does not load credentials modules or contact the host',async()=>{
   const f=fixture([],{enabled:false,loadSources:()=>{throw Error('must not read');},random:()=>{throw Error('must not generate');}});
@@ -237,6 +243,156 @@ test('acknowledged lost-response recovery can prepare once without replaying the
   assert.deepEqual(await f.run(),{state:'complete'});
   assert.deepEqual(f.calls.map(call=>call.input),[{runner_id:runner},{runner_id:runner,status_only:true},{runner_id:runner,prewarm_only:true}]);
   assert.deepEqual(f.output.at(-1),{dashboard_preparation:'skipped'});
+});
+
+test('confirmation transport accepts only the fixed exclusive read-only flag and prewarm stage',async()=>{
+  const requests=[],api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async(_url,options)=>{
+    requests.push(JSON.parse(options.body));return Response.json({ok:true,result:{result:{state:'prepared'}}});
+  }});
+  await api.runFunction({}, {runner_id:runner,prewarm_confirm_only:true},{timeoutMs:RUNNER_LIMITS.prewarm_confirm_ms});
+  assert.deepEqual(requests,[{module:MONITORING_ENDPOINT,sources:{},args:{runner_id:runner,prewarm_confirm_only:true},
+    ctx:{background_worker:'price-monitoring-v1'}}]);
+  for(const prewarm_confirm_only of [false,'true',1,null,{},[]])assert.throws(()=>api.runFunction({}, {runner_id:runner,prewarm_confirm_only}));
+  for(const key of ['retry','status_only','prewarm_only','skip_analytics','yield_only'])for(const value of [true,false])
+    assert.throws(()=>api.runFunction({}, {runner_id:runner,prewarm_confirm_only:true,[key]:value}));
+  for(const extra of [{sql:'SELECT 1'},{action:'refresh'},{provider:'marketapp'},{confirmation:true}])
+    assert.throws(()=>api.runFunction({}, {runner_id:runner,prewarm_confirm_only:true,...extra}));
+  assert.equal(requests.length,1);
+  const failed=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async()=>Response.json(
+    {ok:false,error_type:'CODE_RUN_FAILED',description:'BACKGROUND_PREWARM_CONFIRMATION_FAILED'},{status:400})});
+  await assert.rejects(failed.runFunction({}, {runner_id:runner,prewarm_confirm_only:true}),error=>
+    error.stage==='prewarm'&&error.execution_code==='BACKGROUND_PREWARM_CONFIRMATION_FAILED');
+});
+
+test('capable runtimes stage once then confirm in a separate bounded request before claiming preparation',async()=>{
+  for(const stagedState of ['pending','skipped']) {
+    const f=confirmationFixture([{state:'complete',runner_acknowledged:true},{state:stagedState,private_data:token},{state:'prepared',private_data:token}]);
+    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.deepEqual(f.calls.map(call=>call.input),[{runner_id:runner},{runner_id:runner,prewarm_only:true},{runner_id:runner,prewarm_confirm_only:true}]);
+    assert.deepEqual(f.calls.slice(1).map(call=>call.value.timeoutMs),[30000,15000]);
+    assert.deepEqual(f.output,[{state:'complete'},{dashboard_preparation:stagedState,prewarm_phase:'prepare'},
+      {dashboard_preparation:'prepared',prewarm_phase:'confirm'}]);
+    assert.deepEqual(f.waits,[]);
+  }
+});
+
+test('ambiguous preparation failures are reconciled without replaying a build and retain the original diagnostic',async()=>{
+  const cases=[
+    new MonitoringAdminError('network_error','prewarm'),
+    new MonitoringAdminError('request_timeout','prewarm'),
+    new MonitoringAdminError('http_error','prewarm',502),
+    new MonitoringAdminError('remote_error','prewarm',400,'execution',400,{execution_ms:25003,prewarm_phase:'confirm'}),
+    new MonitoringAdminError('remote_error','prewarm',500,'internal',500),
+    new MonitoringAdminError('remote_error','prewarm',400,'execution',400,{execution_limit:'cpu',execution_ms:21120}),
+    new MonitoringAdminError('remote_error','prewarm',400,'execution',400,{execution_code:'BACKGROUND_PREWARM_TIMEOUT'}),
+    ...['invalid_json','invalid_response','invalid_envelope','invalid_result','response_too_large'].map(reason=>new MonitoringAdminError(reason,'prewarm')),
+    {state:'prepared'},null,{state:'failed',description:token}
+  ];
+  for(const failure of cases) {
+    const f=confirmationFixture([{state:'complete',runner_acknowledged:true},failure,{state:'prepared'}]);
+    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.equal(f.calls.length,3);assert.equal(f.calls.filter(row=>row.input.prewarm_only).length,1);
+    assert.equal(f.output[1].dashboard_preparation,'failed');assert.equal(f.output[1].prewarm_phase,'prepare');
+    assert.equal(f.output[1].error,failure instanceof MonitoringAdminError?failure.reason:'invalid_result');
+    if(failure?.execution_ms!==undefined)assert.equal(f.output[1].execution_ms,failure.execution_ms);
+    assert.deepEqual(f.output.at(-1),{dashboard_preparation:'prepared',prewarm_phase:'confirm',preparation_recovered:true});
+    assert.ok(!JSON.stringify(f.output).includes(token));assert.deepEqual(f.waits,[]);
+  }
+});
+
+test('denied scope and lease guards or unclassified client failures never enter confirmation recovery',async()=>{
+  for(const failure of [
+    ...['BACKGROUND_PREWARM_DENIED','BACKGROUND_PREWARM_UNSUPPORTED','BACKGROUND_SCOPE_CHANGED','BACKGROUND_LEASE_LOST',
+      'BACKGROUND_ACCESS_DENIED','BACKGROUND_RULES_CHANGED']
+      .map(execution_code=>new MonitoringAdminError('remote_error','prewarm',400,'execution',400,{execution_code})),
+    ...[400,401,403,404,429].map(status=>new MonitoringAdminError('http_error','prewarm',status)),
+    new MonitoringAdminError('remote_error','prewarm',400,'endpoint',400),
+    new MonitoringAdminError('remote_error','prewarm',400,'other',400),Error(token)
+  ]) {
+    const f=confirmationFixture([{state:'complete',runner_acknowledged:true},failure,{state:'prepared'}]);
+    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.equal(f.calls.length,2);assert.equal(f.output.at(-1).dashboard_preparation,'failed');
+    assert.equal(f.output.at(-1).prewarm_phase,'prepare');
+    assert.ok(!f.output.some(row=>row.dashboard_preparation==='prepared'));assert.ok(!JSON.stringify(f.output).includes(token));
+  }
+});
+
+test('authentication status cannot become confirmable through an execution-error envelope',async()=>{
+  for(const status of [401,403]) {
+    let requests=0;
+    const api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async url=>{
+      if(url.endsWith('/get'))return Response.json({ok:true,result:{canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']
+        +'\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;\nexport const PRIVATE_BACKGROUND_DASHBOARD_CONFIRMATION_VERSION=1;'}}});
+      requests++;
+      return requests===1?Response.json({ok:true,result:{result:{state:'complete',runner_acknowledged:true}}})
+        :Response.json({ok:false,error_type:'CODE_RUN_FAILED',description:'BACKGROUND_PREWARM_TIMEOUT',parameters:{time:0.02}},{status});
+    }});
+    const f=fixture([],{api});assert.deepEqual(await f.run(),{state:'complete'});
+    assert.equal(requests,2);
+    assert.deepEqual(f.output.at(-1),{dashboard_preparation:'failed',error:'remote_error',stage:'prewarm',http_status:status,
+      remote_error:'execution',execution_ms:20,execution_code:'BACKGROUND_PREWARM_TIMEOUT',prewarm_phase:'prepare'});
+    assert.ok(!f.output.some(row=>row.prewarm_phase==='confirm'));
+  }
+});
+
+test('unconfirmed or malformed confirmation never claims prepared and does not retry either operation',async()=>{
+  for(const result of [null,false,true,{},[],{state:'pending'},{state:'failed'},{state:'skipped'},{state:'complete'},{prepared:true},
+    {state:true},{state:'prepared ',description:token},new MonitoringAdminError('remote_error','prewarm',400,'execution',400,
+      {execution_ms:10001,execution_code:'BACKGROUND_PREWARM_TIMEOUT',prewarm_phase:'prepare'})]) {
+    const f=confirmationFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},result]);
+    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.equal(f.calls.length,3);assert.deepEqual(f.waits,[]);
+    const failure=f.output.at(-1);
+    assert.equal(failure.dashboard_preparation,'failed');assert.equal(failure.prewarm_phase,'confirm');
+    assert.equal(failure.execution_code,result instanceof MonitoringAdminError?'BACKGROUND_PREWARM_TIMEOUT':
+      result?.state==='skipped'?'BACKGROUND_PREWARM_INCOMPLETE':'BACKGROUND_PREWARM_CONFIRMATION_FAILED');
+    assert.ok(!f.output.some(row=>row.dashboard_preparation==='prepared'));assert.ok(!JSON.stringify(f.output).includes(token));
+  }
+});
+
+test('two-stage work reserves both preparation requests before claiming a cycle',async()=>{
+  const reserve=2*RUNNER_LIMITS.request_ms+RUNNER_LIMITS.prewarm_ms+RUNNER_LIMITS.prewarm_confirm_ms+1000;
+  for(const [remaining,steps,inspect] of [[reserve-1,3,true],[reserve,3,false],[reserve+1,3,false],[reserve+1,2,true]]) {
+    const f=confirmationFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},{state:'prepared'}],
+      {limits:{duration_ms:remaining,steps}});
+    assert.equal((await f.run()).state,inspect?'partial':'complete');
+    assert.deepEqual(f.calls[0].input,{runner_id:runner,...(inspect?{status_only:true}:{})});
+    assert.equal(f.calls.length,inspect?1:3);
+  }
+});
+
+test('terminal preparation needs the full two-request budget and retains independent confirmation time',async()=>{
+  const budget=RUNNER_LIMITS.prewarm_ms+RUNNER_LIMITS.prewarm_confirm_ms;
+  for(const remainingAfterTick of [budget-1,budget,budget+1]) {
+    let elapsed=0;
+    const f=confirmationFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},{state:'prepared'}],
+      {limits:{duration_ms:300000},monotonic:()=>elapsed});
+    const execute=f.args.api.runFunction;
+    f.args.api.runFunction=async(...args)=>{const result=await execute(...args);
+      elapsed+=args[1].prewarm_only?RUNNER_LIMITS.prewarm_ms:!args[1].prewarm_confirm_only?300000-remainingAfterTick:0;
+      return result;};
+    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.equal(f.calls.length,remainingAfterTick<budget?1:3);
+    if(remainingAfterTick>=budget)assert.deepEqual(f.output.at(-1),{dashboard_preparation:'prepared',prewarm_phase:'confirm'});
+  }
+  let elapsed=0;
+  const f=confirmationFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},{state:'prepared'}],
+    {limits:{duration_ms:300000},monotonic:()=>elapsed});
+  const execute=f.args.api.runFunction;
+  f.args.api.runFunction=async(...args)=>{const result=await execute(...args);elapsed+=args[1].prewarm_only?30001:255000;return result;};
+  assert.deepEqual(await f.run(),{state:'complete'});
+  assert.equal(f.calls.length,2);
+  assert.deepEqual(f.output.at(-1),{dashboard_preparation:'failed',error:'request_timeout',stage:'prewarm',prewarm_phase:'confirm'});
+});
+
+test('unrecognized confirmation capability keeps legacy prewarm behavior',async()=>{
+  for(const declaration of ['', '\nexport const PRIVATE_BACKGROUND_DASHBOARD_CONFIRMATION_VERSION=2;']) {
+    const f=fixture([{state:'complete',runner_acknowledged:true},{state:'prepared'}]);
+    f.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']
+      +'\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;'+declaration}});
+    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.equal(f.calls.length,2);assert.deepEqual(f.output.at(-1),{dashboard_preparation:'prepared'});
+  }
 });
 
 test('timeouts and remote errors are bounded and never echoed or retried',async()=>{
@@ -601,6 +757,86 @@ test('transport diagnostics distinguish HTTP errors, malformed envelopes and rem
   }
 });
 
+test('execution diagnostics retain exact host limit and guard codes with bounded numeric duration',async()=>{
+  const cases=[
+    [{description:'CPU timer exceeded',parameters:{time:21.12345,prewarm_phase:'prepare'}},
+      {execution_limit:'cpu',execution_ms:21123,prewarm_phase:'prepare'}],
+    [{description:'Error: CPU time limit exceeded'},{execution_limit:'cpu'}],
+    [{description:'Internal error: Memory limit exceeded'},{execution_limit:'memory'}],
+    [{description:'Out of memory'},{execution_limit:'memory'}],
+    [{description:'Execution time limit exceeded'},{execution_limit:'time'}],
+    [{error_code:'CPU_TIME_LIMIT_EXCEEDED'},{execution_limit:'cpu'}],
+    [{parameters:{limit_code:'MEMORY_LIMIT_EXCEEDED'}},{execution_limit:'memory'}],
+    [{error_type:'TIME_LIMIT_EXCEEDED'},{execution_limit:'time'}],
+    ...['BACKGROUND_PREWARM_TIMEOUT','BACKGROUND_PREWARM_DENIED','BACKGROUND_LEASE_LOST','BACKGROUND_SCOPE_CHANGED',
+      'BACKGROUND_PREWARM_CONFIRMATION_FAILED','BACKGROUND_PREWARM_INCOMPLETE','BACKGROUND_PREWARM_UNSUPPORTED']
+      .flatMap(code=>[
+        [{description:code},{execution_code:code}],
+        [{description:'Error: '+code,parameters:{prewarm_phase:'confirm'}},{execution_code:code,prewarm_phase:'confirm'}],
+        [{parameters:{code}},{execution_code:code}],
+      ]),
+    ...[[0,0],[0.012,12],[1.2345,1235],[90,90000]].map(([time,execution_ms])=>[{parameters:{time}},{execution_ms}]),
+  ];
+  for(const [fields,expected] of cases) {
+    const api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async()=>Response.json({
+      ok:false,error_type:'CODE_RUN_FAILED',error_code:400,description:token,...fields,
+      parameters:{log:[token,'CPU timer exceeded'],module:token,...fields.parameters},
+    },{status:400})});
+    await assert.rejects(api.runFunction({}, {runner_id:runner,prewarm_only:true}),error=>{
+      assert.equal(error.reason,'remote_error');assert.equal(error.stage,'prewarm');
+      const actual=Object.fromEntries(['execution_ms','execution_limit','execution_code','prewarm_phase']
+        .filter(key=>Object.hasOwn(error,key)).map(key=>[key,error[key]]));
+      assert.deepEqual(actual,expected);assert.ok(!JSON.stringify(error).includes(token));
+      assert.equal(error.description,undefined);assert.equal(error.parameters,undefined);
+      return true;
+    });
+  }
+});
+
+test('execution diagnostics reject provider prose, substrings, unknown phases and unbounded durations',async()=>{
+  const cases=[
+    {description:'Provider said CPU timer exceeded'},
+    {description:'CPU timer exceeded '+token},
+    {description:'Error: CPU timer exceeded\n'+token},
+    {description:'CPU timer exceeded'+''.padEnd(300,' ')},
+    {description:'Error: BACKGROUND_PREWARM_TIMEOUT\n'+token},
+    {description:'Upstream BACKGROUND_SCOPE_CHANGED'},
+    {description:'BACKGROUND_PREWARM_TIMEOUT '+token},
+    {error_type:'ENDPOINT_ERROR',description:'CPU timer exceeded'},
+    {error_type:'INTERNAL',description:'BACKGROUND_LEASE_LOST'},
+    {error_type:'unknown',description:'Memory limit exceeded'},
+    {description:token,parameters:{log:['CPU timer exceeded','BACKGROUND_SCOPE_CHANGED']}},
+    {description:'BACKGROUND_SCOPE_CHANGED',parameters:{code:'BACKGROUND_LEASE_LOST'}},
+    ...[-1,90.000001,1e100,'0.012',null,true,{}].map(time=>({parameters:{time}})),
+    ...['archive_replay',token,null,{},1].map(prewarm_phase=>({parameters:{prewarm_phase}})),
+    {parameters:{code:token,limit_code:token,execution_limit:'cpu',description:'CPU timer exceeded'}},
+  ];
+  for(const fields of cases) {
+    const api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async()=>Response.json({
+      ok:false,error_type:'CODE_RUN_FAILED',error_code:400,description:token,...fields,
+    },{status:400})});
+    await assert.rejects(api.runFunction({}, {runner_id:runner,prewarm_only:true}),error=>{
+      for(const key of ['execution_ms','execution_limit','execution_code','prewarm_phase'])assert.equal(Object.hasOwn(error,key),false,key);
+      assert.ok(!JSON.stringify(error).includes(token));return true;
+    });
+  }
+});
+
+test('preparation failure keeps its original bounded diagnostic without claiming confirmation or retrying',async()=>{
+  const failure=new MonitoringAdminError('remote_error','prewarm',400,'execution',400,
+    {execution_ms:25001,execution_code:'BACKGROUND_PREWARM_TIMEOUT',prewarm_phase:'prepare',description:token});
+  const f=fixture([{state:'complete',runner_acknowledged:true},failure]);
+  f.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']
+    +'\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;'}});
+  assert.deepEqual(await f.run(),{state:'complete'});
+  assert.equal(f.calls.length,2);assert.deepEqual(f.waits,[]);
+  assert.deepEqual(f.output.at(-1),{dashboard_preparation:'failed',error:'remote_error',stage:'prewarm',
+    http_status:400,remote_error:'execution',remote_code:400,execution_ms:25001,
+    execution_code:'BACKGROUND_PREWARM_TIMEOUT',prewarm_phase:'prepare'});
+  assert.ok(!JSON.stringify(f.output).includes(token));
+  assert.ok(!f.output.some(row=>row.dashboard_preparation==='prepared'||row.prewarm_phase==='confirm'));
+});
+
 test('an explicit execution error is never recovered regardless of its HTTP status',async()=>{
   for(const status of [200,400,500])for(const error_type of ['INTERNAL','CODE_RUN_FAILED']) {
     let writes=0;
@@ -626,7 +862,7 @@ test('unknown and oversized client-error bodies preserve HTTP failures without r
   }
 });
 
-test('CLI execution-error diagnostics never include the host description or parameters',async t=>{
+test('CLI execution-error diagnostics retain bounded duration without host description or parameters',async t=>{
   let executions=0;t.mock.method(globalThis,'fetch',async url=>{
     if(url.endsWith('/get'))return Response.json({ok:true,result:{canonical_modules:canonical}});
     executions++;return Response.json({ok:false,error_type:'CODE_RUN_FAILED',error_code:400,description:token,
@@ -634,7 +870,7 @@ test('CLI execution-error diagnostics never include the host description or para
   });
   const output=[],exit=await monitoringMain({args:['--app-id','123'],env:{BACKGROUND_MONITORING_ENABLED:'true',TGCLOUD_TOKEN:token},emit:value=>output.push(value)});
   assert.equal(exit,1);assert.equal(executions,1);
-  assert.deepEqual(output,[{state:'failed',error:'remote_error',stage:'tick',http_status:400,remote_error:'execution',remote_code:400}]);
+  assert.deepEqual(output,[{state:'failed',error:'remote_error',stage:'tick',http_status:400,remote_error:'execution',remote_code:400,execution_ms:12}]);
   assert.ok(!JSON.stringify(output).includes(token));
 });
 
