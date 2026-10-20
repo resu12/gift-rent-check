@@ -17,7 +17,7 @@ function bridge(options={}) {
     .replace(/^import[^\n]+\n/gm,'').replace('export default async function','return async function');
   const create=vm.runInNewContext(`(function(createPrivateBackgroundMonitoringAccess,PRIVATE_BACKGROUND_MONITORING_VERSION,PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION,PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION,createBackgroundMonitoringWorker,BackgroundMonitoringError){${source}})`);
   return {call:create(check=>{accesses++;guard=check;return access;},version,scopedHistoryVersion,personalAnalyticsVersion,
-    candidate=>{assert.equal(candidate,access);return {tick:async input=>({state:'complete',runner:input.runner_id,retry:input.retry,skip_analytics:input.skip_analytics,yield_only:input.yield_only}),status:async input=>({state:'running',read_only:true,acknowledgement_for:input.runner_id}),prewarm:async input=>({state:'prepared',runner:input.runner_id}),confirmPreparation:async()=>({state:'prepared',read_only:true})};},BackgroundMonitoringError),
+    candidate=>{assert.equal(candidate,access);return {tick:async input=>({state:'complete',runner:input.runner_id,retry:input.retry,skip_analytics:input.skip_analytics,yield_only:input.yield_only}),status:async input=>({state:'running',read_only:true,acknowledgement_for:input.runner_id}),prewarm:async input=>({state:'prepared',runner:input.runner_id}),confirmPreparation:async()=>({state:'prepared',read_only:true}),...options.worker};},BackgroundMonitoringError),
     accesses:()=>accesses,guard:context=>guard(context)};
 }
 const input={runner_id:'a'.repeat(64)}, admin={background_worker:'price-monitoring-v1'};
@@ -82,7 +82,8 @@ test('administrative recovery reads status without invoking a tick or accepting 
 
 test('dashboard preparation requires an explicit supported access capability',async()=>{
   for(const dashboard of [undefined,{version:0,prewarm:async()=>{}},{version:1}]) {
-    const f=bridge({dashboard});await assert.rejects(()=>f.call({...input,prewarm_only:true},admin),/BACKGROUND_ACCESS_DENIED/);
+    const f=bridge({dashboard});assert.deepEqual(JSON.parse(JSON.stringify(await f.call({...input,prewarm_only:true},admin))),
+      {state:'failed',execution_code:'BACKGROUND_ACCESS_DENIED'});
   }
   const f=bridge({dashboard:{version:1,prewarm:async()=>{}}});
   assert.equal((await f.call({...input,prewarm_only:true},admin)).state,'prepared');
@@ -122,7 +123,8 @@ test('confirmation is an exclusive capability with a distinct read-only deadline
   }
   for(const options of [{dashboard},{dashboard:{...dashboard,confirmation_version:0},assertScopeReadOnly:async()=>{}},
     {dashboard:{...dashboard,confirm:undefined},assertScopeReadOnly:async()=>{}}]) {
-    await assert.rejects(()=>bridge(options).call({...input,prewarm_confirm_only:true},admin),/BACKGROUND_PREWARM_UNSUPPORTED/);
+    assert.deepEqual(JSON.parse(JSON.stringify(await bridge(options).call({...input,prewarm_confirm_only:true},admin))),
+      {state:'failed',execution_code:'BACKGROUND_PREWARM_UNSUPPORTED'});
   }
   const f=bridge({ledger,dashboard,assertScopeReadOnly:async()=>{}});
   assert.equal((await f.call({...input,prewarm_confirm_only:true},admin)).read_only,true);
@@ -135,6 +137,44 @@ test('confirmation is an exclusive capability with a distinct read-only deadline
   const prepare=bridge({ledger,dashboard,assertScopeReadOnly:async()=>{}});
   await prepare.call({...input,prewarm_only:true},admin);
   await assert.rejects(()=>prepare.guard(context),/BACKGROUND_PREWARM_DENIED/);
+});
+
+test('preparation and confirmation return only fixed known failures instead of host-wrapped exception text',async()=>{
+  const secret='synthetic-secret-must-not-leak',dashboard={version:1,prewarm:async()=>{},
+    confirmation_version:1,prepare:async()=>{},confirm:async()=>{}};
+  for(const code of ['BACKGROUND_PREWARM_TIMEOUT','BACKGROUND_PREWARM_DENIED','BACKGROUND_LEASE_LOST',
+    'BACKGROUND_SCOPE_CHANGED','BACKGROUND_ACCESS_DENIED','BACKGROUND_RULES_CHANGED',
+    'BACKGROUND_PREWARM_CONFIRMATION_FAILED','BACKGROUND_PREWARM_INCOMPLETE','BACKGROUND_PREWARM_UNSUPPORTED']) {
+    for(const failure of [new BackgroundMonitoringError(code),new Error(code)]) {
+      failure.stack=secret;failure.parameters={private:secret};failure.cause=Error(secret);
+      for(const mode of ['prewarm_only','prewarm_confirm_only']) {
+        const f=bridge({dashboard,assertScopeReadOnly:async()=>{},worker:{
+          prewarm:async()=>{throw failure;},confirmPreparation:async()=>{throw failure;},
+        }});
+        const result=await f.call({...input,[mode]:true},admin);
+        assert.deepEqual(JSON.parse(JSON.stringify(result)),{state:'failed',execution_code:code});
+        assert.ok(!JSON.stringify(result).includes(secret));
+      }
+    }
+  }
+});
+
+test('unknown errors and ordinary monitoring failures still throw without acquiring a preparation result',async()=>{
+  const dashboard={version:1,prewarm:async()=>{},confirmation_version:1,prepare:async()=>{},confirm:async()=>{}};
+  const failures=[Error('private provider text'),Error('BACKGROUND_PREWARM_TIMEOUT extra private text'),
+    Object.assign(Error('BACKGROUND_PREWARM_TIMEOUT'),{code:'BACKGROUND_SCOPE_CHANGED'}),
+    Object.assign(Error('private provider text'),{code:'BACKGROUND_PREWARM_TIMEOUT'}),Error('UNKNOWN_CODE')];
+  for(const failure of failures) {
+    const f=bridge({dashboard,assertScopeReadOnly:async()=>{},worker:{
+      prewarm:async()=>{throw failure;},confirmPreparation:async()=>{throw failure;},
+    }});
+    for(const mode of ['prewarm_only','prewarm_confirm_only'])
+      await assert.rejects(f.call({...input,[mode]:true},admin),error=>error===failure);
+  }
+  const known=new BackgroundMonitoringError('BACKGROUND_SCOPE_CHANGED');
+  const f=bridge({worker:{tick:async()=>{throw known;},status:async()=>{throw known;}}});
+  await assert.rejects(f.call(input,admin),error=>error===known);
+  await assert.rejects(f.call({...input,status_only:true},admin),error=>error===known);
 });
 
 test('provider guard rejects replaced, expired and terminal worker claims',async()=>{

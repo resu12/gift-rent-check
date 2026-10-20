@@ -317,6 +317,46 @@ test('denied scope and lease guards or unclassified client failures never enter 
   }
 });
 
+test('fixed bridge preparation failures preserve guard diagnostics and only safe cases enter read-only confirmation',async()=>{
+  const denied=['BACKGROUND_PREWARM_DENIED','BACKGROUND_PREWARM_UNSUPPORTED','BACKGROUND_SCOPE_CHANGED',
+    'BACKGROUND_LEASE_LOST','BACKGROUND_ACCESS_DENIED','BACKGROUND_RULES_CHANGED'];
+  for(const code of [...denied,'BACKGROUND_PREWARM_TIMEOUT','BACKGROUND_PREWARM_INCOMPLETE','BACKGROUND_PREWARM_CONFIRMATION_FAILED']) {
+    const f=confirmationFixture([{state:'complete',runner_acknowledged:true},{state:'failed',execution_code:code},{state:'prepared'}]);
+    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.deepEqual(f.output[1],{dashboard_preparation:'failed',error:'remote_error',stage:'prewarm',
+      remote_error:'execution',execution_code:code,prewarm_phase:'prepare'});
+    assert.equal(f.calls.length,denied.includes(code)?2:3);
+    assert.equal(f.output.some(row=>row.preparation_recovered===true),!denied.includes(code));
+    assert.deepEqual(f.waits,[]);
+  }
+});
+
+test('fixed bridge confirmation failure cannot be mistaken for successful preparation',async()=>{
+  const f=confirmationFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},
+    {state:'failed',execution_code:'BACKGROUND_PREWARM_INCOMPLETE'}]);
+  assert.deepEqual(await f.run(),{state:'complete'});
+  assert.deepEqual(f.output.at(-1),{dashboard_preparation:'failed',error:'remote_error',stage:'prewarm',
+    remote_error:'execution',execution_code:'BACKGROUND_PREWARM_INCOMPLETE',prewarm_phase:'confirm'});
+  assert.equal(f.calls.length,3);assert.ok(!f.output.some(row=>row.dashboard_preparation==='prepared'));
+  assert.deepEqual(f.waits,[]);
+});
+
+test('fixed bridge failures work with legacy preparation and malformed diagnostic fields are never forwarded',async()=>{
+  const legacy=fixture([{state:'complete',runner_acknowledged:true},{state:'failed',execution_code:'BACKGROUND_PREWARM_TIMEOUT'}]);
+  legacy.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']
+    +'\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;'}});
+  assert.deepEqual(await legacy.run(),{state:'complete'});assert.equal(legacy.calls.length,2);
+  assert.equal(legacy.output.at(-1).execution_code,'BACKGROUND_PREWARM_TIMEOUT');
+  for(const result of [{state:'failed',execution_code:token},{state:'failed',execution_code:'BACKGROUND_PREWARM_TIMEOUT',description:token},
+    {state:'failed',execution_code:{secret:token}},{state:'failed',execution_code:'BACKGROUND_PREWARM_TIMEOUT '+token}]) {
+    const f=confirmationFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},result]);
+    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.equal(f.output.at(-1).error,'invalid_result');assert.equal(f.output.at(-1).execution_code,'BACKGROUND_PREWARM_CONFIRMATION_FAILED');
+    assert.ok(!JSON.stringify(f.output).includes(token));assert.equal(f.calls.length,3);
+    assert.ok(!f.output.some(row=>row.dashboard_preparation==='prepared'));
+  }
+});
+
 test('authentication status cannot become confirmable through an execution-error envelope',async()=>{
   for(const status of [401,403]) {
     let requests=0;
