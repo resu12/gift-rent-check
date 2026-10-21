@@ -21,15 +21,17 @@ function bridge(options={}) {
     accesses:()=>accesses,guard:context=>guard(context)};
 }
 const input={runner_id:'a'.repeat(64)}, admin={background_worker:'price-monitoring-v1'};
+const denied=async value=>assert.deepEqual(JSON.parse(JSON.stringify(await (typeof value==='function'?value():value))),
+  {state:'failed',execution_code:'BACKGROUND_ACCESS_DENIED'});
 
 test('split preparation phases require exact exclusive inputs before obtaining owner access',async()=>{
   const f=bridge();
   for(const prewarm_stage of ['basis','cards'])for(const extra of [{},{prewarm_only:false},{prewarm_confirm_only:true},
     {status_only:true},{prewarm_only:true,retry:false},{prewarm_only:true,skip_analytics:false},
     {prewarm_only:true,yield_only:false},{prewarm_only:true,prewarm_confirm_only:true}])
-    await assert.rejects(f.call({...input,prewarm_stage,...extra},admin),/BACKGROUND_ACCESS_DENIED/);
+    await denied(f.call({...input,prewarm_stage,...extra},admin));
   for(const prewarm_stage of [undefined,null,false,1,{},[],'prepare','confirm','Basis','basis '])
-    await assert.rejects(f.call({...input,prewarm_only:true,prewarm_stage},admin),/BACKGROUND_ACCESS_DENIED/);
+    await denied(f.call({...input,prewarm_only:true,prewarm_stage},admin));
   assert.equal(f.accesses(),0);
 });
 
@@ -94,17 +96,17 @@ test('ordinary Mini App contexts and arbitrary worker actions never obtain owner
     ...[true,false].map(retry=>[{...input,status_only:true,retry},admin]),
     ...[false,'true',1,null,{}].map(prewarm_only=>[{...input,prewarm_only},admin]),
     ...[{retry:true},{retry:false},{status_only:true}].map(other=>[{...input,prewarm_only:true,...other},admin])]) {
-    await assert.rejects(()=>f.call(args,ctx),/BACKGROUND_ACCESS_DENIED/);
+    await denied(()=>f.call(args,ctx));
   }
   assert.equal(f.accesses(),0);
-  const old=bridge({version:0});await assert.rejects(()=>old.call(input,admin),/BACKGROUND_ACCESS_DENIED/);
+  const old=bridge({version:0});await denied(()=>old.call(input,admin));
   assert.equal(old.accesses(),0);
 });
 
 test('version-1 access without the supported scoped-history capability never obtains owner access',async()=>{
   for(const scopedHistoryVersion of [undefined,null,0,2,'1',NaN,{}]) {
     const f=bridge({scopedHistoryVersion});
-    await assert.rejects(()=>f.call(input,admin),/BACKGROUND_ACCESS_DENIED/);
+    await denied(()=>f.call(input,admin));
     assert.equal(f.accesses(),0);
   }
 });
@@ -122,10 +124,10 @@ test('administrative bridge invokes only the fixed worker tick',async()=>{
 test('personal analytics requires both the supported runtime protocol and implementation',async()=>{
   for(const personalAnalyticsVersion of [undefined,null,0,2,'1',NaN,{}]) {
     const f=bridge({personalAnalyticsVersion});
-    await assert.rejects(()=>f.call(input,admin),/BACKGROUND_ACCESS_DENIED/);assert.equal(f.accesses(),0);
+    await denied(()=>f.call(input,admin));assert.equal(f.accesses(),0);
   }
   for(const analytics of [undefined,{version:0,refresh:async()=>{}},{version:1}]) {
-    const f=bridge({analytics});await assert.rejects(()=>f.call(input,admin),/BACKGROUND_ACCESS_DENIED/);
+    const f=bridge({analytics});await denied(()=>f.call(input,admin));
   }
 });
 
@@ -134,7 +136,7 @@ test('administrative recovery reads status without invoking a tick or accepting 
   const result=await f.call({...input,status_only:true},admin);
   assert.equal(result.state,'running');assert.equal(result.read_only,true);assert.equal(f.accesses(),1);
   assert.equal(result.acknowledgement_for,input.runner_id);
-  await assert.rejects(()=>f.call({...input,status_only:true},{}),/BACKGROUND_ACCESS_DENIED/);
+  await denied(()=>f.call({...input,status_only:true},{}));
 });
 
 test('dashboard preparation requires an explicit supported access capability',async()=>{
@@ -170,12 +172,12 @@ test('confirmation is an exclusive capability with a distinct read-only deadline
   const ledger={state:'complete',run,last_success_at:new Date(900).toISOString(),last_finished_at:new Date(900).toISOString()};
   for(const extra of [{prewarm_only:true},{status_only:true},{retry:false},{yield_only:false},{skip_analytics:false}]) {
     const f=bridge({dashboard,assertScopeReadOnly:async()=>{}});
-    await assert.rejects(()=>f.call({...input,prewarm_confirm_only:true,...extra},admin),/BACKGROUND_ACCESS_DENIED/);
+    await denied(()=>f.call({...input,prewarm_confirm_only:true,...extra},admin));
     assert.equal(f.accesses(),0);
   }
   for(const value of [false,'true',1,null,{}]) {
     const f=bridge();
-    await assert.rejects(()=>f.call({...input,prewarm_confirm_only:value},admin),/BACKGROUND_ACCESS_DENIED/);
+    await denied(()=>f.call({...input,prewarm_confirm_only:value},admin));
     assert.equal(f.accesses(),0);
   }
   for(const options of [{dashboard},{dashboard:{...dashboard,confirmation_version:0},assertScopeReadOnly:async()=>{}},
@@ -216,7 +218,7 @@ test('preparation and confirmation return only fixed known failures instead of h
   }
 });
 
-test('unknown errors and ordinary monitoring failures still throw without acquiring a preparation result',async()=>{
+test('unknown preparation errors still throw without acquiring a preparation result',async()=>{
   const dashboard={version:1,prewarm:async()=>{},confirmation_version:1,prepare:async()=>{},confirm:async()=>{}};
   const failures=[Error('private provider text'),Error('BACKGROUND_PREWARM_TIMEOUT extra private text'),
     Object.assign(Error('BACKGROUND_PREWARM_TIMEOUT'),{code:'BACKGROUND_SCOPE_CHANGED'}),
@@ -228,10 +230,6 @@ test('unknown errors and ordinary monitoring failures still throw without acquir
     for(const mode of ['prewarm_only','prewarm_confirm_only'])
       await assert.rejects(f.call({...input,[mode]:true},admin),error=>error===failure);
   }
-  const known=new BackgroundMonitoringError('BACKGROUND_SCOPE_CHANGED');
-  const f=bridge({worker:{tick:async()=>{throw known;},status:async()=>{throw known;}}});
-  await assert.rejects(f.call(input,admin),error=>error===known);
-  await assert.rejects(f.call({...input,status_only:true},admin),error=>error===known);
 });
 
 test('provider guard rejects replaced, expired and terminal worker claims',async()=>{
@@ -244,4 +242,24 @@ test('provider guard rejects replaced, expired and terminal worker claims',async
   await assert.rejects(()=>f.guard(context),/BACKGROUND_LEASE_LOST/);
   run.lease.until=2000;context.lease.until=2000;run.deadline=1000;
   await assert.rejects(()=>f.guard(context),/BACKGROUND_LEASE_LOST/);
+});
+
+
+test('normal ticks and status reads return only fixed application failures, not ambiguous host aborts',async()=>{
+  const secret='synthetic-provider-secret',codes=['BACKGROUND_ANALYTICS_INVALID','BACKGROUND_RULES_INVALID',
+    'BACKGROUND_STATE_INVALID','BACKGROUND_CONFIGURATION','BACKGROUND_CLOCK_INVALID','BACKGROUND_RUNNER_INVALID',
+    'BACKGROUND_SCOPE_INVALID','BACKGROUND_CONFLICT','BACKGROUND_GIFT_INVALID','BACKGROUND_HISTORY_INVALID',
+    'BACKGROUND_SCOPE_CHANGED','BACKGROUND_ACCESS_DENIED','BACKGROUND_LEASE_LOST','BACKGROUND_RULES_CHANGED'];
+  const failures=[...codes.flatMap(code=>[new BackgroundMonitoringError(code),Error(code)].map(error=>[error,code])),
+    [Error(secret),'BACKGROUND_OPERATION_FAILED'],[Error('BACKGROUND_SCOPE_CHANGED '+secret),'BACKGROUND_OPERATION_FAILED'],
+    [Object.assign(Error('BACKGROUND_SCOPE_CHANGED'),{code:'BACKGROUND_LEASE_LOST'}),'BACKGROUND_OPERATION_FAILED'],
+    [Object.assign(Error(secret),{code:'BACKGROUND_SCOPE_CHANGED'}),'BACKGROUND_OPERATION_FAILED'],
+    [null,'BACKGROUND_OPERATION_FAILED']];
+  for(const [failure,execution_code] of failures)for(const mode of ['tick','status']) {
+    if(failure){failure.stack=secret;failure.parameters={log:[secret]};failure.cause=Error(secret);}
+    const f=bridge({worker:{[mode]:async()=>{throw failure;}}});
+    const result=await f.call({...input,...(mode==='status'?{status_only:true}:{})},admin);
+    assert.deepEqual(JSON.parse(JSON.stringify(result)),{state:'failed',execution_code});
+    assert.ok(!JSON.stringify(result).includes(secret));
+  }
 });

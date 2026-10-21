@@ -1040,12 +1040,12 @@ test('preparation failure keeps its original bounded diagnostic without claiming
   assert.ok(!f.output.some(row=>row.dashboard_preparation==='prepared'||row.prewarm_phase==='confirm'));
 });
 
-test('an explicit execution error is never recovered regardless of its HTTP status',async()=>{
+test('known application and internal execution errors stop regardless of their HTTP status',async()=>{
   for(const status of [200,400,500])for(const error_type of ['INTERNAL','CODE_RUN_FAILED']) {
     let writes=0;
     const api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async(url)=>{
       if(url.endsWith('/get'))return Response.json({ok:true,result:{canonical_modules:canonical}});
-      writes++;return Response.json({ok:false,error_type,error_code:500,description:token},{status});
+      writes++;return Response.json({ok:false,error_type,error_code:500,description:token,parameters:{code:'BACKGROUND_SCOPE_CHANGED'}},{status});
     }});
     const f=fixture([],{api,retry:true});await assert.rejects(f.run(),error=>error.reason==='remote_error'&&error.http_status===status);
     assert.equal(writes,1);assert.deepEqual(f.waits,[]);
@@ -1069,11 +1069,11 @@ test('CLI execution-error diagnostics retain bounded duration without host descr
   let executions=0;t.mock.method(globalThis,'fetch',async url=>{
     if(url.endsWith('/get'))return Response.json({ok:true,result:{canonical_modules:canonical}});
     executions++;return Response.json({ok:false,error_type:'CODE_RUN_FAILED',error_code:400,description:token,
-      parameters:{log:[token],module:token,time:0.012}},{status:400});
+      parameters:{log:[token],module:token,time:0.012,code:'BACKGROUND_SCOPE_CHANGED'}},{status:400});
   });
   const output=[],exit=await monitoringMain({args:['--app-id','123'],env:{BACKGROUND_MONITORING_ENABLED:'true',TGCLOUD_TOKEN:token},emit:value=>output.push(value)});
   assert.equal(exit,1);assert.equal(executions,1);
-  assert.deepEqual(output,[{state:'failed',error:'remote_error',stage:'tick',http_status:400,remote_error:'execution',remote_code:400,execution_ms:12}]);
+  assert.deepEqual(output,[{state:'failed',error:'remote_error',stage:'tick',http_status:400,remote_error:'execution',remote_code:400,execution_ms:12,execution_code:'BACKGROUND_SCOPE_CHANGED'}]);
   assert.ok(!JSON.stringify(output).includes(token));
 });
 
@@ -1114,4 +1114,93 @@ test('scheduled workflow is inert by default and confines credentials to its pro
   assert.equal((workflow.match(/secrets\./g)||[]).length,1);assert.ok(workflow.indexOf('secrets.TGCLOUD_TOKEN')>workflow.indexOf('- name: Run bounded owner monitoring'));
   assert.doesNotMatch(workflow,/npm (install|ci)|pnpm |upload-artifact|set -x/);
   for(const match of workflow.matchAll(/uses: ([^\s]+)/g))assert.match(match[1],/@[0-9a-f]{40}$/);
+});
+
+
+test('ambiguous host aborts reconcile an acknowledged completed tick without repeating it',async()=>{
+  for(const status of [200,400,500]) {
+    const inputs=[];
+    const api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async(url,options)=>{
+      if(url.endsWith('/get'))return Response.json({ok:true,result:{canonical_modules:canonical}});
+      const args=JSON.parse(options.body).args;inputs.push(args);
+      if(!args.status_only)return Response.json({ok:false,error_type:'CODE_RUN_FAILED',error_code:400,
+        description:token,parameters:{log:[token],time:0.010}},{status});
+      return Response.json({ok:true,result:{result:{state:'complete',checked:158,total:158,runner_acknowledged:true}}});
+    }});
+    const f=fixture([],{api,retry:true});
+    assert.deepEqual(await f.run(),{state:'complete',checked:158,total:158});
+    assert.deepEqual(inputs,[{runner_id:runner,retry:true},{runner_id:runner,status_only:true}]);
+    assert.deepEqual(f.output[0],{state:'recovering',error:'remote_error',stage:'tick',http_status:status,
+      remote_error:'execution',remote_code:400,execution_ms:10});
+    assert.ok(!JSON.stringify(f.output).includes(token));assert.deepEqual(f.waits,[1000]);
+  }
+});
+
+test('an ambiguous execution waits for a reconciled live lease before ordinary continuation',async()=>{
+  for(const state of ['running','waiting','busy']) {
+    const f=fixture([new MonitoringAdminError('remote_error','tick',400,'execution',400,{execution_ms:10}),
+      {state,runner_acknowledged:true,retry_at:new Date(start+120000).toISOString()},
+      {state:'complete',runner_acknowledged:true}],{retry:true});
+    assert.equal((await f.run()).state,'complete');
+    const calls=f.calls.filter(row=>row.operation==='run');
+    assert.deepEqual(calls.map(row=>row.input),[{runner_id:runner,retry:true},{runner_id:runner,status_only:true},{runner_id:runner}]);
+    assert.ok(calls[2].at>=start+120000);assert.ok(f.waits.every(ms=>ms<=60000));
+  }
+});
+
+test('an abort before acknowledgement cannot claim a new cycle or accept an old terminal result',async()=>{
+  for(const state of ['complete','partial','disabled','failed']) {
+    const f=splitFixture([new MonitoringAdminError('remote_error','tick',400,'execution',400),
+      ...Array.from({length:3},()=>({state,runner_acknowledged:false}))],{retry:true});
+    await assert.rejects(f.run(),error=>error.reason==='recovery_exhausted'&&error.stage==='status');
+    assert.deepEqual(f.calls.map(row=>row.input),[{runner_id:runner,retry:true},
+      ...Array.from({length:3},()=>({runner_id:runner,status_only:true}))]);
+    assert.ok(!f.output.some(row=>row.state==='complete'||row.dashboard_preparation));
+    assert.deepEqual(f.waits,[1000,2000,4000]);
+  }
+});
+
+test('execution-aborted status reads share the existing recovery, request and time budgets',async()=>{
+  const abort=stage=>new MonitoringAdminError('remote_error',stage,400,'execution',400);
+  const f=fixture([abort('tick'),abort('status'),abort('status'),{state:'complete',runner_acknowledged:true}]);
+  assert.equal((await f.run()).state,'complete');assert.deepEqual(f.waits,[1000,2000,4000]);
+  const exhausted=fixture([abort('tick'),abort('status'),abort('status'),abort('status'),{state:'complete'}]);
+  await assert.rejects(exhausted.run(),error=>error.reason==='recovery_exhausted');
+  assert.equal(exhausted.calls.filter(row=>row.operation==='run').length,4);
+  for(const limits of [{steps:1},{duration_ms:1000}]) {
+    const short=fixture([abort('tick'),{state:'complete'}],{limits});
+    assert.equal((await short.run()).state,'partial');
+    assert.equal(short.calls.filter(row=>row.operation==='run').length,1);assert.deepEqual(short.waits,[]);
+  }
+});
+
+test('fixed normal-operation failures stop without status recovery and reject malformed diagnostic envelopes',async()=>{
+  const codes=['BACKGROUND_ANALYTICS_INVALID','BACKGROUND_RULES_INVALID','BACKGROUND_STATE_INVALID','BACKGROUND_CONFIGURATION',
+    'BACKGROUND_CLOCK_INVALID','BACKGROUND_RUNNER_INVALID','BACKGROUND_SCOPE_INVALID','BACKGROUND_CONFLICT',
+    'BACKGROUND_GIFT_INVALID','BACKGROUND_HISTORY_INVALID','BACKGROUND_OPERATION_FAILED',
+    'BACKGROUND_SCOPE_CHANGED','BACKGROUND_ACCESS_DENIED','BACKGROUND_LEASE_LOST','BACKGROUND_RULES_CHANGED'];
+  for(const code of codes)for(const fromStatus of [false,true]) {
+    const f=fixture([...(fromStatus?[new MonitoringAdminError('remote_error','tick',400,'execution',400)]:[]),
+      {state:'failed',execution_code:code},{state:'complete'}]);
+    await assert.rejects(f.run(),error=>error.reason==='remote_error'&&error.execution_code===code
+      &&error.stage===(fromStatus?'status':'tick'));
+    assert.equal(f.calls.filter(row=>row.operation==='run').length,fromStatus?2:1);
+  }
+  for(const result of [{state:'failed',execution_code:token},{state:'running',execution_code:'BACKGROUND_SCOPE_CHANGED'},
+    {state:'failed',execution_code:'BACKGROUND_OPERATION_FAILED',description:token},
+    {state:'failed',execution_code:{secret:token}}]) {
+    const f=fixture([result]);await assert.rejects(f.run(),error=>error.reason==='invalid_result');
+    assert.ok(!JSON.stringify(f.output).includes(token));
+  }
+});
+
+test('authentication errors cannot become recoverable through an execution envelope',async()=>{
+  for(const status of [401,403]) {
+    let calls=0;const api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async url=>{
+      if(url.endsWith('/get'))return Response.json({ok:true,result:{canonical_modules:canonical}});
+      calls++;return Response.json({ok:false,error_type:'CODE_RUN_FAILED',error_code:status,description:token},{status});
+    }});
+    const f=fixture([],{api});await assert.rejects(f.run(),error=>error.http_status===status);
+    assert.equal(calls,1);assert.deepEqual(f.waits,[]);
+  }
 });

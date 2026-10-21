@@ -383,11 +383,15 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       || !count(current.attempts) || !count(inner.attempts) || current.attempts + inner.attempts >= limits.gift_attempts
       || !Array.isArray(state.owned_prices.attempts)
       || state.owned_prices.attempts.some(value => !Number.isSafeInteger(value) || value <= 0 || value > at)
-      || state.owned_prices.attempts.filter(value => value > at - 86400000).length >= limits.gift_daily_attempts
-      || at + limits.gift_resume_ms + limits.gift_history_reserve_ms > run.deadline) return false;
+      || state.owned_prices.attempts.filter(value => value > at - 86400000).length >= limits.gift_daily_attempts) return false;
     const next = Math.max(state.owned_prices?.next_allowed_at ?? 0, current.next_allowed_at ?? 0);
     return count(next) && next < at + limits.gift_resume_ms;
   }
+  const giftResumeFits = (run, at) => at + BACKGROUND_MONITORING_LIMITS.gift_resume_ms
+    + BACKGROUND_MONITORING_LIMITS.gift_history_reserve_ms <= run.deadline;
+  const canDeferGiftResume = (run, at) => continuation(run) && !continuationLimit(run, at)
+    && at + BACKGROUND_MONITORING_LIMITS.continuation_retry_ms + BACKGROUND_MONITORING_LIMITS.gift_resume_ms
+      + BACKGROUND_MONITORING_LIMITS.gift_history_reserve_ms <= cycleDeadline(run);
   async function saveGift(claim, result) {
     const gift = giftResult(result, claim);
     const state = (await repository.read()).state, current = state.gift_refresh?.run;
@@ -396,8 +400,14 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       const run = ledger.run; run.gift_run_id = gift.id; run.checked = gift.checked; run.total = gift.total;
       run.next_gift_start_address = nextGiftAddress(state, run);
       run.next_action_at = waitAt(result.next_allowed_at, at);
-      if (gift.state === 'running' && run.next_action_at < run.deadline || resumableGift(state, run, gift, at)) run.stage = 'gift_poll';
-      else {
+      const resume = resumableGift(state, run, gift, at);
+      if (gift.state === 'running' && run.next_action_at < run.deadline || resume && giftResumeFits(run, at)) run.stage = 'gift_poll';
+      else if (resume && canDeferGiftResume(run, at)) {
+        // Keep the exact unfinished traversal when only this segment is short
+        // of time. A later runner gets a fresh segment; the cycle deadline,
+        // provider allowance and one-resume counter remain unchanged.
+        run.stage = 'gift_poll'; markPending(ledger, at, claim.last_runner_id);
+      } else {
         run.gift_complete = gift.state === 'complete'; run.stage = 'history_start';
         // Coverage certificates store seconds. Freeze the next history window
         // after the last gift observation, including its fractional second.
@@ -601,7 +611,8 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
         }
         result = await gifts.status({session_id: claim.session_id}, context(claim));
         const gift = giftResult(result, claim), at = await now();
-        if (gift.state === 'partial' && resumableGift((await repository.read()).state, claim, gift, at)) {
+        if (gift.state === 'partial' && giftResumeFits(claim, at)
+          && resumableGift((await repository.read()).state, claim, gift, at)) {
           const prepared = await intent(claim, 'gift_resume');
           if (prepared.stopped) return reply(prepared.stopped, await now());
           claim = prepared.run;
