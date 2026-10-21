@@ -17,7 +17,10 @@ const reasons=new Set(['invalid_request','invalid_response','invalid_json','inva
 const stages=new Set(['configuration','get_files','sources','tick','status','prewarm','runner']);
 const executionCodes=new Set(['BACKGROUND_PREWARM_TIMEOUT','BACKGROUND_PREWARM_DENIED','BACKGROUND_LEASE_LOST',
   'BACKGROUND_SCOPE_CHANGED','BACKGROUND_ACCESS_DENIED','BACKGROUND_RULES_CHANGED',
-  'BACKGROUND_PREWARM_CONFIRMATION_FAILED','BACKGROUND_PREWARM_INCOMPLETE','BACKGROUND_PREWARM_UNSUPPORTED']);
+  'BACKGROUND_PREWARM_CONFIRMATION_FAILED','BACKGROUND_PREWARM_INCOMPLETE','BACKGROUND_PREWARM_UNSUPPORTED',
+  'BACKGROUND_ANALYTICS_INVALID','BACKGROUND_RULES_INVALID','BACKGROUND_STATE_INVALID','BACKGROUND_CONFIGURATION',
+  'BACKGROUND_CLOCK_INVALID','BACKGROUND_RUNNER_INVALID','BACKGROUND_SCOPE_INVALID','BACKGROUND_CONFLICT',
+  'BACKGROUND_GIFT_INVALID','BACKGROUND_HISTORY_INVALID','BACKGROUND_OPERATION_FAILED']);
 const limitCodes=new Map([['CPU_TIME_LIMIT_EXCEEDED','cpu'],['CPU_LIMIT_EXCEEDED','cpu'],
   ['MEMORY_LIMIT_EXCEEDED','memory'],['OUT_OF_MEMORY','memory'],
   ['EXECUTION_TIME_LIMIT_EXCEEDED','time'],['TIME_LIMIT_EXCEEDED','time']]);
@@ -70,6 +73,18 @@ function preparationFailure(value) {
     ||!executionCodes.has(value.execution_code))return;
   fail('remote_error','prewarm',undefined,'execution',undefined,{execution_code:value.execution_code});
 }
+function operationFailure(value,stage) {
+  if(!object(value)||!Object.hasOwn(value,'execution_code'))return;
+  if(value.state!=='failed'||Object.keys(value).some(key=>!['state','execution_code'].includes(key))
+    ||!executionCodes.has(value.execution_code))fail('invalid_result',stage);
+  fail('remote_error',stage,undefined,'execution',undefined,{execution_code:value.execution_code});
+}
+// A host abort may follow a durable mutation. Inspect saved status first;
+// application failures are returned by the bridge with a fixed code and stop.
+// This also bounds retries of the read-only status request after a host abort.
+const ambiguousExecution=error=>error instanceof MonitoringAdminError&&['tick','status'].includes(error.stage)
+  &&error.reason==='remote_error'&&error.remote_error==='execution'&&!error.execution_code
+  &&![401,403].includes(error.http_status);
 const recoverable=error=>error instanceof MonitoringAdminError&&(['network_error','request_timeout'].includes(error.reason)
   ||error.reason==='http_error'&&error.http_status>=500&&error.http_status<=599);
 const confirmablePreparationError=error=>error instanceof MonitoringAdminError
@@ -137,8 +152,9 @@ export function createMonitoringAdminApi({token,appId,env=process.env,fetch:requ
       if(!response?.ok) {
         if(response?.status>=400&&response.status<=499&&response.body) {
           // The host also returns execution-error envelopes with HTTP 400.
-          // Retain only their fixed diagnostic fields; unknown bodies keep
-          // the original non-retryable HTTP classification.
+          // Retain only fixed diagnostics; the driver may reconcile an
+          // uncaught host abort through read-only status. Unknown bodies
+          // keep the original non-retryable HTTP classification.
           try {await responseJson(response,maxBytes,stage,controller.signal);}
           catch(error) {
             if(error instanceof MonitoringAdminError&&error.reason==='remote_error')throw error;
@@ -146,8 +162,8 @@ export function createMonitoringAdminApi({token,appId,env=process.env,fetch:requ
           }
         }
         if(response?.status>=500&&response.status<=599) {
-          // A hosting execution error is not a transient gateway failure, even
-          // if it is returned with HTTP 500 rather than an HTTP 200 envelope.
+          // Preserve execution envelopes separately from gateway failures.
+          // The driver chooses bounded status-only reconciliation.
           if(response.body)try {await responseJson(response,maxBytes,stage,controller.signal);}
           catch(error) {if(!(error instanceof MonitoringAdminError)||error.reason!=='invalid_json')throw error;}
         }
@@ -280,13 +296,14 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
     let response;
     try {response=await api.runFunction(sources,input,{timeoutMs:requestTime()});}
     catch(error) {
-      if(!recoverable(error))throw error;
+      if(!recoverable(error)&&!ambiguousExecution(error))throw error;
       emit({state:'recovering',...diagnostic(error)});
       if(recoveries>=cap.recoveries)fail('recovery_exhausted',readOnly?'status':'tick');
       statusOnly=true;continue;
     }
     // /run returns an envelope containing the endpoint's result. Its logs,
     // errors and any unrelated fields are intentionally never forwarded.
+    operationFailure(response?.result,readOnly?'status':'tick');
     let observed;try {observed=monitoringSummary(response?.result);}catch{fail('invalid_result',readOnly?'status':'tick');}
     if(budgetInspection) {summary=observed;break;}
     // A previous cycle's terminal ledger may be visible before an uncertain
