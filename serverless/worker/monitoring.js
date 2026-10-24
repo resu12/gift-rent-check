@@ -196,11 +196,15 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
   // The hosting callback must bound its reads and fence any cache write to this
   // exact completed run and scope. An old runtime simply lacks this capability.
   async function prepareDashboard(request = {}, confirmOnly = false) {
-    const {runner_id,prewarm_stage}=request,split=Object.hasOwn(request,'prewarm_stage');
+    const {runner_id,prewarm_stage}=request,split=Object.hasOwn(request,'prewarm_stage'),progressive=Object.hasOwn(request,'prewarm_progressive');
     if (typeof runner_id !== 'string' || !/^[a-f0-9]{64}$/.test(runner_id))
       throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
     if(split&&(confirmOnly||!['basis','cards'].includes(prewarm_stage)))
       throw new BackgroundMonitoringError('BACKGROUND_PREWARM_DENIED');
+    if(progressive&&(request.prewarm_progressive!==true||confirmOnly||prewarm_stage!=='basis')
+      ||Object.hasOwn(request,'prewarm_continuation')&&(!progressive||typeof request.prewarm_continuation!=='string'||!/^[a-f0-9]{64}$/.test(request.prewarm_continuation)))
+      throw new BackgroundMonitoringError('BACKGROUND_PREWARM_DENIED');
+    if(progressive&&dashboard?.continuation_version!==1)throw new BackgroundMonitoringError('BACKGROUND_PREWARM_UNSUPPORTED');
     const staged = dashboard?.confirmation_version === 1;
     if(split&&(!staged||dashboard?.preparation_version!==2||typeof dashboard.prepareBasis!=='function'
       ||typeof dashboard.prepareCards!=='function'))
@@ -218,6 +222,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     if (!eligible(ledger, at)) return {state: 'skipped'};
     const input = {...context(ledger.run), prewarm_only: true, ...(confirmOnly ? {confirm_only: true} : {}),
       ...(split?{prepare_stage:prewarm_stage}:{}),
+      ...(progressive?{prepare_progressive:true,...(Object.hasOwn(request,'prewarm_continuation')?{prepare_continuation:request.prewarm_continuation}:{})}:{}),
       deadline: at + (confirmOnly ? BACKGROUND_MONITORING_LIMITS.dashboard_confirm_ms : BACKGROUND_MONITORING_LIMITS.dashboard_prepare_ms)};
     const scopeCheck = staged ? assertScopeReadOnly : assertScope;
     await scopeCheck(ledger.run.scope, input);
@@ -234,6 +239,16 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     // Staging is never success: only a separate, read-only check can certify
     // both durable artifacts for this exact completed cycle.
     if (staged && !confirmOnly) {
+      if(progressive&&result?.staged===false) {
+        const value=result.continuation;
+        if(Object.keys(result).some(key=>!['staged','continuation'].includes(key))||!object(value)
+          ||Object.keys(value).length!==4||Object.keys(value).some(key=>!['version','step','processed','token'].includes(key))
+          ||value.version!==1||!Number.isSafeInteger(value.step)||value.step<1||value.step>3
+          ||!Number.isSafeInteger(value.processed)||value.processed<=0||typeof value.token!=='string'||!/^[a-f0-9]{64}$/.test(value.token))
+          throw new BackgroundMonitoringError('BACKGROUND_PREWARM_PROGRESS_INVALID');
+        return {state:'pending',continuation:clone(value)};
+      }
+      if(progressive&&Object.hasOwn(result??{},'continuation'))throw new BackgroundMonitoringError('BACKGROUND_PREWARM_PROGRESS_INVALID');
       if(split&&result?.staged!==true)throw new BackgroundMonitoringError('BACKGROUND_PREWARM_INCOMPLETE');
       return {state: 'pending'};
     }

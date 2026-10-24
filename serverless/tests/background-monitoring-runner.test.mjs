@@ -1204,3 +1204,77 @@ test('authentication errors cannot become recoverable through an execution envel
     assert.equal(calls,1);assert.deepEqual(f.waits,[]);
   }
 });
+
+
+function progressiveFixture(results,options={}) {
+ const f=splitFixture(results,options),getFiles=f.args.api.getFiles;
+ f.args.api.getFiles=async(...args)=>{const result=await getFiles(...args);result.canonical_modules['lib/runtime']+='\nexport const PRIVATE_BACKGROUND_DASHBOARD_CONTINUATION_VERSION=1;';return result;};
+ return f;
+}
+const progress=(step,processed=step*1000)=>({state:'pending',continuation:{version:1,step,processed,token:String(step).repeat(64)}});
+
+test('progressive basis opts in explicitly and follows at most three durable acknowledgements before final staging',async()=>{
+ const f=progressiveFixture([{state:'complete',runner_acknowledged:true},progress(1),progress(2),progress(3),{state:'pending'},{state:'pending'},{state:'prepared'}]);
+ assert.deepEqual(await f.run(),{state:'complete'});assert.equal(f.calls.length,7);
+ assert.deepEqual(f.calls.slice(1,5).map(row=>row.input),Array.from({length:4},(_,index)=>({runner_id:runner,prewarm_only:true,prewarm_stage:'basis',prewarm_progressive:true,...index?{prewarm_continuation:String(index).repeat(64)}:{}})));
+ assert.deepEqual(f.calls.slice(5).map(row=>row.input),[{runner_id:runner,prewarm_only:true,prewarm_stage:'cards'},{runner_id:runner,prewarm_confirm_only:true}]);
+ assert.deepEqual(f.calls.slice(1).map(row=>row.value.timeoutMs),[30000,30000,30000,30000,30000,15000]);
+ assert.deepEqual(f.output.slice(1,4),[1,2,3].map(step=>({dashboard_preparation:'pending',prewarm_phase:'basis',preparation_step:step,preparation_processed:step*1000})));
+ assert.deepEqual(f.output.at(-1),{dashboard_preparation:'prepared',prewarm_phase:'confirm'});
+ for(const step of [1,2,3])assert.ok(!JSON.stringify(f.output).includes(String(step).repeat(64)),'Continuation tokens never enter logs.');
+});
+
+test('progressive preparation reserves six requests and165seconds before claiming new work',async()=>{
+ const reserve=2*RUNNER_LIMITS.request_ms+5*RUNNER_LIMITS.prewarm_ms+RUNNER_LIMITS.prewarm_confirm_ms+1000;
+ for(const [remaining,steps,inspect] of [[reserve-1,7,true],[reserve,7,false],[reserve+1,6,true],[reserve+1,7,false]]){
+  const f=progressiveFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},{state:'pending'},{state:'prepared'}],{limits:{duration_ms:remaining,steps}});
+  assert.equal((await f.run()).state,inspect?'partial':'complete');assert.equal(f.calls.length,inspect?1:4);
+  assert.deepEqual(f.calls[0].input,{runner_id:runner,...inspect?{status_only:true}:{}});
+ }
+ for(const remainingAfterTick of [164999,165000]){
+  let elapsed=0;const f=progressiveFixture([{state:'complete',runner_acknowledged:true},progress(1),progress(2),progress(3),{state:'pending'},{state:'pending'},{state:'prepared'}],{limits:{duration_ms:400000},monotonic:()=>elapsed});
+  const execute=f.args.api.runFunction;f.args.api.runFunction=async(...args)=>{const result=await execute(...args);elapsed+=args[1].prewarm_only?30000:!args[1].prewarm_confirm_only?400000-remainingAfterTick:0;return result;};
+  assert.deepEqual(await f.run(),{state:'complete'});assert.equal(f.calls.length,remainingAfterTick<165000?1:7);
+ }
+});
+
+test('malformed or nonmonotone progressive acknowledgements stop without replay, cards or confirmation',async()=>{
+ const first=progress(1),next=progress(2);
+ const bad=[{...next,continuation:null},{...next,continuation:{...next.continuation,version:2}},
+  {...next,continuation:{...next.continuation,step:1}},{...next,continuation:{...next.continuation,step:3}},
+  {...next,continuation:{...next.continuation,processed:1000}},{...next,continuation:{...next.continuation,processed:999}},
+  {...next,continuation:{...next.continuation,processed:Number.MAX_SAFE_INTEGER+1}},
+  {...next,continuation:{...next.continuation,token:first.continuation.token}},
+  {...next,continuation:{...next.continuation,token:'private '+token}},
+  {...next,continuation:{...next.continuation,secret:token}},{...next,secret:token},
+  {...next,state:'skipped'}];
+ for(const reply of bad){
+  const f=progressiveFixture([{state:'complete',runner_acknowledged:true},first,reply,{state:'prepared'}]);
+  assert.deepEqual(await f.run(),{state:'complete'});assert.equal(f.calls.length,3);
+  assert.equal(f.output.at(-1).execution_code,'BACKGROUND_PREWARM_PROGRESS_INVALID');
+  assert.ok(!f.output.some(row=>row.prewarm_phase==='cards'||row.prewarm_phase==='confirm'));
+  assert.ok(!JSON.stringify(f.output).includes(token));
+ }
+ const fifth=progressiveFixture([{state:'complete',runner_acknowledged:true},progress(1),progress(2),progress(3),progress(4),{state:'prepared'}]);
+ await fifth.run();assert.equal(fifth.calls.length,5);assert.equal(fifth.output.at(-1).dashboard_preparation,'failed');
+});
+
+test('ambiguous progressive response is not replayed and keeps its original diagnostic during verification',async()=>{
+ const error=new MonitoringAdminError('remote_error','prewarm',400,'execution',400,{execution_limit:'cpu',execution_ms:24001});
+ const f=progressiveFixture([{state:'complete',runner_acknowledged:true},progress(1),error,{state:'pending'},{state:'prepared'}]);
+ assert.deepEqual(await f.run(),{state:'complete'});assert.equal(f.calls.filter(row=>row.input?.prewarm_stage==='basis').length,2);
+ assert.equal(f.calls[3].input.prewarm_stage,'cards');assert.equal(f.calls[4].input.prewarm_confirm_only,true);
+ assert.deepEqual(f.output[2],{dashboard_preparation:'failed',error:'remote_error',stage:'prewarm',http_status:400,remote_error:'execution',remote_code:400,execution_ms:24001,execution_limit:'cpu',prewarm_phase:'basis'});
+ assert.deepEqual(f.output.at(-1),{dashboard_preparation:'prepared',prewarm_phase:'confirm',preparation_recovered:true});
+});
+
+test('progressive transport accepts only basis opt-in and a fixed lower-case checkpoint token',async()=>{
+ const requests=[],api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async(_url,options)=>{requests.push(JSON.parse(options.body).args);return Response.json({ok:true,result:{result:{state:'pending'}}});}});
+ const valid={runner_id:runner,prewarm_only:true,prewarm_stage:'basis',prewarm_progressive:true};
+ await api.runFunction({},valid);await api.runFunction({},{...valid,prewarm_continuation:'b'.repeat(64)});
+ for(const extra of [{prewarm_stage:'cards'},{prewarm_only:false},{prewarm_confirm_only:true},{status_only:true},{retry:false},
+  {prewarm_progressive:false},{prewarm_progressive:1},{prewarm_continuation:null},{prewarm_continuation:'B'.repeat(64)},
+  {prewarm_continuation:'b'.repeat(63)},{prewarm_continuation:{}},{prewarm_continuation:'b'.repeat(64),prewarm_progressive:undefined}])
+  assert.throws(()=>api.runFunction({},{...valid,...extra}));
+ assert.equal(requests.length,2);
+});
