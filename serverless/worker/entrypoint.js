@@ -2,7 +2,7 @@
 import {createPrivateBackgroundMonitoringAccess, PRIVATE_BACKGROUND_MONITORING_VERSION, PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION, PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION} from '../lib/runtime.js';
 import {createBackgroundMonitoringWorker, BackgroundMonitoringError} from '../lib/background-monitoring.js';
 
-const preparationErrorCodes=new Set(['BACKGROUND_PREWARM_TIMEOUT','BACKGROUND_PREWARM_DENIED','BACKGROUND_LEASE_LOST',
+const preparationErrorCodes=new Set(['BACKGROUND_PREWARM_PROGRESS_INVALID','BACKGROUND_PREWARM_PROGRESS_LIMIT','BACKGROUND_PREWARM_TIMEOUT','BACKGROUND_PREWARM_DENIED','BACKGROUND_LEASE_LOST',
   'BACKGROUND_SCOPE_CHANGED','BACKGROUND_ACCESS_DENIED','BACKGROUND_RULES_CHANGED',
   'BACKGROUND_PREWARM_CONFIRMATION_FAILED','BACKGROUND_PREWARM_INCOMPLETE','BACKGROUND_PREWARM_UNSUPPORTED']);
 
@@ -15,7 +15,7 @@ export default async function(input, ctx) {
   if(ctx?.background_worker!=='price-monitoring-v1'||PRIVATE_BACKGROUND_MONITORING_VERSION!==1
       ||PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION!==1
       ||PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION!==1
-      ||!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','prewarm_stage','prewarm_confirm_only','skip_analytics','yield_only'].includes(key))
+      ||!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','prewarm_stage','prewarm_progressive','prewarm_continuation','prewarm_confirm_only','skip_analytics','yield_only'].includes(key))
       ||Object.prototype.hasOwnProperty.call(input,'retry')&&typeof input.retry!=='boolean'
       ||Object.prototype.hasOwnProperty.call(input,'skip_analytics')&&(typeof input.skip_analytics!=='boolean'
         ||Object.prototype.hasOwnProperty.call(input,'status_only')||Object.prototype.hasOwnProperty.call(input,'prewarm_only'))
@@ -25,8 +25,10 @@ export default async function(input, ctx) {
       ||Object.prototype.hasOwnProperty.call(input,'prewarm_only')&&(input.prewarm_only!==true
         ||Object.prototype.hasOwnProperty.call(input,'retry')||Object.prototype.hasOwnProperty.call(input,'status_only'))
       ||Object.prototype.hasOwnProperty.call(input,'prewarm_stage')&&(!['basis','cards'].includes(input.prewarm_stage)||input.prewarm_only!==true)
+      ||Object.prototype.hasOwnProperty.call(input,'prewarm_progressive')&&(input.prewarm_progressive!==true||input.prewarm_stage!=='basis'||input.prewarm_only!==true)
+      ||Object.prototype.hasOwnProperty.call(input,'prewarm_continuation')&&(input.prewarm_progressive!==true||typeof input.prewarm_continuation!=='string'||!/^[a-f0-9]{64}$/.test(input.prewarm_continuation))
       ||Object.prototype.hasOwnProperty.call(input,'prewarm_confirm_only')&&(input.prewarm_confirm_only!==true
-        ||['retry','status_only','prewarm_only','prewarm_stage','skip_analytics','yield_only'].some(key=>Object.prototype.hasOwnProperty.call(input,key)))
+        ||['retry','status_only','prewarm_only','prewarm_stage','prewarm_progressive','prewarm_continuation','skip_analytics','yield_only'].some(key=>Object.prototype.hasOwnProperty.call(input,key)))
       ||typeof input.runner_id!=='string'||!/^[a-f0-9]{64}$/.test(input.runner_id))
     return {state:'failed',execution_code:'BACKGROUND_ACCESS_DENIED'};
   let access;
@@ -37,6 +39,7 @@ export default async function(input, ctx) {
       const confirming=input.prewarm_confirm_only===true;
       if((confirming?context.confirm_only!==true:input.prewarm_only!==true||context.confirm_only===true)
           ||context.prepare_stage!==input.prewarm_stage
+          ||context.prepare_progressive!==input.prewarm_progressive||context.prepare_continuation!==input.prewarm_continuation
           ||!Number.isSafeInteger(context.deadline)||context.deadline>at+(confirming?10000:25000))
         throw new BackgroundMonitoringError('BACKGROUND_PREWARM_DENIED');
       if(ledger?.state!=='complete'||run?.id!==context.run_id||run.session_id!==context.session_id
@@ -62,6 +65,8 @@ export default async function(input, ctx) {
         ||access.dashboard.confirmation_version!==1||typeof access.dashboard.prepareBasis!=='function'
         ||typeof access.dashboard.prepareCards!=='function'||typeof access.dashboard.confirm!=='function'
         ||typeof access.assertScopeReadOnly!=='function'))
+      throw new BackgroundMonitoringError('BACKGROUND_PREWARM_UNSUPPORTED');
+    if(input.prewarm_progressive===true&&access.dashboard?.continuation_version!==1)
       throw new BackgroundMonitoringError('BACKGROUND_PREWARM_UNSUPPORTED');
     if(input.prewarm_confirm_only===true&&(access.dashboard?.version!==1||access.dashboard.confirmation_version!==1
         ||typeof access.dashboard.prepare!=='function'||typeof access.dashboard.confirm!=='function'

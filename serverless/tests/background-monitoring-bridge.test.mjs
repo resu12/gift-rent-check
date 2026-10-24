@@ -263,3 +263,21 @@ test('normal ticks and status reads return only fixed application failures, not 
     assert.ok(!JSON.stringify(result).includes(secret));
   }
 });
+
+
+test('progressive bridge binds its exact opt-in and checkpoint token to basis-only cache work',async()=>{
+ const dashboard={version:1,prewarm:async()=>{},confirmation_version:1,prepare:async()=>{},confirm:async()=>{},preparation_version:2,continuation_version:1,prepareBasis:async()=>{},prepareCards:async()=>{}};
+ const run={id:input.runner_id+':1',session_id:'session',stage:'done',lease:null,gift_complete:true,history_complete:true};
+ const ledger={state:'complete',run,last_success_at:new Date(900).toISOString(),last_finished_at:new Date(900).toISOString()};
+ const args={...input,prewarm_only:true,prewarm_stage:'basis',prewarm_progressive:true,prewarm_continuation:'b'.repeat(64)};
+ const f=bridge({ledger,dashboard,assertScopeReadOnly:async()=>{}});await f.call(args,admin);
+ const context={run_id:run.id,session_id:run.session_id,prewarm_only:true,prepare_stage:'basis',prepare_progressive:true,prepare_continuation:args.prewarm_continuation,deadline:26000};
+ await f.guard(context);
+ for(const extra of [{prepare_progressive:undefined},{prepare_progressive:false},{prepare_continuation:undefined},{prepare_continuation:'c'.repeat(64)},{prepare_stage:'cards'},{deadline:26001}])
+  await assert.rejects(f.guard({...context,...extra}),/BACKGROUND_PREWARM_DENIED/);
+ for(const extra of [{prewarm_progressive:false},{prewarm_stage:'cards'},{prewarm_continuation:'B'.repeat(64)},{prewarm_confirm_only:true},{prewarm_only:false}]){
+  const deniedCase=bridge({ledger,dashboard,assertScopeReadOnly:async()=>{}});await denied(deniedCase.call({...args,...extra},admin));assert.equal(deniedCase.accesses(),0);
+ }
+ const unsupported=bridge({ledger,dashboard:{...dashboard,continuation_version:undefined},assertScopeReadOnly:async()=>{}});
+ assert.deepEqual(JSON.parse(JSON.stringify(await unsupported.call(args,admin))),{state:'failed',execution_code:'BACKGROUND_PREWARM_UNSUPPORTED'});
+});

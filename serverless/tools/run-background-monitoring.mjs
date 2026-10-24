@@ -10,12 +10,12 @@ import {adminModuleSources} from './admin-module-sources.mjs';
 import {requireId,validateAuthenticatedDestination,validateServerlessEnvironment} from './destination.mjs';
 
 export const MONITORING_ENDPOINT='endpoints/backgroundMonitoringTick';
-export const RUNNER_LIMITS=Object.freeze({duration_ms:20*60*1000,steps:200,request_ms:90000,source_bytes:8*1024*1024,response_bytes:1024*1024,sleep_ms:60000,source_retries:2,recoveries:3,prewarm_ms:30000,prewarm_confirm_ms:15000,analytics_handoff_ms:1000});
+export const RUNNER_LIMITS=Object.freeze({duration_ms:20*60*1000,steps:200,request_ms:90000,source_bytes:8*1024*1024,response_bytes:1024*1024,sleep_ms:60000,source_retries:2,recoveries:3,prewarm_ms:30000,prewarm_confirm_ms:15000,prewarm_basis_requests:4,analytics_handoff_ms:1000});
 const states=new Set(['running','waiting','busy','complete','paused','disabled','partial','blocked','failed']);
 const object=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 const reasons=new Set(['invalid_request','invalid_response','invalid_json','invalid_envelope','invalid_result','response_too_large','network_error','request_timeout','http_error','remote_error','capability_missing','source_error','unacknowledged_status','recovery_exhausted','unexpected_error']);
 const stages=new Set(['configuration','get_files','sources','tick','status','prewarm','runner']);
-const executionCodes=new Set(['BACKGROUND_PREWARM_TIMEOUT','BACKGROUND_PREWARM_DENIED','BACKGROUND_LEASE_LOST',
+const executionCodes=new Set(['BACKGROUND_PREWARM_PROGRESS_INVALID','BACKGROUND_PREWARM_PROGRESS_LIMIT','BACKGROUND_PREWARM_TIMEOUT','BACKGROUND_PREWARM_DENIED','BACKGROUND_LEASE_LOST',
   'BACKGROUND_SCOPE_CHANGED','BACKGROUND_ACCESS_DENIED','BACKGROUND_RULES_CHANGED',
   'BACKGROUND_PREWARM_CONFIRMATION_FAILED','BACKGROUND_PREWARM_INCOMPLETE','BACKGROUND_PREWARM_UNSUPPORTED',
   'BACKGROUND_ANALYTICS_INVALID','BACKGROUND_RULES_INVALID','BACKGROUND_STATE_INVALID','BACKGROUND_CONFIGURATION',
@@ -90,7 +90,7 @@ const recoverable=error=>error instanceof MonitoringAdminError&&(['network_error
 const confirmablePreparationError=error=>error instanceof MonitoringAdminError
   &&![401,403].includes(error.http_status)
   &&!['BACKGROUND_PREWARM_DENIED','BACKGROUND_PREWARM_UNSUPPORTED','BACKGROUND_SCOPE_CHANGED','BACKGROUND_LEASE_LOST',
-    'BACKGROUND_ACCESS_DENIED','BACKGROUND_RULES_CHANGED'].includes(error.execution_code)
+    'BACKGROUND_ACCESS_DENIED','BACKGROUND_RULES_CHANGED','BACKGROUND_PREWARM_PROGRESS_INVALID','BACKGROUND_PREWARM_PROGRESS_LIMIT'].includes(error.execution_code)
   &&(['network_error','request_timeout','invalid_response','invalid_json','invalid_envelope','invalid_result','response_too_large'].includes(error.reason)
     ||error.reason==='http_error'&&error.http_status>=500&&error.http_status<=599
     ||error.reason==='remote_error'&&(['execution','internal'].includes(error.remote_error)||['cpu','memory','time'].includes(error.execution_limit)));
@@ -178,7 +178,7 @@ export function createMonitoringAdminApi({token,appId,env=process.env,fetch:requ
   return {
     getFiles:({timeoutMs}={})=>call('/get',undefined,RUNNER_LIMITS.source_bytes,'get_files',timeoutMs),
     runFunction:(sources,input,{timeoutMs}={})=>{
-      if(!object(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','prewarm_stage','prewarm_confirm_only','skip_analytics','yield_only'].includes(key))
+      if(!object(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','prewarm_stage','prewarm_progressive','prewarm_continuation','prewarm_confirm_only','skip_analytics','yield_only'].includes(key))
         ||typeof input.runner_id!=='string'||!/^[0-9a-f]{64}$/.test(input.runner_id)
         ||Object.hasOwn(input,'retry')&&typeof input.retry!=='boolean'
         ||Object.hasOwn(input,'skip_analytics')&&(typeof input.skip_analytics!=='boolean'||Object.hasOwn(input,'status_only')||Object.hasOwn(input,'prewarm_only'))
@@ -186,8 +186,10 @@ export function createMonitoringAdminApi({token,appId,env=process.env,fetch:requ
         ||Object.hasOwn(input,'status_only')&&(input.status_only!==true||Object.hasOwn(input,'retry'))
         ||Object.hasOwn(input,'prewarm_only')&&(input.prewarm_only!==true||Object.hasOwn(input,'retry')||Object.hasOwn(input,'status_only'))
         ||Object.hasOwn(input,'prewarm_stage')&&(!['basis','cards'].includes(input.prewarm_stage)||input.prewarm_only!==true)
+        ||Object.hasOwn(input,'prewarm_progressive')&&(input.prewarm_progressive!==true||input.prewarm_stage!=='basis'||input.prewarm_only!==true)
+        ||Object.hasOwn(input,'prewarm_continuation')&&(input.prewarm_progressive!==true||typeof input.prewarm_continuation!=='string'||!/^[a-f0-9]{64}$/.test(input.prewarm_continuation))
         ||Object.hasOwn(input,'prewarm_confirm_only')&&(input.prewarm_confirm_only!==true
-          ||['retry','status_only','prewarm_only','prewarm_stage','skip_analytics','yield_only'].some(key=>Object.hasOwn(input,key))))fail('invalid_request','configuration');
+          ||['retry','status_only','prewarm_only','prewarm_stage','prewarm_progressive','prewarm_continuation','skip_analytics','yield_only'].some(key=>Object.hasOwn(input,key))))fail('invalid_request','configuration');
       return call('/run',{module:MONITORING_ENDPOINT,sources,args:input,ctx:{background_worker:'price-monitoring-v1'}},RUNNER_LIMITS.response_bytes,input.prewarm_only||input.prewarm_confirm_only?'prewarm':input.status_only?'status':'tick',timeoutMs);
     },
   };
@@ -264,7 +266,10 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
   const canPrewarm=/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION\s*=\s*1\s*;/m.test(runtime);
   const canConfirm=canPrewarm&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_CONFIRMATION_VERSION\s*=\s*1\s*;/m.test(runtime);
   const canSplit=canConfirm&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_PREPARATION_VERSION\s*=\s*2\s*;/m.test(runtime);
-  const prewarmReserve=cap.prewarm_ms*(canSplit?2:1)+(canConfirm?cap.prewarm_confirm_ms:0),prewarmOperations=canSplit?3:canConfirm?2:1;
+  const canContinue=canSplit&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_CONTINUATION_VERSION\s*=\s*1\s*;/m.test(runtime);
+  const basisRequests=canContinue?cap.prewarm_basis_requests:1,
+    prewarmReserve=cap.prewarm_ms*(canSplit?basisRequests+1:1)+(canConfirm?cap.prewarm_confirm_ms:0),
+    prewarmOperations=canSplit?basisRequests+2:canConfirm?2:1;
   const {coreSource,entrypointSource}=loadSources();
   const sources=adminModuleSources(deployed.canonical_modules,{'lib/background-monitoring':coreSource},MONITORING_ENDPOINT,entrypointSource);
   if(check){const result={state:'ready',modules:Object.keys(sources).length};emit(result);return result;}
@@ -338,6 +343,35 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
           for(const phase of canSplit?['basis','cards']:['prepare']) {
             if(!confirm)break;
             try {
+              if(canContinue&&phase==='basis') {
+                let progress=null,finished=false;
+                for(let attempt=0;attempt<cap.prewarm_basis_requests;attempt++) {
+                  if(remaining()<cap.prewarm_ms*(cap.prewarm_basis_requests-attempt+1)+cap.prewarm_confirm_ms)fail('request_timeout','prewarm');
+                  const staged=await api.runFunction(sources,{runner_id:runner,prewarm_only:true,prewarm_stage:'basis',prewarm_progressive:true,
+                    ...(progress?{prewarm_continuation:progress.token}:{})},{timeoutMs:cap.prewarm_ms});
+                  preparationFailure(staged?.result);
+                  const value=staged?.result;
+                  if(!object(value)||Object.keys(value).some(key=>!['state','continuation'].includes(key))||!['pending','skipped'].includes(value.state))
+                    throw new MonitoringAdminError('invalid_result','prewarm',undefined,undefined,undefined,{execution_code:'BACKGROUND_PREWARM_PROGRESS_INVALID'});
+                  if(Object.hasOwn(value,'continuation')) {
+                    const next=value.continuation;
+                    if(value.state!=='pending'||!object(next)||Object.keys(next).length!==4||Object.keys(next).some(key=>!['version','step','processed','token'].includes(key))
+                      ||next.version!==1||!Number.isSafeInteger(next.step)||next.step!==attempt+1||next.step<1||next.step>3
+                      ||!Number.isSafeInteger(next.processed)||next.processed<=(progress?.processed??0)
+                      ||typeof next.token!=='string'||!/^[a-f0-9]{64}$/.test(next.token)||next.token===progress?.token)
+                      throw new MonitoringAdminError('invalid_result','prewarm',undefined,undefined,undefined,{execution_code:'BACKGROUND_PREWARM_PROGRESS_INVALID'});
+                    if(attempt+1>=cap.prewarm_basis_requests)throw new MonitoringAdminError('invalid_result','prewarm',undefined,undefined,undefined,{execution_code:'BACKGROUND_PREWARM_PROGRESS_LIMIT'});
+                    progress=next;
+                    emit({dashboard_preparation:'pending',prewarm_phase:'basis',preparation_step:next.step,preparation_processed:next.processed});
+                  } else {
+                    emit({dashboard_preparation:value.state,prewarm_phase:'basis'});finished=true;
+                    if(value.state==='skipped')confirm=false;
+                    break;
+                  }
+                }
+                if(!finished)throw new MonitoringAdminError('invalid_result','prewarm',undefined,undefined,undefined,{execution_code:'BACKGROUND_PREWARM_PROGRESS_LIMIT'});
+                continue;
+              }
               if(remaining()<cap.prewarm_ms+cap.prewarm_confirm_ms)fail('request_timeout','prewarm');
               const staged=await api.runFunction(sources,{runner_id:runner,prewarm_only:true,
                 ...(canSplit?{prewarm_stage:phase}:{})},{timeoutMs:cap.prewarm_ms});

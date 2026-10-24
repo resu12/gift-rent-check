@@ -1852,3 +1852,35 @@ test('malformed continuation metadata cannot reset counters or extend segment an
     assert.equal(f.calls.length, calls);
   }
 });
+
+
+test('progressive basis acknowledgements retain completed-cycle guards and never modify monitoring or call providers',async()=>{
+ const f=fixture();await f.complete();f.dependencies.assertScopeReadOnly=f.dependencies.assertScope;const contexts=[];
+ const continuation={version:1,step:1,processed:120000,token:'b'.repeat(64)};
+ f.dependencies.dashboard={version:1,confirmation_version:1,preparation_version:2,continuation_version:1,
+  prewarm:async()=>{},prepare:async()=>{},prepareCards:async()=>({staged:true}),confirm:async()=>({prepared:true}),
+  prepareBasis:async context=>{contexts.push(copy(context));return context.prepare_continuation?{staged:true}:{staged:false,continuation};}};
+ const worker=createBackgroundMonitoringWorker(f.dependencies),before=f.state(),revision=f.revision(),providers=[...f.calls];
+ assert.deepEqual(await worker.prewarm({runner_id:RUNNER,prewarm_stage:'basis',prewarm_progressive:true}),{state:'pending',continuation});
+ assert.deepEqual(await worker.prewarm({runner_id:RUNNER,prewarm_stage:'basis',prewarm_progressive:true,prewarm_continuation:continuation.token}),{state:'pending'});
+ assert.equal(contexts[0].prepare_progressive,true);assert.equal(contexts[0].prepare_continuation,undefined);assert.equal(contexts[1].prepare_continuation,continuation.token);
+ assert.equal(contexts[0].run_id,contexts[1].run_id);assert.equal(contexts[0].deadline,f.at()+25000);
+ assert.deepEqual(f.state(),before);assert.equal(f.revision(),revision);assert.deepEqual(f.calls,providers);
+});
+
+test('progressive worker refuses malformed acknowledgements, unsupported opt-in and lost guards',async()=>{
+ const continuation={version:1,step:1,processed:100,token:'b'.repeat(64)};
+ for(const mode of ['missing','wrong_version','extra','zero','step4','uppercase','final_extra','deadline','scope','replaced']){
+  const f=fixture();await f.complete();f.dependencies.assertScopeReadOnly=f.dependencies.assertScope;
+  f.dependencies.dashboard={version:1,confirmation_version:1,preparation_version:2,continuation_version:1,
+   prewarm:async()=>{},prepare:async()=>{},prepareCards:async()=>({staged:true}),confirm:async()=>({prepared:true}),prepareBasis:async()=>{
+    if(mode==='deadline')f.advance(25000);if(mode==='scope')f.changeScope({credential_version:2});if(mode==='replaced')f.mutate(state=>{state.background_monitoring.run.id=OTHER+':'+START;});
+    return mode==='missing'?{staged:false}:mode==='final_extra'?{staged:true,continuation}:{staged:false,continuation:{...continuation,
+     ...mode==='wrong_version'?{version:2}:mode==='extra'?{extra:'secret'}:mode==='zero'?{processed:0}:mode==='step4'?{step:4}:mode==='uppercase'?{token:'B'.repeat(64)}:{}}};
+   }};
+  const worker=createBackgroundMonitoringWorker(f.dependencies),call=()=>worker.prewarm({runner_id:RUNNER,prewarm_stage:'basis',prewarm_progressive:true});
+  if(mode==='replaced')assert.deepEqual(await call(),{state:'skipped'});
+  else if(mode==='deadline'||mode==='scope')await assert.rejects(call,error=>error.code===(mode==='deadline'?'BACKGROUND_PREWARM_TIMEOUT':'BACKGROUND_SCOPE_CHANGED'));
+  else await assert.rejects(call,/BACKGROUND_PREWARM_PROGRESS_INVALID/);
+ }
+});
