@@ -10,7 +10,7 @@ import {adminModuleSources} from './admin-module-sources.mjs';
 import {requireId,validateAuthenticatedDestination,validateServerlessEnvironment} from './destination.mjs';
 
 export const MONITORING_ENDPOINT='endpoints/backgroundMonitoringTick';
-export const RUNNER_LIMITS=Object.freeze({duration_ms:20*60*1000,steps:200,request_ms:90000,source_bytes:8*1024*1024,response_bytes:1024*1024,sleep_ms:60000,source_retries:2,recoveries:3,prewarm_ms:30000,prewarm_confirm_ms:15000,prewarm_basis_requests:4,analytics_handoff_ms:1000});
+export const RUNNER_LIMITS=Object.freeze({duration_ms:20*60*1000,steps:200,request_ms:90000,source_bytes:8*1024*1024,response_bytes:1024*1024,sleep_ms:60000,source_retries:2,recoveries:3,prewarm_ms:30000,prewarm_confirm_ms:15000,prewarm_basis_requests:12,analytics_handoff_ms:1000});
 const states=new Set(['running','waiting','busy','complete','paused','disabled','partial','blocked','failed']);
 const object=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 const reasons=new Set(['invalid_request','invalid_response','invalid_json','invalid_envelope','invalid_result','response_too_large','network_error','request_timeout','http_error','remote_error','capability_missing','source_error','unacknowledged_status','recovery_exhausted','unexpected_error']);
@@ -356,8 +356,8 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
                   if(Object.hasOwn(value,'continuation')) {
                     const next=value.continuation;
                     if(value.state!=='pending'||!object(next)||Object.keys(next).length!==4||Object.keys(next).some(key=>!['version','step','processed','token'].includes(key))
-                      ||next.version!==1||!Number.isSafeInteger(next.step)||next.step!==attempt+1||next.step<1||next.step>3
-                      ||!Number.isSafeInteger(next.processed)||next.processed<=(progress?.processed??0)
+                      ||next.version!==1||!Number.isSafeInteger(next.step)||next.step!==attempt+1||next.step<1||next.step>11
+                      ||!Number.isSafeInteger(next.processed)||next.processed<=(progress?.processed??0)||next.processed>786432
                       ||typeof next.token!=='string'||!/^[a-f0-9]{64}$/.test(next.token)||next.token===progress?.token)
                       throw new MonitoringAdminError('invalid_result','prewarm',undefined,undefined,undefined,{execution_code:'BACKGROUND_PREWARM_PROGRESS_INVALID'});
                     if(attempt+1>=cap.prewarm_basis_requests)throw new MonitoringAdminError('invalid_result','prewarm',undefined,undefined,undefined,{execution_code:'BACKGROUND_PREWARM_PROGRESS_LIMIT'});

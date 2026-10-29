@@ -1870,13 +1870,13 @@ test('progressive basis acknowledgements retain completed-cycle guards and never
 
 test('progressive worker refuses malformed acknowledgements, unsupported opt-in and lost guards',async()=>{
  const continuation={version:1,step:1,processed:100,token:'b'.repeat(64)};
- for(const mode of ['missing','wrong_version','extra','zero','step4','uppercase','final_extra','deadline','scope','replaced']){
+ for(const mode of ['missing','wrong_version','extra','zero','step12','uppercase','final_extra','deadline','scope','replaced']){
   const f=fixture();await f.complete();f.dependencies.assertScopeReadOnly=f.dependencies.assertScope;
   f.dependencies.dashboard={version:1,confirmation_version:1,preparation_version:2,continuation_version:1,
    prewarm:async()=>{},prepare:async()=>{},prepareCards:async()=>({staged:true}),confirm:async()=>({prepared:true}),prepareBasis:async()=>{
     if(mode==='deadline')f.advance(25000);if(mode==='scope')f.changeScope({credential_version:2});if(mode==='replaced')f.mutate(state=>{state.background_monitoring.run.id=OTHER+':'+START;});
     return mode==='missing'?{staged:false}:mode==='final_extra'?{staged:true,continuation}:{staged:false,continuation:{...continuation,
-     ...mode==='wrong_version'?{version:2}:mode==='extra'?{extra:'secret'}:mode==='zero'?{processed:0}:mode==='step4'?{step:4}:mode==='uppercase'?{token:'B'.repeat(64)}:{}}};
+     ...mode==='wrong_version'?{version:2}:mode==='extra'?{extra:'secret'}:mode==='zero'?{processed:0}:mode==='step12'?{step:12}:mode==='uppercase'?{token:'B'.repeat(64)}:{}}};
    }};
   const worker=createBackgroundMonitoringWorker(f.dependencies),call=()=>worker.prewarm({runner_id:RUNNER,prewarm_stage:'basis',prewarm_progressive:true});
   if(mode==='replaced')assert.deepEqual(await call(),{state:'skipped'});
