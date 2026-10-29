@@ -243,8 +243,8 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
         const value=result.continuation;
         if(Object.keys(result).some(key=>!['staged','continuation'].includes(key))||!object(value)
           ||Object.keys(value).length!==4||Object.keys(value).some(key=>!['version','step','processed','token'].includes(key))
-          ||value.version!==1||!Number.isSafeInteger(value.step)||value.step<1||value.step>3
-          ||!Number.isSafeInteger(value.processed)||value.processed<=0||typeof value.token!=='string'||!/^[a-f0-9]{64}$/.test(value.token))
+          ||value.version!==1||!Number.isSafeInteger(value.step)||value.step<1||value.step>11
+          ||!Number.isSafeInteger(value.processed)||value.processed<=0||value.processed>786432||typeof value.token!=='string'||!/^[a-f0-9]{64}$/.test(value.token))
           throw new BackgroundMonitoringError('BACKGROUND_PREWARM_PROGRESS_INVALID');
         return {state:'pending',continuation:clone(value)};
       }

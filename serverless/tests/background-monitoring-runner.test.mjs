@@ -1211,7 +1211,7 @@ function progressiveFixture(results,options={}) {
  f.args.api.getFiles=async(...args)=>{const result=await getFiles(...args);result.canonical_modules['lib/runtime']+='\nexport const PRIVATE_BACKGROUND_DASHBOARD_CONTINUATION_VERSION=1;';return result;};
  return f;
 }
-const progress=(step,processed=step*1000)=>({state:'pending',continuation:{version:1,step,processed,token:String(step).repeat(64)}});
+const progress=(step,processed=step*1000)=>({state:'pending',continuation:{version:1,step,processed,token:step.toString(16).repeat(64)}});
 
 test('progressive basis opts in explicitly and follows at most three durable acknowledgements before final staging',async()=>{
  const f=progressiveFixture([{state:'complete',runner_acknowledged:true},progress(1),progress(2),progress(3),{state:'pending'},{state:'pending'},{state:'prepared'}]);
@@ -1224,17 +1224,17 @@ test('progressive basis opts in explicitly and follows at most three durable ack
  for(const step of [1,2,3])assert.ok(!JSON.stringify(f.output).includes(String(step).repeat(64)),'Continuation tokens never enter logs.');
 });
 
-test('progressive preparation reserves six requests and165seconds before claiming new work',async()=>{
- const reserve=2*RUNNER_LIMITS.request_ms+5*RUNNER_LIMITS.prewarm_ms+RUNNER_LIMITS.prewarm_confirm_ms+1000;
- for(const [remaining,steps,inspect] of [[reserve-1,7,true],[reserve,7,false],[reserve+1,6,true],[reserve+1,7,false]]){
+test('progressive preparation reserves fourteen requests and405seconds before claiming new work',async()=>{
+ const reserve=2*RUNNER_LIMITS.request_ms+13*RUNNER_LIMITS.prewarm_ms+RUNNER_LIMITS.prewarm_confirm_ms+1000;
+ for(const [remaining,steps,inspect] of [[reserve-1,15,true],[reserve,15,false],[reserve+1,14,true],[reserve+1,15,false]]){
   const f=progressiveFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},{state:'pending'},{state:'prepared'}],{limits:{duration_ms:remaining,steps}});
   assert.equal((await f.run()).state,inspect?'partial':'complete');assert.equal(f.calls.length,inspect?1:4);
   assert.deepEqual(f.calls[0].input,{runner_id:runner,...inspect?{status_only:true}:{}});
  }
- for(const remainingAfterTick of [164999,165000]){
-  let elapsed=0;const f=progressiveFixture([{state:'complete',runner_acknowledged:true},progress(1),progress(2),progress(3),{state:'pending'},{state:'pending'},{state:'prepared'}],{limits:{duration_ms:400000},monotonic:()=>elapsed});
-  const execute=f.args.api.runFunction;f.args.api.runFunction=async(...args)=>{const result=await execute(...args);elapsed+=args[1].prewarm_only?30000:!args[1].prewarm_confirm_only?400000-remainingAfterTick:0;return result;};
-  assert.deepEqual(await f.run(),{state:'complete'});assert.equal(f.calls.length,remainingAfterTick<165000?1:7);
+ for(const remainingAfterTick of [404999,405000]){
+  let elapsed=0;const f=progressiveFixture([{state:'complete',runner_acknowledged:true},progress(1),progress(2),progress(3),{state:'pending'},{state:'pending'},{state:'prepared'}],{limits:{duration_ms:800000},monotonic:()=>elapsed});
+  const execute=f.args.api.runFunction;f.args.api.runFunction=async(...args)=>{const result=await execute(...args);elapsed+=args[1].prewarm_only?30000:!args[1].prewarm_confirm_only?800000-remainingAfterTick:0;return result;};
+  assert.deepEqual(await f.run(),{state:'complete'});assert.equal(f.calls.length,remainingAfterTick<405000?1:7);
  }
 });
 
@@ -1255,8 +1255,8 @@ test('malformed or nonmonotone progressive acknowledgements stop without replay,
   assert.ok(!f.output.some(row=>row.prewarm_phase==='cards'||row.prewarm_phase==='confirm'));
   assert.ok(!JSON.stringify(f.output).includes(token));
  }
- const fifth=progressiveFixture([{state:'complete',runner_acknowledged:true},progress(1),progress(2),progress(3),progress(4),{state:'prepared'}]);
- await fifth.run();assert.equal(fifth.calls.length,5);assert.equal(fifth.output.at(-1).dashboard_preparation,'failed');
+ const fifth=progressiveFixture([{state:'complete',runner_acknowledged:true},...Array.from({length:11},(_,i)=>progress(i+1)),progress(12),{state:'prepared'}]);
+ await fifth.run();assert.equal(fifth.calls.length,13);assert.equal(fifth.output.at(-1).dashboard_preparation,'failed');
 });
 
 test('ambiguous progressive response is not replayed and keeps its original diagnostic during verification',async()=>{
@@ -1277,4 +1277,8 @@ test('progressive transport accepts only basis opt-in and a fixed lower-case che
   {prewarm_continuation:'b'.repeat(63)},{prewarm_continuation:{}},{prewarm_continuation:'b'.repeat(64),prewarm_progressive:undefined}])
   assert.throws(()=>api.runFunction({},{...valid,...extra}));
  assert.equal(requests.length,2);
+});
+
+test('smaller basis slices allow eleven acknowledged checkpoints and still require final cards and confirmation',async()=>{
+ const steps=Array.from({length:11},(_,i)=>progress(i+1));const f=progressiveFixture([{state:'complete',runner_acknowledged:true},...steps,{state:'pending'},{state:'pending'},{state:'prepared'}]);assert.deepEqual(await f.run(),{state:'complete'});assert.equal(f.calls.length,15);assert.equal(f.calls.filter(row=>row.input.prewarm_stage==='basis').length,12);assert.deepEqual(f.output.at(-1),{dashboard_preparation:'prepared',prewarm_phase:'confirm'});
 });
