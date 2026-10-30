@@ -1709,13 +1709,13 @@ test('a later scheduled cycle resumes its daily-limited cursor after the rolling
 test('actual collector rolling quota recovers across scheduled cycles without restarting its paused traversal', async () => {
   const f = fixture({continuations: true}), ctx = {initData: {user: {id: 42}}}, collection = address(30);
   f.mutate(saved => Object.assign(saved, {version: 2, next_job_id: 1,
-    attempts: Array(499).fill(START - 23 * 3600000), next_allowed_at: 0}));
+    attempts: Array(799).fill(START - 23 * 3600000), next_allowed_at: 0}));
   f.repository.records = async () => [{kind: 'portfolio', record: {
     nft_address: address(2), is_portfolio: true, collection_address: collection}}];
   f.repository.jobs = async () => f.state().job ? [f.state().job] : [];
   const requests = [], resumed = [];
   const collector = createCloudEngine({repository: f.repository, ownerTelegramId: 42,
-    marketappToken: 'synthetic', now: f.at, fetch: async url => {
+    marketappToken: 'synthetic', now: f.at, limits: {daily_attempts: 800}, fetch: async url => {
       requests.push(new URL(url).pathname);
       return Response.json(requests.at(-1) === '/v1/collections/gifts/'
         ? [{address: collection, name: 'Gift', extra_data: {}}] : {cursor: null, items: []});
@@ -1735,10 +1735,10 @@ test('actual collector rolling quota recovers across scheduled cycles without re
   assert.equal((await f.complete()).state, 'partial');
   const paused = f.state().job;
   assert.equal(paused.reason, 'daily_limit'); assert.equal(paused.pages, 1);
-  assert.equal(f.state().attempts.length, 500); assert.equal(requests.length, 1);
+  assert.equal(f.state().attempts.length, 800); assert.equal(requests.length, 1);
   const exhausted = (await collector.getJobs(ctx)).jobs[0].progress;
   assert.ok(exhausted.next_allowed_at <= f.at(), 'Request pacing already elapsed while the daily quota is still exhausted');
-  assert.equal(exhausted.marketapp_budget.rolling_24h_used, 500);
+  assert.equal(exhausted.marketapp_budget.rolling_24h_used, 800);
   f.advance(Date.parse(f.state().background_monitoring.next_check_at) - f.at());
   assert.equal((await f.complete()).state, 'complete');
   assert.deepEqual(resumed, [paused.id]);
@@ -1750,7 +1750,7 @@ test('actual collector rolling quota recovers across scheduled cycles without re
 test('daily-limit recovery requires fresh valid quota evidence rather than an elapsed request wait', async () => {
   const ready = {rolling_24h_used: 499, rolling_24h_limit: 500, available_at: null};
   for (const budget of [undefined, {}, {...ready, rolling_24h_used: 500}, {...ready, rolling_24h_used: -1},
-    {...ready, rolling_24h_used: '499'}, {...ready, rolling_24h_limit: 0}, {...ready, rolling_24h_limit: 501},
+    {...ready, rolling_24h_used: '499'}, {...ready, rolling_24h_limit: 0}, {...ready, rolling_24h_limit: 801},
     {...ready, available_at: undefined}, {...ready, available_at: 'invalid'},
     {...ready, available_at: new Date(START + LIMITS.cadence_ms).toISOString()}]) {
     const f = fixture({continuations: true}); await f.until('history_poll');

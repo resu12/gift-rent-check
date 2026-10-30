@@ -3,7 +3,7 @@
 // and provider request. This worker has no transaction or notification API.
 export const BACKGROUND_MONITORING_LIMITS = Object.freeze({
   cadence_ms: 6 * 60 * 60 * 1000, run_ms: 20 * 60 * 1000,
-  lease_ms: 120000, history_steps: 100, history_resumes: 3, history_daily_attempts: 500, manual_retry_ms: 60000,
+  lease_ms: 120000, history_steps: 100, history_resumes: 3, history_daily_attempts: 800, manual_retry_ms: 60000,
   gift_resumes: 1, gift_resume_ms: 300000, gift_history_reserve_ms: 300000, gift_attempts: 20, gift_daily_attempts: 1000,
   dashboard_prepare_ms: 25000, dashboard_confirm_ms: 10000, dashboard_prepare_age_ms: 5 * 60 * 1000,
   analytics_refresh_ms: 60000, analytics_evaluation_reserve_ms: 60000,
