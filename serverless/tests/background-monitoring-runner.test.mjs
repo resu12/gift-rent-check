@@ -1282,3 +1282,18 @@ test('progressive transport accepts only basis opt-in and a fixed lower-case che
 test('smaller basis slices allow eleven acknowledged checkpoints and still require final cards and confirmation',async()=>{
  const steps=Array.from({length:11},(_,i)=>progress(i+1));const f=progressiveFixture([{state:'complete',runner_acknowledged:true},...steps,{state:'pending'},{state:'pending'},{state:'prepared'}]);assert.deepEqual(await f.run(),{state:'complete'});assert.equal(f.calls.length,15);assert.equal(f.calls.filter(row=>row.input.prewarm_stage==='basis').length,12);assert.deepEqual(f.output.at(-1),{dashboard_preparation:'prepared',prewarm_phase:'confirm'});
 });
+
+test('optional owned stage reserves one extra bounded request and confirms only after all three stages',async()=>{
+ const f=progressiveFixture([{state:'complete',runner_acknowledged:true},progress(1),{state:'pending'},{state:'pending'},{state:'pending'},{state:'prepared'}]);
+ const get=f.args.api.getFiles;f.args.api.getFiles=async(...args)=>{const r=await get(...args);r.canonical_modules['lib/runtime']+='\nexport const PRIVATE_BACKGROUND_DASHBOARD_OWNED_STAGE_VERSION=1;';return r;};
+ assert.deepEqual(await f.run(),{state:'complete'});
+ assert.deepEqual(f.calls.slice(1).map(r=>r.input.prewarm_confirm_only?'confirm':r.input.prewarm_stage),['basis','basis','owned','cards','confirm']);
+ assert.deepEqual(f.output.filter(r=>r.prewarm_phase==='owned'),[{dashboard_preparation:'pending',prewarm_phase:'owned'}]);
+ assert.deepEqual(f.output.at(-1),{dashboard_preparation:'prepared',prewarm_phase:'confirm'});
+ const reserve=2*RUNNER_LIMITS.request_ms+14*RUNNER_LIMITS.prewarm_ms+RUNNER_LIMITS.prewarm_confirm_ms+1000;
+ for(const [duration_ms,steps]of [[reserve-1,16],[reserve,15]]){
+  const blocked=progressiveFixture([{state:'complete',runner_acknowledged:true}],{limits:{duration_ms,steps}}),read=blocked.args.api.getFiles;
+  blocked.args.api.getFiles=async(...args)=>{const r=await read(...args);r.canonical_modules['lib/runtime']+='\nexport const PRIVATE_BACKGROUND_DASHBOARD_OWNED_STAGE_VERSION=1;';return r;};
+  assert.equal((await blocked.run()).state,'partial');assert.equal(blocked.calls.length,1);assert.equal(blocked.calls[0].input.status_only,true);
+ }
+});

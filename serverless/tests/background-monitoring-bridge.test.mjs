@@ -281,3 +281,12 @@ test('progressive bridge binds its exact opt-in and checkpoint token to basis-on
  const unsupported=bridge({ledger,dashboard:{...dashboard,continuation_version:undefined},assertScopeReadOnly:async()=>{}});
  assert.deepEqual(JSON.parse(JSON.stringify(await unsupported.call(args,admin))),{state:'failed',execution_code:'BACKGROUND_PREWARM_UNSUPPORTED'});
 });
+
+
+test('owned stage requires its optional capability before passing exact phase to worker',async()=>{
+ const dashboard={version:1,confirmation_version:1,preparation_version:2,owned_stage_version:1,prewarm:async()=>{},prepare:async()=>{},prepareBasis:async()=>{},prepareOwned:async()=>{},prepareCards:async()=>{},confirm:async()=>{}};
+ for(const change of [{owned_stage_version:undefined},{owned_stage_version:2},{prepareOwned:undefined}]){const f=bridge({dashboard:{...dashboard,...change},assertScopeReadOnly:async()=>{}});assert.deepEqual(JSON.parse(JSON.stringify(await f.call({...input,prewarm_only:true,prewarm_stage:'owned'},admin))),{state:'failed',execution_code:'BACKGROUND_PREWARM_UNSUPPORTED'});}
+ let received;const f=bridge({dashboard,assertScopeReadOnly:async()=>{},worker:{prewarm:async value=>{received=value;return {state:'pending'};}}});
+ assert.equal((await f.call({...input,prewarm_only:true,prewarm_stage:'owned'},admin)).state,'pending');assert.deepEqual(received,{...input,prewarm_only:true,prewarm_stage:'owned'});
+ await denied(f.call({...input,prewarm_only:true,prewarm_stage:'owned',prewarm_progressive:true},admin));
+});
