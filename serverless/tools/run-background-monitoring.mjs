@@ -33,7 +33,7 @@ function executionDiagnosticFields(value) {
   if(Number.isSafeInteger(value.execution_ms)&&value.execution_ms>=0&&value.execution_ms<=RUNNER_LIMITS.request_ms)result.execution_ms=value.execution_ms;
   if(['cpu','memory','time'].includes(value.execution_limit))result.execution_limit=value.execution_limit;
   if(executionCodes.has(value.execution_code))result.execution_code=value.execution_code;
-  if(['prepare','basis','cards','confirm'].includes(value.prewarm_phase))result.prewarm_phase=value.prewarm_phase;
+  if(['prepare','basis','owned','cards','confirm'].includes(value.prewarm_phase))result.prewarm_phase=value.prewarm_phase;
   return result;
 }
 function hostExecutionDiagnostic(envelope) {
@@ -42,7 +42,7 @@ function hostExecutionDiagnostic(envelope) {
   // parameters or logs; provider text cannot become a cause by substring match.
   if(typeof parameters.time==='number'&&Number.isFinite(parameters.time)&&parameters.time>=0
     &&parameters.time<=RUNNER_LIMITS.request_ms/1000)result.execution_ms=Math.round(parameters.time*1000);
-  if(['prepare','basis','cards','confirm'].includes(parameters.prewarm_phase))result.prewarm_phase=parameters.prewarm_phase;
+  if(['prepare','basis','owned','cards','confirm'].includes(parameters.prewarm_phase))result.prewarm_phase=parameters.prewarm_phase;
   const typedLimit=limitCodes.get(envelope.error_type);
   if(typedLimit)result.execution_limit=typedLimit;
   if(envelope.error_type==='CODE_RUN_FAILED') {
@@ -185,7 +185,7 @@ export function createMonitoringAdminApi({token,appId,env=process.env,fetch:requ
         ||Object.hasOwn(input,'yield_only')&&(typeof input.yield_only!=='boolean'||['retry','status_only','prewarm_only','skip_analytics'].some(key=>Object.hasOwn(input,key)))
         ||Object.hasOwn(input,'status_only')&&(input.status_only!==true||Object.hasOwn(input,'retry'))
         ||Object.hasOwn(input,'prewarm_only')&&(input.prewarm_only!==true||Object.hasOwn(input,'retry')||Object.hasOwn(input,'status_only'))
-        ||Object.hasOwn(input,'prewarm_stage')&&(!['basis','cards'].includes(input.prewarm_stage)||input.prewarm_only!==true)
+        ||Object.hasOwn(input,'prewarm_stage')&&(!['basis','owned','cards'].includes(input.prewarm_stage)||input.prewarm_only!==true)
         ||Object.hasOwn(input,'prewarm_progressive')&&(input.prewarm_progressive!==true||input.prewarm_stage!=='basis'||input.prewarm_only!==true)
         ||Object.hasOwn(input,'prewarm_continuation')&&(input.prewarm_progressive!==true||typeof input.prewarm_continuation!=='string'||!/^[a-f0-9]{64}$/.test(input.prewarm_continuation))
         ||Object.hasOwn(input,'prewarm_confirm_only')&&(input.prewarm_confirm_only!==true
@@ -266,10 +266,11 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
   const canPrewarm=/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION\s*=\s*1\s*;/m.test(runtime);
   const canConfirm=canPrewarm&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_CONFIRMATION_VERSION\s*=\s*1\s*;/m.test(runtime);
   const canSplit=canConfirm&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_PREPARATION_VERSION\s*=\s*2\s*;/m.test(runtime);
+  const canOwned=canSplit&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_OWNED_STAGE_VERSION\s*=\s*1\s*;/m.test(runtime);
   const canContinue=canSplit&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_CONTINUATION_VERSION\s*=\s*1\s*;/m.test(runtime);
   const basisRequests=canContinue?cap.prewarm_basis_requests:1,
-    prewarmReserve=cap.prewarm_ms*(canSplit?basisRequests+1:1)+(canConfirm?cap.prewarm_confirm_ms:0),
-    prewarmOperations=canSplit?basisRequests+2:canConfirm?2:1;
+    prewarmReserve=cap.prewarm_ms*(canSplit?basisRequests+1+(canOwned?1:0):1)+(canConfirm?cap.prewarm_confirm_ms:0),
+    prewarmOperations=canSplit?basisRequests+2+(canOwned?1:0):canConfirm?2:1;
   const {coreSource,entrypointSource}=loadSources();
   const sources=adminModuleSources(deployed.canonical_modules,{'lib/background-monitoring':coreSource},MONITORING_ENDPOINT,entrypointSource);
   if(check){const result={state:'ready',modules:Object.keys(sources).length};emit(result);return result;}
@@ -340,7 +341,7 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
           } catch(error) {emit({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm'});}
         } else {
           let confirm=true,prepareFailed=false;
-          for(const phase of canSplit?['basis','cards']:['prepare']) {
+          for(const phase of canSplit?['basis',...(canOwned?['owned']:[]),'cards']:['prepare']) {
             if(!confirm)break;
             try {
               if(canContinue&&phase==='basis') {

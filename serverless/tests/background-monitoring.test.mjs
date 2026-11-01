@@ -1884,3 +1884,14 @@ test('progressive worker refuses malformed acknowledgements, unsupported opt-in 
   else await assert.rejects(call,/BACKGROUND_PREWARM_PROGRESS_INVALID/);
  }
 });
+
+test('optional owned stage uses completed-cycle read-only scope and never repeats providers',async()=>{
+ const f=fixture();await f.complete();const saved=f.state(),revision=f.revision(),providers=[...f.calls],contexts=[];
+ f.dependencies.assertScopeReadOnly=f.dependencies.assertScope;f.dependencies.assertScope=async()=>{throw Error('mutable scope forbidden');};
+ const dashboard={version:1,confirmation_version:1,preparation_version:2,owned_stage_version:1,prewarm:async()=>{},prepare:async()=>{},prepareBasis:async()=>{},prepareCards:async()=>{},confirm:async()=>({prepared:true}),prepareOwned:async context=>{contexts.push(copy(context));return {staged:true};}};
+ f.dependencies.dashboard=dashboard;assert.deepEqual(await createBackgroundMonitoringWorker(f.dependencies).prewarm({runner_id:RUNNER,prewarm_stage:'owned'}),{state:'pending'});
+ assert.equal(contexts[0].prepare_stage,'owned');assert.equal(contexts[0].deadline,f.at()+25000);assert.deepEqual(contexts[0].scope,saved.background_monitoring.run.scope);
+ assert.deepEqual(f.state(),saved);assert.equal(f.revision(),revision);assert.deepEqual(f.calls,providers);
+ for(const change of [{owned_stage_version:undefined},{owned_stage_version:2},{prepareOwned:undefined}]){f.dependencies.dashboard={...dashboard,...change};await assert.rejects(createBackgroundMonitoringWorker(f.dependencies).prewarm({runner_id:RUNNER,prewarm_stage:'owned'}),/BACKGROUND_PREWARM_UNSUPPORTED/);}
+ assert.equal(contexts.length,1);
+});

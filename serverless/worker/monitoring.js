@@ -199,7 +199,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     const {runner_id,prewarm_stage}=request,split=Object.hasOwn(request,'prewarm_stage'),progressive=Object.hasOwn(request,'prewarm_progressive');
     if (typeof runner_id !== 'string' || !/^[a-f0-9]{64}$/.test(runner_id))
       throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
-    if(split&&(confirmOnly||!['basis','cards'].includes(prewarm_stage)))
+    if(split&&(confirmOnly||!['basis','owned','cards'].includes(prewarm_stage)))
       throw new BackgroundMonitoringError('BACKGROUND_PREWARM_DENIED');
     if(progressive&&(request.prewarm_progressive!==true||confirmOnly||prewarm_stage!=='basis')
       ||Object.hasOwn(request,'prewarm_continuation')&&(!progressive||typeof request.prewarm_continuation!=='string'||!/^[a-f0-9]{64}$/.test(request.prewarm_continuation)))
@@ -208,6 +208,8 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     const staged = dashboard?.confirmation_version === 1;
     if(split&&(!staged||dashboard?.preparation_version!==2||typeof dashboard.prepareBasis!=='function'
       ||typeof dashboard.prepareCards!=='function'))
+      throw new BackgroundMonitoringError('BACKGROUND_PREWARM_UNSUPPORTED');
+    if(prewarm_stage==='owned'&&(dashboard?.owned_stage_version!==1||typeof dashboard.prepareOwned!=='function'))
       throw new BackgroundMonitoringError('BACKGROUND_PREWARM_UNSUPPORTED');
     if ((confirmOnly || staged) && (!staged || typeof dashboard.prepare !== 'function'
       || typeof dashboard.confirm !== 'function' || typeof assertScopeReadOnly !== 'function'))
@@ -227,7 +229,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     const scopeCheck = staged ? assertScopeReadOnly : assertScope;
     await scopeCheck(ledger.run.scope, input);
     const operation=confirmOnly?dashboard.confirm:split
-      ?prewarm_stage==='basis'?dashboard.prepareBasis:dashboard.prepareCards:staged?dashboard.prepare:dashboard.prewarm;
+      ?prewarm_stage==='basis'?dashboard.prepareBasis:prewarm_stage==='owned'?dashboard.prepareOwned:dashboard.prepareCards:staged?dashboard.prepare:dashboard.prewarm;
     const result = await operation(input);
     const current = validate((await repository.read()).state.background_monitoring);
     await scopeCheck(ledger.run.scope, input);
