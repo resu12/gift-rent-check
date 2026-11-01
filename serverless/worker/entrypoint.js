@@ -25,7 +25,7 @@ export default async function(input, ctx) {
       ||Object.prototype.hasOwnProperty.call(input,'prewarm_only')&&(input.prewarm_only!==true
         ||Object.prototype.hasOwnProperty.call(input,'retry')||Object.prototype.hasOwnProperty.call(input,'status_only'))
       ||Object.prototype.hasOwnProperty.call(input,'prewarm_stage')&&(!['basis','owned','cards'].includes(input.prewarm_stage)||input.prewarm_only!==true)
-      ||Object.prototype.hasOwnProperty.call(input,'prewarm_progressive')&&(input.prewarm_progressive!==true||input.prewarm_stage!=='basis'||input.prewarm_only!==true)
+      ||Object.prototype.hasOwnProperty.call(input,'prewarm_progressive')&&(input.prewarm_progressive!==true||!['basis','owned'].includes(input.prewarm_stage)||input.prewarm_only!==true)
       ||Object.prototype.hasOwnProperty.call(input,'prewarm_continuation')&&(input.prewarm_progressive!==true||typeof input.prewarm_continuation!=='string'||!/^[a-f0-9]{64}$/.test(input.prewarm_continuation))
       ||Object.prototype.hasOwnProperty.call(input,'prewarm_confirm_only')&&(input.prewarm_confirm_only!==true
         ||['retry','status_only','prewarm_only','prewarm_stage','prewarm_progressive','prewarm_continuation','skip_analytics','yield_only'].some(key=>Object.prototype.hasOwnProperty.call(input,key)))
@@ -68,7 +68,7 @@ export default async function(input, ctx) {
       throw new BackgroundMonitoringError('BACKGROUND_PREWARM_UNSUPPORTED');
     if(input.prewarm_stage==='owned'&&(access.dashboard?.owned_stage_version!==1||typeof access.dashboard.prepareOwned!=='function'))
       throw new BackgroundMonitoringError('BACKGROUND_PREWARM_UNSUPPORTED');
-    if(input.prewarm_progressive===true&&access.dashboard?.continuation_version!==1)
+    if(input.prewarm_progressive===true&&(input.prewarm_stage==='owned'?access.dashboard?.owned_continuation_version:access.dashboard?.continuation_version)!==1)
       throw new BackgroundMonitoringError('BACKGROUND_PREWARM_UNSUPPORTED');
     if(input.prewarm_confirm_only===true&&(access.dashboard?.version!==1||access.dashboard.confirmation_version!==1
         ||typeof access.dashboard.prepare!=='function'||typeof access.dashboard.confirm!=='function'

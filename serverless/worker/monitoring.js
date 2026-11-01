@@ -201,10 +201,10 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
     if(split&&(confirmOnly||!['basis','owned','cards'].includes(prewarm_stage)))
       throw new BackgroundMonitoringError('BACKGROUND_PREWARM_DENIED');
-    if(progressive&&(request.prewarm_progressive!==true||confirmOnly||prewarm_stage!=='basis')
+    if(progressive&&(request.prewarm_progressive!==true||confirmOnly||!['basis','owned'].includes(prewarm_stage))
       ||Object.hasOwn(request,'prewarm_continuation')&&(!progressive||typeof request.prewarm_continuation!=='string'||!/^[a-f0-9]{64}$/.test(request.prewarm_continuation)))
       throw new BackgroundMonitoringError('BACKGROUND_PREWARM_DENIED');
-    if(progressive&&dashboard?.continuation_version!==1)throw new BackgroundMonitoringError('BACKGROUND_PREWARM_UNSUPPORTED');
+    if(progressive&&(prewarm_stage==='owned'?dashboard?.owned_continuation_version:dashboard?.continuation_version)!==1)throw new BackgroundMonitoringError('BACKGROUND_PREWARM_UNSUPPORTED');
     const staged = dashboard?.confirmation_version === 1;
     if(split&&(!staged||dashboard?.preparation_version!==2||typeof dashboard.prepareBasis!=='function'
       ||typeof dashboard.prepareCards!=='function'))
@@ -242,12 +242,12 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     // both durable artifacts for this exact completed cycle.
     if (staged && !confirmOnly) {
       if(progressive&&result?.staged===false) {
-        const value=result.continuation;
+        const value=result.continuation,ready=prewarm_stage==='owned'&&value?.ready===true;
         if(Object.keys(result).some(key=>!['staged','continuation'].includes(key))||!object(value)
-          ||Object.keys(value).length!==4||Object.keys(value).some(key=>!['version','step','processed','token'].includes(key))
-          ||value.version!==1||!Number.isSafeInteger(value.step)||value.step<1||value.step>11
-          ||!Number.isSafeInteger(value.processed)||value.processed<=0||value.processed>786432||typeof value.token!=='string'||!/^[a-f0-9]{64}$/.test(value.token))
-          throw new BackgroundMonitoringError('BACKGROUND_PREWARM_PROGRESS_INVALID');
+          ||Object.keys(value).sort().join(',')!==(ready?'processed,ready,step,token,version':'processed,step,token,version')
+          ||value.version!==1||!Number.isSafeInteger(value.step)||value.step<1||value.step>(prewarm_stage==='owned'?7:11)
+          ||!Number.isSafeInteger(value.processed)||value.processed<(ready?0:1)||value.processed>786432
+          ||typeof value.token!=='string'||!/^[a-f0-9]{64}$/.test(value.token))throw new BackgroundMonitoringError('BACKGROUND_PREWARM_PROGRESS_INVALID');
         return {state:'pending',continuation:clone(value)};
       }
       if(progressive&&Object.hasOwn(result??{},'continuation'))throw new BackgroundMonitoringError('BACKGROUND_PREWARM_PROGRESS_INVALID');

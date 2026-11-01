@@ -1297,3 +1297,15 @@ test('optional owned stage reserves one extra bounded request and confirms only 
   assert.equal((await blocked.run()).state,'partial');assert.equal(blocked.calls.length,1);assert.equal(blocked.calls[0].input.status_only,true);
  }
 });
+
+function ownedProgressiveFixture(results,options={}){const f=progressiveFixture(results,options),get=f.args.api.getFiles;f.args.api.getFiles=async(...args)=>{const r=await get(...args);r.canonical_modules['lib/runtime']+='\nexport const PRIVATE_BACKGROUND_DASHBOARD_OWNED_STAGE_VERSION=1;\nexport const PRIVATE_BACKGROUND_DASHBOARD_OWNED_CONTINUATION_VERSION=1;';return r;};return f;}
+test('owned batches keep separate monotone acknowledgements, explicit ready handoff, final cards and confirmation',async()=>{
+ const first={version:1,step:1,processed:100,token:'b'.repeat(64)},ready={version:1,step:2,processed:100,token:'c'.repeat(64),ready:true},f=ownedProgressiveFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},{state:'pending',continuation:first},{state:'pending',continuation:ready},{state:'pending'},{state:'pending'},{state:'prepared'}]);
+ assert.deepEqual(await f.run(),{state:'complete'});const calls=f.calls.filter(r=>r.input?.prewarm_stage==='owned');assert.equal(calls.length,3);assert.ok(calls.every(r=>r.input.prewarm_progressive===true));assert.equal(calls[1].input.prewarm_continuation,first.token);assert.equal(calls[2].input.prewarm_continuation,ready.token);
+ assert.deepEqual(f.output.find(r=>r.preparation_input_ready),{dashboard_preparation:'pending',prewarm_phase:'owned',preparation_input_ready:true,preparation_step:2,preparation_processed:100});assert.deepEqual(f.output.at(-1),{dashboard_preparation:'prepared',prewarm_phase:'confirm'});
+});
+for(const fault of ['same-count','ready-false','after-ready','too-large','step8'])test('owned runner rejects '+fault+' while retaining the failure diagnostic',async()=>{
+ const one={version:1,step:1,processed:100,token:'b'.repeat(64)},two={version:1,step:2,processed:200,token:'c'.repeat(64)},steps=[{state:'pending',continuation:one}];
+ if(fault==='same-count')two.processed=100;if(fault==='ready-false')two.ready=false;if(fault==='after-ready'){one.ready=true;steps[0].continuation=one;}if(fault==='too-large')two.processed=786433;if(fault==='step8')two.step=8;
+ steps.push({state:'pending',continuation:two});const f=ownedProgressiveFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},...steps,{state:'failed',execution_code:'BACKGROUND_PREWARM_INCOMPLETE'}]);await f.run();assert.ok(f.output.some(r=>r.dashboard_preparation==='failed'&&r.prewarm_phase==='owned'&&r.execution_code==='BACKGROUND_PREWARM_PROGRESS_INVALID'));assert.ok(!f.output.some(r=>r.dashboard_preparation==='prepared'));
+});
