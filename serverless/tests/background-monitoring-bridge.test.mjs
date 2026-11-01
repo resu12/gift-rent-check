@@ -288,5 +288,15 @@ test('owned stage requires its optional capability before passing exact phase to
  for(const change of [{owned_stage_version:undefined},{owned_stage_version:2},{prepareOwned:undefined}]){const f=bridge({dashboard:{...dashboard,...change},assertScopeReadOnly:async()=>{}});assert.deepEqual(JSON.parse(JSON.stringify(await f.call({...input,prewarm_only:true,prewarm_stage:'owned'},admin))),{state:'failed',execution_code:'BACKGROUND_PREWARM_UNSUPPORTED'});}
  let received;const f=bridge({dashboard,assertScopeReadOnly:async()=>{},worker:{prewarm:async value=>{received=value;return {state:'pending'};}}});
  assert.equal((await f.call({...input,prewarm_only:true,prewarm_stage:'owned'},admin)).state,'pending');assert.deepEqual(received,{...input,prewarm_only:true,prewarm_stage:'owned'});
- await denied(f.call({...input,prewarm_only:true,prewarm_stage:'owned',prewarm_progressive:true},admin));
+ assert.deepEqual(JSON.parse(JSON.stringify(await f.call({...input,prewarm_only:true,prewarm_stage:'owned',prewarm_progressive:true},admin))),{state:'failed',execution_code:'BACKGROUND_PREWARM_UNSUPPORTED'});
+});
+
+test('progressive owned bridge binds its separate optional capability, token and deadline',async()=>{
+ const dashboard={version:1,confirmation_version:1,preparation_version:2,owned_stage_version:1,owned_continuation_version:1,
+  prewarm:async()=>{},prepare:async()=>{},prepareBasis:async()=>{},prepareOwned:async()=>{},prepareCards:async()=>{},confirm:async()=>{}};
+ const run={id:input.runner_id+':1',session_id:'session',stage:'done',lease:null,gift_complete:true,history_complete:true},ledger={state:'complete',run,last_success_at:new Date(900).toISOString(),last_finished_at:new Date(900).toISOString()},args={...input,prewarm_only:true,prewarm_stage:'owned',prewarm_progressive:true,prewarm_continuation:'b'.repeat(64)};
+ const f=bridge({ledger,dashboard,assertScopeReadOnly:async()=>{}});assert.equal((await f.call(args,admin)).state,'prepared');
+ const context={run_id:run.id,session_id:run.session_id,prewarm_only:true,prepare_stage:'owned',prepare_progressive:true,prepare_continuation:args.prewarm_continuation,deadline:26000};await f.guard(context);
+ for(const extra of [{prepare_stage:'basis'},{prepare_continuation:'c'.repeat(64)},{prepare_progressive:undefined},{deadline:26001}])await assert.rejects(f.guard({...context,...extra}),/BACKGROUND_PREWARM_DENIED/);
+ for(const version of [undefined,2]){const old=bridge({ledger,dashboard:{...dashboard,owned_continuation_version:version},assertScopeReadOnly:async()=>{}});assert.deepEqual(JSON.parse(JSON.stringify(await old.call(args,admin))),{state:'failed',execution_code:'BACKGROUND_PREWARM_UNSUPPORTED'});}
 });

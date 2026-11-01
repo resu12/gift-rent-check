@@ -1895,3 +1895,14 @@ test('optional owned stage uses completed-cycle read-only scope and never repeat
  for(const change of [{owned_stage_version:undefined},{owned_stage_version:2},{prepareOwned:undefined}]){f.dependencies.dashboard={...dashboard,...change};await assert.rejects(createBackgroundMonitoringWorker(f.dependencies).prewarm({runner_id:RUNNER,prewarm_stage:'owned'}),/BACKGROUND_PREWARM_UNSUPPORTED/);}
  assert.equal(contexts.length,1);
 });
+
+test('progressive owned input preserves completed monitoring and treats empty EOF as an explicit ready handoff',async()=>{
+ const f=fixture();await f.complete();f.dependencies.assertScopeReadOnly=f.dependencies.assertScope;const before=f.state(),revision=f.revision(),providers=[...f.calls],contexts=[];
+ const ordinary={version:1,step:1,processed:100,token:'b'.repeat(64)},ready={version:1,step:2,processed:100,token:'c'.repeat(64),ready:true};
+ f.dependencies.dashboard={version:1,confirmation_version:1,preparation_version:2,owned_stage_version:1,owned_continuation_version:1,prewarm:async()=>{},prepare:async()=>{},prepareBasis:async()=>{},prepareCards:async()=>{},confirm:async()=>({prepared:true}),prepareOwned:async context=>{contexts.push(copy(context));return context.prepare_continuation===ready.token?{staged:true}:{staged:false,continuation:context.prepare_continuation?ready:ordinary};}};
+ const worker=createBackgroundMonitoringWorker(f.dependencies),q={runner_id:RUNNER,prewarm_stage:'owned',prewarm_progressive:true};
+ assert.deepEqual(await worker.prewarm(q),{state:'pending',continuation:ordinary});assert.deepEqual(await worker.prewarm({...q,prewarm_continuation:ordinary.token}),{state:'pending',continuation:ready});assert.deepEqual(await worker.prewarm({...q,prewarm_continuation:ready.token}),{state:'pending'});
+ assert.equal(contexts[0].prepare_stage,'owned');assert.equal(contexts[1].prepare_continuation,ordinary.token);assert.deepEqual(f.state(),before);assert.equal(f.revision(),revision);assert.deepEqual(f.calls,providers);
+ for(const bad of [{...ready,ready:false},{...ready,step:8},{...ready,processed:-1},{...ready,unknown:true}]){f.dependencies.dashboard.prepareOwned=async()=>({staged:false,continuation:bad});await assert.rejects(worker.prewarm(q),/BACKGROUND_PREWARM_PROGRESS_INVALID/);}
+ delete f.dependencies.dashboard.owned_continuation_version;await assert.rejects(worker.prewarm(q),/BACKGROUND_PREWARM_UNSUPPORTED/);
+});
