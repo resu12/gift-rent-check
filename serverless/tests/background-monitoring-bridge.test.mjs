@@ -15,14 +15,26 @@ function bridge(options={}) {
     ...(options.dashboard?{dashboard:options.dashboard}:{})};
   const source=readFileSync(new URL('../worker/entrypoint.js',import.meta.url),'utf8')
     .replace(/^import[^\n]+\n/gm,'').replace('export default async function','return async function');
-  const create=vm.runInNewContext(`(function(createPrivateBackgroundMonitoringAccess,PRIVATE_BACKGROUND_MONITORING_VERSION,PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION,PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION,createBackgroundMonitoringWorker,BackgroundMonitoringError){${source}})`);
+  const create=vm.runInNewContext(`(function(createPrivateBackgroundMonitoringAccess,PRIVATE_BACKGROUND_MONITORING_VERSION,PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION,PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION,createBackgroundMonitoringWorker,BackgroundMonitoringError,giftRuntime){${source}})`);
   return {call:create(check=>{accesses++;guard=check;return access;},version,scopedHistoryVersion,personalAnalyticsVersion,
-    candidate=>{assert.equal(candidate,access);return {tick:async input=>({state:'complete',runner:input.runner_id,retry:input.retry,skip_analytics:input.skip_analytics,yield_only:input.yield_only}),status:async input=>({state:'running',read_only:true,acknowledgement_for:input.runner_id}),prewarm:async input=>({state:'prepared',runner:input.runner_id}),confirmPreparation:async()=>({state:'prepared',read_only:true}),...options.worker};},BackgroundMonitoringError),
+    candidate=>{assert.equal(candidate,access);return {tick:async input=>({state:'complete',runner:input.runner_id,retry:input.retry,skip_analytics:input.skip_analytics,yield_only:input.yield_only}),status:async input=>({state:'running',read_only:true,acknowledgement_for:input.runner_id}),prewarm:async input=>({state:'prepared',runner:input.runner_id}),confirmPreparation:async()=>({state:'prepared',read_only:true}),...options.worker};},BackgroundMonitoringError,options.giftRuntime??{}),
     accesses:()=>accesses,guard:context=>guard(context)};
 }
 const input={runner_id:'a'.repeat(64)}, admin={background_worker:'price-monitoring-v1'};
 const denied=async value=>assert.deepEqual(JSON.parse(JSON.stringify(await (typeof value==='function'?value():value))),
   {state:'failed',execution_code:'BACKGROUND_ACCESS_DENIED'});
+
+test('gift continuation is private worker-only with no selectable identity, run, retry or monitoring side effects',async()=>{
+ const calls=[],f=bridge({giftRuntime:{PRIVATE_GIFT_CONTINUATION_VERSION:1,continuePrivateGiftCheck:async value=>{calls.push(value);return {state:'idle'};}}});
+ for(const status of [{},{status_only:true}])assert.equal((await f.call({...input,gift_continuation_only:true,...status},admin)).state,'idle');
+ for(const other of [{run_id:1},{session_id:'new'},{user_id:42},{retry:true},{prewarm_only:true},{skip_analytics:true},{status_only:false}])
+  await denied(f.call({...input,gift_continuation_only:true,...other},admin));
+ await denied(f.call({...input,gift_continuation_only:true},{}));
+ assert.deepEqual(JSON.parse(JSON.stringify(calls)),[{status_only:false},{status_only:true}]);assert.equal(f.accesses(),0);
+ await denied(bridge().call({...input,gift_continuation_only:true},admin));
+ const failed=bridge({giftRuntime:{PRIVATE_GIFT_CONTINUATION_VERSION:1,continuePrivateGiftCheck:async()=>{throw Error('private upstream text');}}});
+ assert.deepEqual(JSON.parse(JSON.stringify(await failed.call({...input,gift_continuation_only:true},admin))),{state:'failed',execution_code:'BACKGROUND_OPERATION_FAILED'});
+});
 
 test('completion deferral is a boolean tick-only hint and never grants prewarm or status access',async()=>{
  const f=bridge({worker:{tick:async input=>({state:'running',deferred:input.defer_completion})}});

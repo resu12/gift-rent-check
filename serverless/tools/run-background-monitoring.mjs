@@ -179,7 +179,9 @@ export function createMonitoringAdminApi({token,appId,env=process.env,fetch:requ
   return {
     getFiles:({timeoutMs}={})=>call('/get',undefined,RUNNER_LIMITS.source_bytes,'get_files',timeoutMs),
     runFunction:(sources,input,{timeoutMs}={})=>{
-      if(!object(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','prewarm_stage','prewarm_progressive','prewarm_continuation','prewarm_confirm_only','skip_analytics','yield_only','defer_completion'].includes(key))
+      if(!object(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','prewarm_stage','prewarm_progressive','prewarm_continuation','prewarm_confirm_only','skip_analytics','yield_only','defer_completion','gift_continuation_only'].includes(key))
+        ||Object.hasOwn(input,'gift_continuation_only')&&(input.gift_continuation_only!==true
+          ||Object.keys(input).some(key=>!['runner_id','gift_continuation_only','status_only'].includes(key)))
         ||Object.hasOwn(input,'defer_completion')&&(typeof input.defer_completion!=='boolean'
           ||['status_only','prewarm_only','prewarm_confirm_only','skip_analytics','yield_only'].some(key=>Object.hasOwn(input,key)))
         ||typeof input.runner_id!=='string'||!/^[0-9a-f]{64}$/.test(input.runner_id)
@@ -280,8 +282,40 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
   const sources=adminModuleSources(deployed.canonical_modules,{'lib/background-monitoring':coreSource},MONITORING_ENDPOINT,entrypointSource);
   if(check){const result={state:'ready',modules:Object.keys(sources).length};emit(result);return result;}
   const runner=random();if(typeof runner!=='string'||!/^[0-9a-f]{64}$/.test(runner))fail();
+  // A manual portfolio check is an independent saved intent, not a new price
+  // monitoring cycle. It runs even when policies are paused, under this same
+  // invocation's time/request limits. No Start, retry grant or target is sent.
+  let giftSteps=0;
+  if(/^\s*export\s+const\s+PRIVATE_GIFT_CONTINUATION_VERSION\s*=\s*1\s*;/m.test(runtime)) {
+    let status=false,recoveries=0,pending=false;
+    while(giftSteps<cap.steps-1&&remaining()>2*cap.request_ms) {
+      giftSteps++;
+      let response;
+      try {response=await api.runFunction(sources,{runner_id:runner,gift_continuation_only:true,...(status?{status_only:true}:{})},{timeoutMs:requestTime()});}
+      catch(error) {
+        if(!recoverable(error)&&!ambiguousExecution(error))throw error;
+        if(++recoveries>cap.recoveries)fail('recovery_exhausted','status');
+        status=true;await sleep(1000*2**(recoveries-1));continue;
+      }
+      const value=response?.result;
+      operationFailure(value,status?'status':'tick');
+      if(!object(value)||!['idle','running','complete','blocked'].includes(value.state)
+        ||value.state==='running'&&(!Number.isSafeInteger(value.server_time)||!Number.isSafeInteger(value.retry_at)
+          ||!Number.isSafeInteger(value.checked)||!Number.isSafeInteger(value.total)||value.checked<0||value.checked>value.total))
+        fail('invalid_result','tick');
+      pending=value.state==='running';
+      emit({phase:'gift_continuation',state:value.state,...(Number.isSafeInteger(value.checked)?{checked:value.checked,total:value.total}:{}),
+        ...(['running','complete','partial','failed'].includes(value.outcome)?{outcome:value.outcome}:{})});
+      if(value.state!=='running')break;
+      status=false;recoveries=0;
+      const pause=Math.min(cap.sleep_ms,Math.max(1000,value.retry_at-value.server_time));
+      if(pause+2*cap.request_ms>=remaining())break;
+      await sleep(pause);
+    }
+    if(pending)return {state:'partial',gift_continuation_pending:true};
+  }
   let summary={state:'partial'},statusOnly=false,recoveries=0,tickAttempted=false;
-  for(let step=0;step<cap.steps&&remaining()>0;step++) {
+  for(let step=giftSteps;step<cap.steps&&remaining()>0;step++) {
     if(statusOnly) {
       if(recoveries>=cap.recoveries)fail('recovery_exhausted','status');
       // Every recovery read consumes this same invocation's request/time
