@@ -33,6 +33,22 @@ function splitFixture(results,options={}) {
   return f;
 }
 
+test('completion handoff leaves history work available inside the full preparation reservation',async()=>{
+ const pending={state:'partial',continuation_pending:true,retry_at:new Date(start+60000).toISOString()};
+ const f=splitFixture([pending],{limits:{duration_ms:240000}}),get=f.args.api.getFiles;
+ f.args.api.getFiles=async(...args)=>{const r=await get(...args);r.canonical_modules['lib/runtime']+='\nexport const PRIVATE_BACKGROUND_COMPLETION_HANDOFF_VERSION=1;';return r;};
+ assert.deepEqual(await f.run(),pending);
+ assert.deepEqual(f.calls.map(row=>row.input),[{runner_id:runner,defer_completion:true}]);assert.deepEqual(f.waits,[]);
+});
+
+test('completion handoff still reserves two requests and yields before exhausting the invocation',async()=>{
+ let elapsed=0;const pending={state:'partial',continuation_pending:true,retry_at:new Date(start+60000).toISOString()},f=splitFixture([{state:'running'},pending],{limits:{duration_ms:240000},monotonic:()=>elapsed}),get=f.args.api.getFiles,run=f.args.api.runFunction;
+ f.args.api.getFiles=async(...args)=>{const r=await get(...args);r.canonical_modules['lib/runtime']+='\nexport const PRIVATE_BACKGROUND_COMPLETION_HANDOFF_VERSION=1;';return r;};
+ f.args.api.runFunction=async(...args)=>{const r=await run(...args);elapsed+=60000;return r;};
+ assert.deepEqual(await f.run(),pending);assert.deepEqual(f.calls.map(row=>row.input),[{runner_id:runner,defer_completion:true},{runner_id:runner,yield_only:true}]);
+ assert.ok(!f.output.some(row=>row.dashboard_preparation));
+});
+
 test('split preparation inputs accept only two explicit stages and cannot enter another operation',async()=>{
   const requests=[],api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async(_url,options)=>{
     requests.push(JSON.parse(options.body).args);return Response.json({ok:true,result:{result:{state:'pending'}}});

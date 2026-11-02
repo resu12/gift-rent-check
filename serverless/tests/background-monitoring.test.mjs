@@ -9,6 +9,37 @@ import {runBackgroundMonitoring,MonitoringAdminError,RUNNER_LIMITS} from '../too
 
 const START = Date.parse('2026-10-14T12:00:00Z'), RUNNER = 'a'.repeat(64), OTHER = 'b'.repeat(64);
 const address = n => `0:${n.toString(16).padStart(64, '0')}`, copy = value => structuredClone(value);
+test('phase-aware reservation reduces scheduled handoffs without skipping history or analytics',async t=>{
+ const replay=async enabled=>{
+  const f=fixture({continuations:true});let analytics=0,invocations=0;
+  const step=f.dependencies.history.step;
+  f.dependencies.history.step=async(...args)=>{f.advance(12000);const result=await step(...args),state=f.state().job.pages<78?'running':'complete';f.mutate(s=>{s.job.state=state;});result.job.state=state;return result;};
+  f.dependencies.analytics={version:1,refresh:async()=>{analytics++;f.advance(2000);return {state:'saved',period_days:30,captured_at:new Date(f.at()).toISOString()};}};
+  const runtime=['MONITORING_VERSION=1','SCOPED_HISTORY_VERSION=1','PERSONAL_ANALYTICS_VERSION=1','DASHBOARD_PREWARM_VERSION=1','DASHBOARD_CONFIRMATION_VERSION=1','DASHBOARD_PREPARATION_VERSION=2','DASHBOARD_CONTINUATION_VERSION=1','DASHBOARD_OWNED_STAGE_VERSION=1','DASHBOARD_OWNED_CONTINUATION_VERSION=1',...(enabled?['COMPLETION_HANDOFF_VERSION=1']:[])].map(v=>'export const PRIVATE_BACKGROUND_'+v+';').join('\n')+'\nexport function createPrivateBackgroundMonitoringAccess() {}';
+  const api={getFiles:async()=>({canonical_modules:{'lib/private-config':'export const ownerTelegramId=42;','lib/runtime':runtime}}),
+   runFunction:async(_sources,input)=>{if(input.prewarm_stage)return {result:{state:'pending'}};if(input.prewarm_confirm_only)return {result:{state:'prepared'}};const worker=createBackgroundMonitoringWorker(f.dependencies);return {result:await worker[input.status_only?'status':'tick'](input)};}};
+  let outcome;
+  for(;invocations<12;){const began=f.at(),runner=(++invocations).toString(16).padStart(64,'0');outcome=await runBackgroundMonitoring({api,enabled:true,random:()=>runner,now:f.at,monotonic:()=>f.at()-began,sleep:async ms=>f.advance(ms)});
+   if(outcome.state==='complete')break;assert.equal(outcome.continuation_pending,true,JSON.stringify({enabled,invocations,outcome,run:f.state().background_monitoring.run,reason:f.state().background_monitoring.reason}));const wake=START+Math.ceil((f.at()-START)/900000)*900000;f.advance(Math.max(wake,f.state().background_monitoring.run.continuation.resume_at)-f.at());}
+  assert.equal(outcome.state,'complete');return {invocations,elapsed_ms:f.at()-START,pages:f.state().job.pages,analytics,evaluations:f.calls.filter(v=>v==='rules.evaluate').length};
+ };
+ const baseline=await replay(false),candidate=await replay(true);assert.equal(candidate.pages,78);assert.equal(candidate.pages,baseline.pages);assert.equal(candidate.analytics,1);assert.equal(candidate.evaluations,1);
+ if(RUNNER_LIMITS.prewarm_owned_requests===8){assert.ok(candidate.invocations<baseline.invocations);assert.ok(candidate.elapsed_ms<baseline.elapsed_ms);}
+ t.diagnostic(JSON.stringify({modeled_continuation_replay:{baseline,candidate}}));
+});
+test('completion handoff saves history and analytics once, then defers evaluation to a fresh scheduled runner',async()=>{
+ const f=fixture({continuations:true});let captures=0;
+ f.dependencies.analytics={version:1,refresh:async()=>{captures++;return {state:'saved',period_days:30,captured_at:new Date(f.at()).toISOString()};}};
+ await f.until('analytics');await createBackgroundMonitoringWorker(f.dependencies).tick({runner_id:RUNNER,defer_completion:true});
+ assert.equal(captures,1);assert.equal(f.state().background_monitoring.run.stage,'evaluate');
+ const cycle=f.state().background_monitoring.run.id,job=copy(f.state().job);
+ const result=await createBackgroundMonitoringWorker(f.dependencies).tick({runner_id:RUNNER,defer_completion:true});
+ assert.equal(result.continuation_pending,true);assert.ok(!f.calls.includes('rules.evaluate'));assert.deepEqual(f.state().job,job);
+ f.advance(LIMITS.continuation_retry_ms+1);
+ const finished=await createBackgroundMonitoringWorker(f.dependencies).tick({runner_id:OTHER});
+ assert.equal(finished.state,'complete');assert.equal(f.state().background_monitoring.run.id,cycle);
+ assert.equal(f.calls.filter(x=>x==='rules.evaluate').length,1);assert.equal(captures,1);assert.deepEqual(f.state().job,job);
+});
 function deferred() {let resolve; const promise = new Promise(done => {resolve = done;}); return {promise, resolve};}
 function fixture({continuations = false} = {}) {
   let at = START, revision = 0, state = {job: null, unrelated: {retained: true}}, nextGift = 1, nextJob = 1;
