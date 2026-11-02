@@ -179,7 +179,9 @@ export function createMonitoringAdminApi({token,appId,env=process.env,fetch:requ
   return {
     getFiles:({timeoutMs}={})=>call('/get',undefined,RUNNER_LIMITS.source_bytes,'get_files',timeoutMs),
     runFunction:(sources,input,{timeoutMs}={})=>{
-      if(!object(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','prewarm_stage','prewarm_progressive','prewarm_continuation','prewarm_confirm_only','skip_analytics','yield_only'].includes(key))
+      if(!object(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','prewarm_stage','prewarm_progressive','prewarm_continuation','prewarm_confirm_only','skip_analytics','yield_only','defer_completion'].includes(key))
+        ||Object.hasOwn(input,'defer_completion')&&(typeof input.defer_completion!=='boolean'
+          ||['status_only','prewarm_only','prewarm_confirm_only','skip_analytics','yield_only'].some(key=>Object.hasOwn(input,key)))
         ||typeof input.runner_id!=='string'||!/^[0-9a-f]{64}$/.test(input.runner_id)
         ||Object.hasOwn(input,'retry')&&typeof input.retry!=='boolean'
         ||Object.hasOwn(input,'skip_analytics')&&(typeof input.skip_analytics!=='boolean'||Object.hasOwn(input,'status_only')||Object.hasOwn(input,'prewarm_only'))
@@ -265,6 +267,7 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
     ||!/^\s*export\s+const\s+PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION\s*=\s*1\s*;/m.test(runtime)
     ||!/^\s*export\s+function\s+createPrivateBackgroundMonitoringAccess\s*\(/m.test(runtime))fail('capability_missing','sources');
   const canPrewarm=/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION\s*=\s*1\s*;/m.test(runtime);
+  const canDeferCompletion=/^\s*export\s+const\s+PRIVATE_BACKGROUND_COMPLETION_HANDOFF_VERSION\s*=\s*1\s*;/m.test(runtime);
   const canConfirm=canPrewarm&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_CONFIRMATION_VERSION\s*=\s*1\s*;/m.test(runtime);
   const canSplit=canConfirm&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_PREPARATION_VERSION\s*=\s*2\s*;/m.test(runtime);
   const canOwned=canSplit&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_OWNED_STAGE_VERSION\s*=\s*1\s*;/m.test(runtime);
@@ -291,15 +294,19 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
     }
     // The local clock includes source download/recovery time, unlike the
     // worker's segment deadline. Leave one full host request for checkpointing
-    // and the separate cache-preparation allowance before starting more work.
-    // An exhausted source download can only inspect status, never claim a run.
-    const workFits=remaining()>=2*cap.request_ms+prewarmReserve+cap.analytics_handoff_ms&&cap.steps-step>=prewarmOperations+1;
+    // before starting more work. Capable runtimes can finish history/analytics
+    // inside the preparation reserve and hand off BEFORE evaluation if the
+    // entire final pipeline no longer fits. Older runtimes retain the full
+    // reservation. Exhausted source downloads only inspect saved status.
+    const completionFits=remaining()>=2*cap.request_ms+prewarmReserve+cap.analytics_handoff_ms&&cap.steps-step>=prewarmOperations+1;
+    const workFits=canDeferCompletion
+      ?remaining()>=2*cap.request_ms+cap.analytics_handoff_ms&&cap.steps-step>=2:completionFits;
     const budgetInspection=!tickAttempted&&!workFits;
     const readOnly=statusOnly||budgetInspection;
     const yieldOnly=!readOnly&&!workFits;
     if(yieldOnly&&remaining()<cap.request_ms)break;
     const input={runner_id:runner,...(readOnly?{status_only:true}:yieldOnly?{yield_only:true}:{
-      ...(retry===true&&!tickAttempted?{retry:true}:{})})};
+      ...(retry===true&&!tickAttempted?{retry:true}:{}),...(canDeferCompletion&&!completionFits?{defer_completion:true}:{})})};
     if(!readOnly)tickAttempted=true;
     let response;
     try {response=await api.runFunction(sources,input,{timeoutMs:requestTime()});}

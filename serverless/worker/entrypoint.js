@@ -15,7 +15,9 @@ export default async function(input, ctx) {
   if(ctx?.background_worker!=='price-monitoring-v1'||PRIVATE_BACKGROUND_MONITORING_VERSION!==1
       ||PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION!==1
       ||PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION!==1
-      ||!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','prewarm_stage','prewarm_progressive','prewarm_continuation','prewarm_confirm_only','skip_analytics','yield_only'].includes(key))
+      ||!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','prewarm_stage','prewarm_progressive','prewarm_continuation','prewarm_confirm_only','skip_analytics','yield_only','defer_completion'].includes(key))
+      ||Object.prototype.hasOwnProperty.call(input,'defer_completion')&&(typeof input.defer_completion!=='boolean'
+        ||['status_only','prewarm_only','prewarm_confirm_only','skip_analytics','yield_only'].some(key=>Object.prototype.hasOwnProperty.call(input,key)))
       ||Object.prototype.hasOwnProperty.call(input,'retry')&&typeof input.retry!=='boolean'
       ||Object.prototype.hasOwnProperty.call(input,'skip_analytics')&&(typeof input.skip_analytics!=='boolean'
         ||Object.prototype.hasOwnProperty.call(input,'status_only')||Object.prototype.hasOwnProperty.call(input,'prewarm_only'))

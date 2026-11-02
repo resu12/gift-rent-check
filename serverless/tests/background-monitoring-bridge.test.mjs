@@ -24,6 +24,14 @@ const input={runner_id:'a'.repeat(64)}, admin={background_worker:'price-monitori
 const denied=async value=>assert.deepEqual(JSON.parse(JSON.stringify(await (typeof value==='function'?value():value))),
   {state:'failed',execution_code:'BACKGROUND_ACCESS_DENIED'});
 
+test('completion deferral is a boolean tick-only hint and never grants prewarm or status access',async()=>{
+ const f=bridge({worker:{tick:async input=>({state:'running',deferred:input.defer_completion})}});
+ assert.equal((await f.call({...input,defer_completion:true},admin)).deferred,true);
+ for(const value of [null,1,'true',{},[]])await denied(f.call({...input,defer_completion:value},admin));
+ for(const extra of [{status_only:true},{prewarm_only:true},{prewarm_confirm_only:true},{skip_analytics:false},{yield_only:false}])
+  await denied(f.call({...input,defer_completion:true,...extra},admin));
+});
+
 test('split preparation phases require exact exclusive inputs before obtaining owner access',async()=>{
   const f=bridge();
   for(const prewarm_stage of ['basis','cards'])for(const extra of [{},{prewarm_only:false},{prewarm_confirm_only:true},

@@ -484,9 +484,9 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       }
     });
   }
-  async function tick({runner_id, retry = false, skip_analytics = false, yield_only = false} = {}) {
+  async function tick({runner_id, retry = false, skip_analytics = false, yield_only = false, defer_completion = false} = {}) {
     if (typeof runner_id !== 'string' || !/^[a-f0-9]{64}$/.test(runner_id)) throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
-    if (typeof retry !== 'boolean' || typeof skip_analytics !== 'boolean' || typeof yield_only !== 'boolean') throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
+    if (typeof retry !== 'boolean' || typeof skip_analytics !== 'boolean' || typeof yield_only !== 'boolean' || typeof defer_completion !== 'boolean') throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
     let claim, resumed = false;
     for (let n = 0; n < 12; n++) {
       resumed = false;
@@ -763,6 +763,11 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
         }
       }
       if (claim.stage === 'evaluate') {
+        // The driver can keep doing bounded history/analytics work without
+        // reserving the entire worst-case cache pipeline on every tick. Hand
+        // off BEFORE evaluation commits completion if that pipeline no longer
+        // fits. The next scheduled runner retains the same cycle and cursors.
+        if (defer_completion && continuation(claim)) return reply(await yieldRun(claim), await now());
         const prepared = await intent(claim, 'evaluate');
         if (prepared.stopped) return reply(prepared.stopped, await now());
         claim = prepared.run; result = await rules.evaluate(context(claim));
