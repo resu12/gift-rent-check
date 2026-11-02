@@ -17,6 +17,31 @@ function fixture(results,options={}) {
     loadSources:()=>local,now:()=>now,monotonic:()=>now-start,sleep:async ms=>{waits.push(ms);now+=ms;},random:()=>runner,emit:value=>output.push(value),...options};
   return {args,calls,output,waits,run:()=>runBackgroundMonitoring(args)};
 }
+function giftFixture(results,options={}) {
+ const f=fixture(results,options);f.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']+'\nexport const PRIVATE_GIFT_CONTINUATION_VERSION=1;'}});return f;
+}
+test('saved gift continuation precedes monitoring within the same bounded invocation and never requests Start or a retry grant',async()=>{
+ const f=giftFixture([{state:'running',server_time:start,retry_at:start+1000,checked:1,total:2,outcome:'running'},
+  {state:'complete',checked:2,total:2,outcome:'complete'},{state:'paused'}]);
+ assert.deepEqual(await f.run(),{state:'paused'});
+ assert.deepEqual(f.calls.filter(row=>row.operation==='run').map(row=>row.input),[
+  {runner_id:runner,gift_continuation_only:true},{runner_id:runner,gift_continuation_only:true},{runner_id:runner}]);
+ assert.deepEqual(f.waits,[1000]);assert.deepEqual(f.output.slice(0,2).map(row=>row.phase),['gift_continuation','gift_continuation']);
+});
+test('an uncertain saved gift response reads status before any next step and never falsely prewarms an old cycle',async()=>{
+ const error=new MonitoringAdminError('network_error','tick');
+ const f=giftFixture([error,{state:'running',server_time:start+1000,retry_at:start+1000,checked:1,total:2},
+  {state:'complete',checked:2,total:2,outcome:'complete'},{state:'paused'}]);
+ await f.run();const calls=f.calls.filter(row=>row.operation==='run');
+ assert.equal(calls[1].input.status_only,true);assert.equal(calls[1].input.gift_continuation_only,true);
+ assert.ok(!calls.some(row=>row.input.prewarm_only));
+});
+test('exhausting the shared step budget retains pending gift work for the next natural wake',async()=>{
+ const active={state:'running',server_time:start,retry_at:start+1000,checked:0,total:1};
+ const f=giftFixture([active,active],{limits:{steps:3}});
+ assert.deepEqual(await f.run(),{state:'partial',gift_continuation_pending:true});
+ assert.equal(f.calls.filter(row=>row.operation==='run').length,2);
+});
 function confirmationFixture(results,options={}) {
   const f=fixture(results,options);
   f.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']

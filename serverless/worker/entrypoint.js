@@ -2,6 +2,8 @@
 import {createPrivateBackgroundMonitoringAccess, PRIVATE_BACKGROUND_MONITORING_VERSION, PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION, PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION} from '../lib/runtime.js';
 import {createBackgroundMonitoringWorker, BackgroundMonitoringError} from '../lib/background-monitoring.js';
 
+import * as giftRuntime from '../lib/runtime.js';
+
 const preparationErrorCodes=new Set(['BACKGROUND_PREWARM_PROGRESS_INVALID','BACKGROUND_PREWARM_PROGRESS_LIMIT','BACKGROUND_PREWARM_TIMEOUT','BACKGROUND_PREWARM_DENIED','BACKGROUND_LEASE_LOST',
   'BACKGROUND_SCOPE_CHANGED','BACKGROUND_ACCESS_DENIED','BACKGROUND_RULES_CHANGED',
   'BACKGROUND_PREWARM_CONFIRMATION_FAILED','BACKGROUND_PREWARM_INCOMPLETE','BACKGROUND_PREWARM_UNSUPPORTED']);
@@ -12,6 +14,16 @@ const operationErrorCodes=new Set([...preparationErrorCodes,
   'BACKGROUND_GIFT_INVALID','BACKGROUND_HISTORY_INVALID','BACKGROUND_OPERATION_FAILED']);
 
 export default async function(input, ctx) {
+  if(ctx?.background_worker==='price-monitoring-v1'&&input?.gift_continuation_only===true) {
+    if(!input||Object.keys(input).some(key=>!['runner_id','gift_continuation_only','status_only'].includes(key))
+      ||typeof input.runner_id!=='string'||!/^[a-f0-9]{64}$/.test(input.runner_id)
+      ||Object.hasOwn(input,'status_only')&&input.status_only!==true
+      ||giftRuntime.PRIVATE_GIFT_CONTINUATION_VERSION!==1||typeof giftRuntime.continuePrivateGiftCheck!=='function')
+      return {state:'failed',execution_code:'BACKGROUND_ACCESS_DENIED'};
+    try {return await giftRuntime.continuePrivateGiftCheck({status_only:input.status_only===true});}
+    catch {return {state:'failed',execution_code:'BACKGROUND_OPERATION_FAILED'};}
+  }
+
   if(ctx?.background_worker!=='price-monitoring-v1'||PRIVATE_BACKGROUND_MONITORING_VERSION!==1
       ||PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION!==1
       ||PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION!==1
