@@ -74,11 +74,11 @@ test('completion handoff still reserves two requests and yields before exhaustin
  assert.ok(!f.output.some(row=>row.dashboard_preparation));
 });
 
-test('split preparation inputs accept only two explicit stages and cannot enter another operation',async()=>{
+test('split preparation transport accepts advertised stages without entering another operation',async()=>{
   const requests=[],api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async(_url,options)=>{
     requests.push(JSON.parse(options.body).args);return Response.json({ok:true,result:{result:{state:'pending'}}});
   }});
-  for(const prewarm_stage of ['basis','cards']) {
+  for(const prewarm_stage of ['context','basis','owned','cards']) {
     await api.runFunction({}, {runner_id:runner,prewarm_only:true,prewarm_stage});
     for(const other of [{},{status_only:true},{prewarm_confirm_only:true},{prewarm_only:false},
       {prewarm_only:true,retry:false},{prewarm_only:true,skip_analytics:false},{prewarm_only:true,yield_only:false},
@@ -87,7 +87,7 @@ test('split preparation inputs accept only two explicit stages and cannot enter 
   }
   for(const prewarm_stage of [undefined,null,false,1,{},[],'prepare','confirm','Basis','basis '])
     assert.throws(()=>api.runFunction({}, {runner_id:runner,prewarm_only:true,prewarm_stage}));
-  assert.deepEqual(requests,['basis','cards'].map(prewarm_stage=>({runner_id:runner,prewarm_only:true,prewarm_stage})));
+  assert.deepEqual(requests,['context','basis','owned','cards'].map(prewarm_stage=>({runner_id:runner,prewarm_only:true,prewarm_stage})));
 });
 
 test('split runner stages basis and cards once before independently confirming both artifacts',async()=>{
@@ -1374,4 +1374,36 @@ test('completion handoff reserves the additional context request within original
 });
 test('an unconfirmed context failure cannot produce a green preparation result',async()=>{
  const f=contextFixture([{state:'complete',runner_acknowledged:true},{state:'failed',execution_code:'BACKGROUND_SCOPE_CHANGED'}]);const result=await f.run();assert.equal(monitoringExitCode(result),1);assert.equal(f.calls.length,2);assert.equal(f.output.at(-1).prewarm_phase,'context');assert.equal(f.output.at(-1).execution_code,'BACKGROUND_SCOPE_CHANGED');
+});
+
+test('context transport keeps progress, continuation and operation flags denied',()=>{
+ let requests=0;const api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async()=>{requests++;throw Error('Unexpected request');}}),valid={runner_id:runner,prewarm_only:true,prewarm_stage:'context'};
+ for(const extra of [{prewarm_progressive:true},{prewarm_progressive:false},{prewarm_continuation:'b'.repeat(64)},
+  {prewarm_progressive:true,prewarm_continuation:'b'.repeat(64)},{prewarm_confirm_only:true},{status_only:true},
+  {retry:false},{yield_only:false},{skip_analytics:false},{defer_completion:false},{gift_continuation_only:true}])
+  assert.throws(()=>api.runFunction({},{...valid,...extra}),error=>error instanceof MonitoringAdminError&&error.reason==='invalid_request');
+ assert.equal(requests,0);
+});
+
+test('context flow reaches confirmation through the real administrative HTTP client',async()=>{
+ const f=contextFixture([]),deployed=await f.args.api.getFiles(),requests=[],replies=[
+  {state:'complete',runner_acknowledged:true},{state:'pending'},
+  {state:'pending',continuation:{version:1,step:1,processed:900000,token:'b'.repeat(64)}},{state:'pending'},
+  {state:'pending',continuation:{version:1,step:1,processed:0,token:'c'.repeat(64),ready:true}},{state:'pending'},
+  {state:'pending'},{state:'prepared'}];
+ f.args.api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async(url,options)=>{
+  assert.equal(options.redirect,'error');
+  if(url==='https://cloud.telegram.org/app123/manage/get'){assert.equal(options.method,'GET');return Response.json({ok:true,result:deployed});}
+  assert.equal(url,'https://cloud.telegram.org/app123/manage/run');assert.equal(options.method,'POST');
+  const body=JSON.parse(options.body);assert.equal(body.module,MONITORING_ENDPOINT);assert.deepEqual(body.ctx,{background_worker:'price-monitoring-v1'});requests.push(body.args);
+  assert.ok(replies.length>0);return Response.json({ok:true,result:{result:replies.shift()}});
+ }});
+ assert.deepEqual(await f.run(),{state:'complete'});assert.equal(replies.length,0);
+ assert.deepEqual(requests.map(r=>r.prewarm_confirm_only?'confirm':r.prewarm_stage??'monitor'),['monitor','context','basis','basis','owned','owned','cards','confirm']);
+ assert.deepEqual(requests[1],{runner_id:runner,prewarm_only:true,prewarm_stage:'context'});
+ assert.equal(requests[3].prewarm_continuation,'b'.repeat(64));assert.equal(requests[5].prewarm_continuation,'c'.repeat(64));
+ assert.ok(f.output.some(r=>r.prewarm_phase==='basis'&&r.preparation_processed===900000));
+ assert.ok(f.output.some(r=>r.prewarm_phase==='owned'&&r.preparation_input_ready===true&&r.preparation_processed===0));
+ assert.ok(!f.output.some(r=>r.dashboard_preparation==='failed'));
+ assert.deepEqual(f.output.at(-1),{dashboard_preparation:'prepared',prewarm_phase:'confirm'});
 });

@@ -190,7 +190,7 @@ export function createMonitoringAdminApi({token,appId,env=process.env,fetch:requ
         ||Object.hasOwn(input,'yield_only')&&(typeof input.yield_only!=='boolean'||['retry','status_only','prewarm_only','skip_analytics'].some(key=>Object.hasOwn(input,key)))
         ||Object.hasOwn(input,'status_only')&&(input.status_only!==true||Object.hasOwn(input,'retry'))
         ||Object.hasOwn(input,'prewarm_only')&&(input.prewarm_only!==true||Object.hasOwn(input,'retry')||Object.hasOwn(input,'status_only'))
-        ||Object.hasOwn(input,'prewarm_stage')&&(!['basis','owned','cards'].includes(input.prewarm_stage)||input.prewarm_only!==true)
+        ||Object.hasOwn(input,'prewarm_stage')&&(!['context','basis','owned','cards'].includes(input.prewarm_stage)||input.prewarm_only!==true)
         ||Object.hasOwn(input,'prewarm_progressive')&&(input.prewarm_progressive!==true||!['basis','owned'].includes(input.prewarm_stage)||input.prewarm_only!==true)
         ||Object.hasOwn(input,'prewarm_continuation')&&(input.prewarm_progressive!==true||typeof input.prewarm_continuation!=='string'||!/^[a-f0-9]{64}$/.test(input.prewarm_continuation))
         ||Object.hasOwn(input,'prewarm_confirm_only')&&(input.prewarm_confirm_only!==true
