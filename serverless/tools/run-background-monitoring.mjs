@@ -367,9 +367,12 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
     // this invocation must not reacquire it or prepare a not-yet-complete view.
     if(summary.continuation_pending===true)return summary;
     if(!['running','waiting','busy'].includes(summary.state)||summary.state==='busy'&&!summary.retry_at) {
-      // Best effort, at most once, in its OWN hosting request. Never turn a
-      // saved successful check into a failure because preparing display data
-      // failed or its response was lost. Old runtimes and old-cycle completion
+      let preparationFailed=false,preparationConfirmed=false;
+      const emitPreparation=value=>{if(value.dashboard_preparation==='failed')preparationFailed=true;
+        if(value.dashboard_preparation==='prepared'&&(value.prewarm_phase===undefined||value.prewarm_phase==='confirm'))preparationConfirmed=true;
+        emit(value);};
+      // Preparation has its own outcome. Keep the saved monitoring completion
+      // intact, while surfacing an unconfirmed display failure to the runner. Old runtimes and old-cycle completion
       // replies cannot authorize this extra work. Capable runtimes split the
       // basis and cards into separate requests, then independently confirm both.
       // Reserve every phase before starting any optional preparation work.
@@ -380,8 +383,8 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
             const prepared=await api.runFunction(sources,{runner_id:runner,prewarm_only:true},{timeoutMs:cap.prewarm_ms});
             preparationFailure(prepared?.result);
             if(!['prepared','skipped'].includes(prepared?.result?.state))fail('invalid_result','prewarm');
-            emit({dashboard_preparation:prepared.result.state});
-          } catch(error) {emit({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm'});}
+            emitPreparation({dashboard_preparation:prepared.result.state});
+          } catch(error) {emitPreparation({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm'});}
         } else {
           let confirm=true,prepareFailed=false;
           for(const phase of canSplit?['basis',...(canOwned?['owned']:[]),'cards']:['prepare']) {
@@ -407,9 +410,9 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
                       throw new MonitoringAdminError('invalid_result','prewarm',undefined,undefined,undefined,{execution_code:'BACKGROUND_PREWARM_PROGRESS_INVALID'});
                     if(attempt+1>=requests)throw new MonitoringAdminError('invalid_result','prewarm',undefined,undefined,undefined,{execution_code:'BACKGROUND_PREWARM_PROGRESS_LIMIT'});
                     progress=next;
-                    emit({dashboard_preparation:'pending',prewarm_phase:phase,...(ready?{preparation_input_ready:true}:{}),preparation_step:next.step,preparation_processed:next.processed});
+                    emitPreparation({dashboard_preparation:'pending',prewarm_phase:phase,...(ready?{preparation_input_ready:true}:{}),preparation_step:next.step,preparation_processed:next.processed});
                   } else {
-                    emit({dashboard_preparation:value.state,prewarm_phase:phase});finished=true;
+                    emitPreparation({dashboard_preparation:value.state,prewarm_phase:phase});finished=true;
                     if(value.state==='skipped')confirm=false;
                     break;
                   }
@@ -422,11 +425,11 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
                 ...(canSplit?{prewarm_stage:phase}:{})},{timeoutMs:cap.prewarm_ms});
               preparationFailure(staged?.result);
               if(!['pending','skipped'].includes(staged?.result?.state))fail('invalid_result','prewarm');
-              emit({dashboard_preparation:staged.result.state,prewarm_phase:phase});
+              emitPreparation({dashboard_preparation:staged.result.state,prewarm_phase:phase});
               if(canSplit&&staged.result.state==='skipped')confirm=false;
             } catch(error) {
               prepareFailed=true;confirm=confirmablePreparationError(error);
-              emit({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm',prewarm_phase:phase});
+              emitPreparation({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm',prewarm_phase:phase});
             }
           }
           if(confirm)try {
@@ -435,13 +438,13 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
             preparationFailure(confirmed?.result);
             if(confirmed?.result?.state!=='prepared')throw new MonitoringAdminError('invalid_result','prewarm',undefined,undefined,undefined,
               {execution_code:confirmed?.result?.state==='skipped'?'BACKGROUND_PREWARM_INCOMPLETE':'BACKGROUND_PREWARM_CONFIRMATION_FAILED'});
-            emit({dashboard_preparation:'prepared',prewarm_phase:'confirm',...(prepareFailed?{preparation_recovered:true}:{})});
+            emitPreparation({dashboard_preparation:'prepared',prewarm_phase:'confirm',...(prepareFailed?{preparation_recovered:true}:{})});
           } catch(error) {
-            emit({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm',prewarm_phase:'confirm'});
+            emitPreparation({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm',prewarm_phase:'confirm'});
           }
         }
       }
-      return summary;
+      return preparationFailed&&!preparationConfirmed?{...summary,dashboard_preparation:'failed'}:summary;
     }
     // Legacy workers treat yield_only as a read. Never turn such a response
     // into another provider tick or repeatedly renew a yielded segment.
@@ -463,6 +466,8 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
   emit(result);return result;
 }
 
+export function monitoringExitCode(result){return ['failed','blocked'].includes(result.state)||result.dashboard_preparation==='failed'?1:0;}
+
 export async function monitoringMain({args=process.argv.slice(2),env=process.env,emit=value=>console.log(JSON.stringify(value))}={}) {
   try {
     // Inactive jobs do not read credentials, files or the network. --check is
@@ -472,7 +477,7 @@ export async function monitoringMain({args=process.argv.slice(2),env=process.env
     const api=createMonitoringAdminApi({token:env.TGCLOUD_TOKEN,appId:options.appId,env});
     const result=await runBackgroundMonitoring({api,check:options.check,enabled:env.BACKGROUND_MONITORING_ENABLED==='true',
       retry:env.BACKGROUND_MONITORING_MANUAL_RETRY==='true',emit});
-    return ['failed','blocked'].includes(result.state)?1:0;
+    return monitoringExitCode(result);
   } catch(error) {emit({state:'failed',...diagnostic(error)});return 1;}
 }
 
