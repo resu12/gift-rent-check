@@ -1358,3 +1358,20 @@ test('a checkpoint limit fails the workflow while preserving completed monitorin
  const recovered=confirmationFixture([{state:'complete',runner_acknowledged:true},new MonitoringAdminError('network_error','prewarm'),{state:'prepared'}]);
  const ready=await recovered.run();assert.deepEqual(ready,{state:'complete'});assert.equal(monitoringExitCode(ready),0);assert.equal(recovered.output.at(-1).preparation_recovered,true);
 });
+
+function contextFixture(results,options={}){const f=ownedProgressiveFixture(results,options),get=f.args.api.getFiles;f.args.api.getFiles=async(...args)=>{const r=await get(...args);r.canonical_modules['lib/runtime']+='\nexport const PRIVATE_BACKGROUND_DASHBOARD_CONTEXT_VERSION=1;';return r;};return f;}
+test('capable runtimes stage context in its own request before basis without an input ACK',async()=>{
+ const f=contextFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},{state:'pending'},{state:'pending'},{state:'pending'},{state:'prepared'}]);assert.deepEqual(await f.run(),{state:'complete'});
+ assert.deepEqual(f.calls.map(row=>row.input.prewarm_confirm_only?'confirm':row.input.prewarm_stage??'monitor'),['monitor','context','basis','owned','cards','confirm']);
+ const context=f.calls.find(row=>row.input.prewarm_stage==='context');assert.equal(context.input.prewarm_progressive,undefined);assert.equal(context.input.prewarm_continuation,undefined);
+ assert.deepEqual(f.output.find(row=>row.prewarm_phase==='context'),{dashboard_preparation:'pending',prewarm_phase:'context'});assert.deepEqual(f.output.at(-1),{dashboard_preparation:'prepared',prewarm_phase:'confirm'});
+});
+test('completion handoff reserves the additional context request within original duration and step limits',async()=>{
+ const reserve=2*RUNNER_LIMITS.request_ms+22*RUNNER_LIMITS.prewarm_ms+RUNNER_LIMITS.prewarm_confirm_ms+1000;
+ const pending={state:'partial',continuation_pending:true,retry_at:new Date(start+60000).toISOString()},f=contextFixture([pending],{limits:{duration_ms:reserve-1}}),get=f.args.api.getFiles;
+ f.args.api.getFiles=async(...args)=>{const r=await get(...args);r.canonical_modules['lib/runtime']+='\nexport const PRIVATE_BACKGROUND_COMPLETION_HANDOFF_VERSION=1;';return r;};
+ assert.deepEqual(await f.run(),pending);assert.equal(f.calls.length,1);assert.equal(f.calls[0].input.defer_completion,true);assert.ok(!f.calls.some(row=>row.input.prewarm_only));
+});
+test('an unconfirmed context failure cannot produce a green preparation result',async()=>{
+ const f=contextFixture([{state:'complete',runner_acknowledged:true},{state:'failed',execution_code:'BACKGROUND_SCOPE_CHANGED'}]);const result=await f.run();assert.equal(monitoringExitCode(result),1);assert.equal(f.calls.length,2);assert.equal(f.output.at(-1).prewarm_phase,'context');assert.equal(f.output.at(-1).execution_code,'BACKGROUND_SCOPE_CHANGED');
+});

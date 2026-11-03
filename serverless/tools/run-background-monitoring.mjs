@@ -272,12 +272,13 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
   const canDeferCompletion=/^\s*export\s+const\s+PRIVATE_BACKGROUND_COMPLETION_HANDOFF_VERSION\s*=\s*1\s*;/m.test(runtime);
   const canConfirm=canPrewarm&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_CONFIRMATION_VERSION\s*=\s*1\s*;/m.test(runtime);
   const canSplit=canConfirm&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_PREPARATION_VERSION\s*=\s*2\s*;/m.test(runtime);
+  const canContext=canSplit&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_CONTEXT_VERSION\s*=\s*1\s*;/m.test(runtime);
   const canOwned=canSplit&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_OWNED_STAGE_VERSION\s*=\s*1\s*;/m.test(runtime);
   const canContinue=canSplit&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_CONTINUATION_VERSION\s*=\s*1\s*;/m.test(runtime);
   const canOwnedContinue=canOwned&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_OWNED_CONTINUATION_VERSION\s*=\s*1\s*;/m.test(runtime);
   const basisRequests=canContinue?cap.prewarm_basis_requests:1,ownedRequests=canOwned?(canOwnedContinue?cap.prewarm_owned_requests:1):0,
-    prewarmReserve=cap.prewarm_ms*(canSplit?basisRequests+1+ownedRequests:1)+(canConfirm?cap.prewarm_confirm_ms:0),
-    prewarmOperations=canSplit?basisRequests+2+ownedRequests:canConfirm?2:1;
+    prewarmReserve=cap.prewarm_ms*(canSplit?basisRequests+1+ownedRequests+(canContext?1:0):1)+(canConfirm?cap.prewarm_confirm_ms:0),
+    prewarmOperations=canSplit?basisRequests+2+ownedRequests+(canContext?1:0):canConfirm?2:1;
   const {coreSource,entrypointSource}=loadSources();
   const sources=adminModuleSources(deployed.canonical_modules,{'lib/background-monitoring':coreSource},MONITORING_ENDPOINT,entrypointSource);
   if(check){const result={state:'ready',modules:Object.keys(sources).length};emit(result);return result;}
@@ -387,7 +388,7 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
           } catch(error) {emitPreparation({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm'});}
         } else {
           let confirm=true,prepareFailed=false;
-          for(const phase of canSplit?['basis',...(canOwned?['owned']:[]),'cards']:['prepare']) {
+          for(const phase of canSplit?[...(canContext?['context']:[]),'basis',...(canOwned?['owned']:[]),'cards']:['prepare']) {
             if(!confirm)break;
             try {
               if(canContinue&&phase==='basis'||canOwnedContinue&&phase==='owned') {
