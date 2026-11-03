@@ -1937,3 +1937,12 @@ test('progressive owned input preserves completed monitoring and treats empty EO
  for(const bad of [{...ready,ready:false},{...ready,step:8},{...ready,processed:-1},{...ready,unknown:true}]){f.dependencies.dashboard.prepareOwned=async()=>({staged:false,continuation:bad});await assert.rejects(worker.prewarm(q),/BACKGROUND_PREWARM_PROGRESS_INVALID/);}
  delete f.dependencies.dashboard.owned_continuation_version;await assert.rejects(worker.prewarm(q),/BACKGROUND_PREWARM_UNSUPPORTED/);
 });
+
+for(const phase of ['basis','owned'])test('segmented '+phase+' enforces one-million-position acknowledgements without changing saved monitoring',async()=>{
+ const f=fixture();await f.complete();f.dependencies.assertScopeReadOnly=f.dependencies.assertScope;const before=f.state(),revision=f.revision(),providers=[...f.calls];
+ let processed=900000;const continuation=()=>({version:1,step:phase==='basis'?9:7,processed,token:'b'.repeat(64)});
+ f.dependencies.dashboard={version:1,confirmation_version:1,preparation_version:2,continuation_version:1,owned_stage_version:1,owned_continuation_version:1,prewarm:async()=>{},prepare:async()=>{},prepareCards:async()=>{},confirm:async()=>({prepared:true}),prepareBasis:async()=>({staged:false,continuation:continuation()}),prepareOwned:async()=>({staged:false,continuation:continuation()})};
+ const worker=createBackgroundMonitoringWorker(f.dependencies),q={runner_id:RUNNER,prewarm_stage:phase,prewarm_progressive:true};
+ for(processed of [900000,1048576])assert.deepEqual(await worker.prewarm(q),{state:'pending',continuation:continuation()});
+ processed=1048577;await assert.rejects(worker.prewarm(q),/BACKGROUND_PREWARM_PROGRESS_INVALID/);assert.deepEqual(f.state(),before);assert.equal(f.revision(),revision);assert.deepEqual(f.calls,providers);
+});
