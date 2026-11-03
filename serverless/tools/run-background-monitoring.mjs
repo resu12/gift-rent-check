@@ -405,7 +405,7 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
                     const next=value.continuation,ready=owned&&next?.ready===true;
                     if(value.state!=='pending'||!object(next)||Object.keys(next).sort().join(',')!==(ready?'processed,ready,step,token,version':'processed,step,token,version')
                       ||next.version!==1||!Number.isSafeInteger(next.step)||next.step!==attempt+1||next.step<1||next.step>(owned?7:11)
-                      ||!Number.isSafeInteger(next.processed)||next.processed<(progress?.processed??0)||next.processed===(progress?.processed??0)&&!ready||progress?.ready===true||next.processed>786432
+                      ||!Number.isSafeInteger(next.processed)||next.processed<(progress?.processed??0)||next.processed===(progress?.processed??0)&&!ready||progress?.ready===true||next.processed>1048576
                       ||typeof next.token!=='string'||!/^[a-f0-9]{64}$/.test(next.token)||next.token===progress?.token)
                       throw new MonitoringAdminError('invalid_result','prewarm',undefined,undefined,undefined,{execution_code:'BACKGROUND_PREWARM_PROGRESS_INVALID'});
                     if(attempt+1>=requests)throw new MonitoringAdminError('invalid_result','prewarm',undefined,undefined,undefined,{execution_code:'BACKGROUND_PREWARM_PROGRESS_LIMIT'});
