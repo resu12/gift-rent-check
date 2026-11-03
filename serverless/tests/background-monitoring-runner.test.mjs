@@ -1347,7 +1347,7 @@ test('owned batches keep separate monotone acknowledgements, explicit ready hand
 });
 for(const fault of ['same-count','ready-false','after-ready','too-large','step8'])test('owned runner rejects '+fault+' while retaining the failure diagnostic',async()=>{
  const one={version:1,step:1,processed:100,token:'b'.repeat(64)},two={version:1,step:2,processed:200,token:'c'.repeat(64)},steps=[{state:'pending',continuation:one}];
- if(fault==='same-count')two.processed=100;if(fault==='ready-false')two.ready=false;if(fault==='after-ready'){one.ready=true;steps[0].continuation=one;}if(fault==='too-large')two.processed=786433;if(fault==='step8')two.step=8;
+ if(fault==='same-count')two.processed=100;if(fault==='ready-false')two.ready=false;if(fault==='after-ready'){one.ready=true;steps[0].continuation=one;}if(fault==='too-large')two.processed=1048577;if(fault==='step8')two.step=8;
  steps.push({state:'pending',continuation:two});const f=ownedProgressiveFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},...steps,{state:'failed',execution_code:'BACKGROUND_PREWARM_INCOMPLETE'}]);await f.run();assert.ok(f.output.some(r=>r.dashboard_preparation==='failed'&&r.prewarm_phase==='owned'&&r.execution_code==='BACKGROUND_PREWARM_PROGRESS_INVALID'));assert.ok(!f.output.some(r=>r.dashboard_preparation==='prepared'));
 });
 
