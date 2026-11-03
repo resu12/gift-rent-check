@@ -1946,3 +1946,11 @@ for(const phase of ['basis','owned'])test('segmented '+phase+' enforces one-mill
  for(processed of [900000,1048576])assert.deepEqual(await worker.prewarm(q),{state:'pending',continuation:continuation()});
  processed=1048577;await assert.rejects(worker.prewarm(q),/BACKGROUND_PREWARM_PROGRESS_INVALID/);assert.deepEqual(f.state(),before);assert.equal(f.revision(),revision);assert.deepEqual(f.calls,providers);
 });
+
+test('context preparation is scoped to the completed cycle without advancing history or changing source state',async()=>{
+ const f=fixture();await f.complete();const before=f.state(),revision=f.revision(),providers=[...f.calls],contexts=[];f.dependencies.assertScopeReadOnly=f.dependencies.assertScope;
+ const dashboard={version:1,confirmation_version:1,preparation_version:2,context_version:1,prewarm:async()=>{},prepare:async()=>{},prepareBasis:async()=>{},prepareCards:async()=>{},confirm:async()=>({prepared:true}),prepareContext:async context=>{contexts.push(copy(context));return {staged:true};}};f.dependencies.dashboard=dashboard;
+ const worker=createBackgroundMonitoringWorker(f.dependencies);assert.deepEqual(await worker.prewarm({runner_id:RUNNER,prewarm_stage:'context'}),{state:'pending'});assert.equal(contexts[0].prepare_stage,'context');assert.equal(contexts[0].deadline,f.at()+25000);assert.deepEqual(contexts[0].scope,before.background_monitoring.run.scope);assert.equal(contexts[0].prepare_progressive,undefined);
+ assert.deepEqual(f.state(),before);assert.equal(f.revision(),revision);assert.deepEqual(f.calls,providers);
+ for(const change of [{context_version:undefined},{context_version:2},{prepareContext:undefined}]){f.dependencies.dashboard={...dashboard,...change};await assert.rejects(createBackgroundMonitoringWorker(f.dependencies).prewarm({runner_id:RUNNER,prewarm_stage:'context'}),/BACKGROUND_PREWARM_UNSUPPORTED/);}
+});

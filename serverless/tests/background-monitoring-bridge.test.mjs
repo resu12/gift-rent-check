@@ -320,3 +320,10 @@ test('progressive owned bridge binds its separate optional capability, token and
  for(const extra of [{prepare_stage:'basis'},{prepare_continuation:'c'.repeat(64)},{prepare_progressive:undefined},{deadline:26001}])await assert.rejects(f.guard({...context,...extra}),/BACKGROUND_PREWARM_DENIED/);
  for(const version of [undefined,2]){const old=bridge({ledger,dashboard:{...dashboard,owned_continuation_version:version},assertScopeReadOnly:async()=>{}});assert.deepEqual(JSON.parse(JSON.stringify(await old.call(args,admin))),{state:'failed',execution_code:'BACKGROUND_PREWARM_UNSUPPORTED'});}
 });
+
+test('context stage requires its advertised capability and cannot accept progressive input claims',async()=>{
+ const dashboard={version:1,confirmation_version:1,preparation_version:2,context_version:1,prewarm:async()=>{},prepare:async()=>{},confirm:async()=>{},prepareBasis:async()=>{},prepareCards:async()=>{},prepareContext:async()=>{}};
+ const f=bridge({dashboard,assertScopeReadOnly:async()=>{}}),query={...input,prewarm_only:true,prewarm_stage:'context'};assert.equal((await f.call(query,admin)).state,'prepared');
+ for(const change of [{context_version:undefined},{context_version:2},{prepareContext:undefined}])assert.equal((await bridge({dashboard:{...dashboard,...change},assertScopeReadOnly:async()=>{}}).call(query,admin)).execution_code,'BACKGROUND_PREWARM_UNSUPPORTED');
+ await denied(f.call({...query,prewarm_progressive:true},admin));await denied(f.call({...query,prewarm_continuation:'b'.repeat(64)},admin));
+});

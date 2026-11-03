@@ -38,7 +38,7 @@ export default async function(input, ctx) {
       ||Object.prototype.hasOwnProperty.call(input,'status_only')&&(input.status_only!==true||Object.prototype.hasOwnProperty.call(input,'retry'))
       ||Object.prototype.hasOwnProperty.call(input,'prewarm_only')&&(input.prewarm_only!==true
         ||Object.prototype.hasOwnProperty.call(input,'retry')||Object.prototype.hasOwnProperty.call(input,'status_only'))
-      ||Object.prototype.hasOwnProperty.call(input,'prewarm_stage')&&(!['basis','owned','cards'].includes(input.prewarm_stage)||input.prewarm_only!==true)
+      ||Object.prototype.hasOwnProperty.call(input,'prewarm_stage')&&(!['context','basis','owned','cards'].includes(input.prewarm_stage)||input.prewarm_only!==true)
       ||Object.prototype.hasOwnProperty.call(input,'prewarm_progressive')&&(input.prewarm_progressive!==true||!['basis','owned'].includes(input.prewarm_stage)||input.prewarm_only!==true)
       ||Object.prototype.hasOwnProperty.call(input,'prewarm_continuation')&&(input.prewarm_progressive!==true||typeof input.prewarm_continuation!=='string'||!/^[a-f0-9]{64}$/.test(input.prewarm_continuation))
       ||Object.prototype.hasOwnProperty.call(input,'prewarm_confirm_only')&&(input.prewarm_confirm_only!==true
@@ -79,6 +79,8 @@ export default async function(input, ctx) {
         ||access.dashboard.confirmation_version!==1||typeof access.dashboard.prepareBasis!=='function'
         ||typeof access.dashboard.prepareCards!=='function'||typeof access.dashboard.confirm!=='function'
         ||typeof access.assertScopeReadOnly!=='function'))
+      throw new BackgroundMonitoringError('BACKGROUND_PREWARM_UNSUPPORTED');
+    if(input.prewarm_stage==='context'&&(access.dashboard?.context_version!==1||typeof access.dashboard.prepareContext!=='function'))
       throw new BackgroundMonitoringError('BACKGROUND_PREWARM_UNSUPPORTED');
     if(input.prewarm_stage==='owned'&&(access.dashboard?.owned_stage_version!==1||typeof access.dashboard.prepareOwned!=='function'))
       throw new BackgroundMonitoringError('BACKGROUND_PREWARM_UNSUPPORTED');
