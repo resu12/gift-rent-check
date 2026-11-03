@@ -246,7 +246,7 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
         if(Object.keys(result).some(key=>!['staged','continuation'].includes(key))||!object(value)
           ||Object.keys(value).sort().join(',')!==(ready?'processed,ready,step,token,version':'processed,step,token,version')
           ||value.version!==1||!Number.isSafeInteger(value.step)||value.step<1||value.step>(prewarm_stage==='owned'?7:11)
-          ||!Number.isSafeInteger(value.processed)||value.processed<(ready?0:1)||value.processed>786432
+          ||!Number.isSafeInteger(value.processed)||value.processed<(ready?0:1)||value.processed>1048576
           ||typeof value.token!=='string'||!/^[a-f0-9]{64}$/.test(value.token))throw new BackgroundMonitoringError('BACKGROUND_PREWARM_PROGRESS_INVALID');
         return {state:'pending',continuation:clone(value)};
       }
