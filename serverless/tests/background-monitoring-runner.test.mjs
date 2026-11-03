@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync,readdirSync} from 'node:fs';
-import {MONITORING_ENDPOINT,RUNNER_LIMITS,MonitoringAdminError,parseMonitoringArgs,createMonitoringAdminApi,monitoringSummary,runBackgroundMonitoring,monitoringMain,loadMonitoringSources} from '../tools/run-background-monitoring.mjs';
+import {MONITORING_ENDPOINT,RUNNER_LIMITS,MonitoringAdminError,parseMonitoringArgs,createMonitoringAdminApi,monitoringSummary,runBackgroundMonitoring,monitoringMain,monitoringExitCode,loadMonitoringSources} from '../tools/run-background-monitoring.mjs';
 import {adminModuleSources} from '../tools/admin-module-sources.mjs';
 
 const token='app123:synthetic_test_secret',runner='a'.repeat(64),start=Date.parse('2026-10-14T12:00:00.000Z');
@@ -160,7 +160,7 @@ test('split terminal preparation requires its full budget and keeps confirmation
     const execute=f.args.api.runFunction;
     f.args.api.runFunction=async(...args)=>{const result=await execute(...args);
       elapsed+=args[1].prewarm_stage==='basis'?30000+overrun:!args[1].prewarm_confirm_only?225000:0;return result;};
-    assert.deepEqual(await f.run(),{state:'complete'});
+    const result=await f.run();assert.deepEqual(result,overrun===1?{state:'complete'}:{state:'complete',dashboard_preparation:'failed'});assert.equal(monitoringExitCode(result),overrun===1?0:1);
     assert.ok(!f.calls.some(row=>row.input.prewarm_stage==='cards'));
     assert.deepEqual(f.output[2],{dashboard_preparation:'failed',error:'request_timeout',stage:'prewarm',prewarm_phase:'cards'});
     assert.equal(f.calls.length,overrun===1?3:2);
@@ -191,7 +191,7 @@ test('split guard denials stop subsequent stages and missing artifacts cannot re
     'BACKGROUND_SCOPE_CHANGED','BACKGROUND_LEASE_LOST','BACKGROUND_ACCESS_DENIED','BACKGROUND_RULES_CHANGED']) {
     const f=splitFixture([{state:'complete',runner_acknowledged:true},
       ...(phase==='cards'?[{state:'pending'}]:[]),{state:'failed',execution_code:code},{state:'prepared'}]);
-    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.deepEqual(await f.run(),{state:'complete',dashboard_preparation:'failed'});
     assert.equal(f.calls.length,phase==='basis'?2:3);
     assert.equal(f.output.at(-1).execution_code,code);assert.equal(f.output.at(-1).prewarm_phase,phase);
     assert.ok(!f.output.some(row=>row.dashboard_preparation==='prepared'));
@@ -206,7 +206,7 @@ test('split guard denials stop subsequent stages and missing artifacts cannot re
   const missing=splitFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},
     {state:'failed',execution_code:'BACKGROUND_PREWARM_INCOMPLETE'},
     {state:'failed',execution_code:'BACKGROUND_PREWARM_INCOMPLETE'}]);
-  assert.deepEqual(await missing.run(),{state:'complete'});
+  assert.deepEqual(await missing.run(),{state:'complete',dashboard_preparation:'failed'});
   assert.equal(missing.calls.length,4);
   assert.equal(missing.output.at(-1).execution_code,'BACKGROUND_PREWARM_INCOMPLETE');
   assert.equal(missing.output.at(-1).prewarm_phase,'confirm');
@@ -414,7 +414,7 @@ test('acknowledged completion prepares the dashboard once in a separate bounded 
   assert.deepEqual(f.output,[{state:'complete',checked:2,total:2},{dashboard_preparation:'prepared'}]);
 });
 
-test('dashboard preparation errors never retry or convert a saved monitoring success to failure',async()=>{
+test('preparation errors preserve monitoring completion and fail the unconfirmed workflow outcome',async()=>{
   for(const [failure,expected] of [
     [new MonitoringAdminError('network_error','prewarm'),{error:'network_error'}],
     [Object.assign(new MonitoringAdminError('remote_error','prewarm',400,'execution',400),{description:token,parameters:{log:[token]}}),
@@ -424,7 +424,7 @@ test('dashboard preparation errors never retry or convert a saved monitoring suc
   ]) {
     const f=fixture([{state:'complete',runner_acknowledged:true},failure]);
     f.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']+'\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;'}});
-    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.deepEqual(await f.run(),{state:'complete',dashboard_preparation:'failed'});
     assert.equal(f.calls.length,2);assert.deepEqual(f.waits,[]);
     assert.deepEqual(f.output,[{state:'complete'},{dashboard_preparation:'failed',...expected,stage:'prewarm'}]);
     assert.ok(!JSON.stringify(f.output).includes(token));
@@ -514,7 +514,7 @@ test('denied scope and lease guards or unclassified client failures never enter 
     new MonitoringAdminError('remote_error','prewarm',400,'other',400),Error(token)
   ]) {
     const f=confirmationFixture([{state:'complete',runner_acknowledged:true},failure,{state:'prepared'}]);
-    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.deepEqual(await f.run(),{state:'complete',dashboard_preparation:'failed'});
     assert.equal(f.calls.length,2);assert.equal(f.output.at(-1).dashboard_preparation,'failed');
     assert.equal(f.output.at(-1).prewarm_phase,'prepare');
     assert.ok(!f.output.some(row=>row.dashboard_preparation==='prepared'));assert.ok(!JSON.stringify(f.output).includes(token));
@@ -526,7 +526,7 @@ test('fixed bridge preparation failures preserve guard diagnostics and only safe
     'BACKGROUND_LEASE_LOST','BACKGROUND_ACCESS_DENIED','BACKGROUND_RULES_CHANGED'];
   for(const code of [...denied,'BACKGROUND_PREWARM_TIMEOUT','BACKGROUND_PREWARM_INCOMPLETE','BACKGROUND_PREWARM_CONFIRMATION_FAILED']) {
     const f=confirmationFixture([{state:'complete',runner_acknowledged:true},{state:'failed',execution_code:code},{state:'prepared'}]);
-    assert.deepEqual(await f.run(),{state:'complete'});
+    const result=await f.run();assert.deepEqual(result,denied.includes(code)?{state:'complete',dashboard_preparation:'failed'}:{state:'complete'});assert.equal(monitoringExitCode(result),denied.includes(code)?1:0);
     assert.deepEqual(f.output[1],{dashboard_preparation:'failed',error:'remote_error',stage:'prewarm',
       remote_error:'execution',execution_code:code,prewarm_phase:'prepare'});
     assert.equal(f.calls.length,denied.includes(code)?2:3);
@@ -538,7 +538,7 @@ test('fixed bridge preparation failures preserve guard diagnostics and only safe
 test('fixed bridge confirmation failure cannot be mistaken for successful preparation',async()=>{
   const f=confirmationFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},
     {state:'failed',execution_code:'BACKGROUND_PREWARM_INCOMPLETE'}]);
-  assert.deepEqual(await f.run(),{state:'complete'});
+  assert.deepEqual(await f.run(),{state:'complete',dashboard_preparation:'failed'});
   assert.deepEqual(f.output.at(-1),{dashboard_preparation:'failed',error:'remote_error',stage:'prewarm',
     remote_error:'execution',execution_code:'BACKGROUND_PREWARM_INCOMPLETE',prewarm_phase:'confirm'});
   assert.equal(f.calls.length,3);assert.ok(!f.output.some(row=>row.dashboard_preparation==='prepared'));
@@ -549,12 +549,12 @@ test('fixed bridge failures work with legacy preparation and malformed diagnosti
   const legacy=fixture([{state:'complete',runner_acknowledged:true},{state:'failed',execution_code:'BACKGROUND_PREWARM_TIMEOUT'}]);
   legacy.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']
     +'\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;'}});
-  assert.deepEqual(await legacy.run(),{state:'complete'});assert.equal(legacy.calls.length,2);
+  assert.deepEqual(await legacy.run(),{state:'complete',dashboard_preparation:'failed'});assert.equal(legacy.calls.length,2);
   assert.equal(legacy.output.at(-1).execution_code,'BACKGROUND_PREWARM_TIMEOUT');
   for(const result of [{state:'failed',execution_code:token},{state:'failed',execution_code:'BACKGROUND_PREWARM_TIMEOUT',description:token},
     {state:'failed',execution_code:{secret:token}},{state:'failed',execution_code:'BACKGROUND_PREWARM_TIMEOUT '+token}]) {
     const f=confirmationFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},result]);
-    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.deepEqual(await f.run(),{state:'complete',dashboard_preparation:'failed'});
     assert.equal(f.output.at(-1).error,'invalid_result');assert.equal(f.output.at(-1).execution_code,'BACKGROUND_PREWARM_CONFIRMATION_FAILED');
     assert.ok(!JSON.stringify(f.output).includes(token));assert.equal(f.calls.length,3);
     assert.ok(!f.output.some(row=>row.dashboard_preparation==='prepared'));
@@ -571,7 +571,7 @@ test('authentication status cannot become confirmable through an execution-error
       return requests===1?Response.json({ok:true,result:{result:{state:'complete',runner_acknowledged:true}}})
         :Response.json({ok:false,error_type:'CODE_RUN_FAILED',description:'BACKGROUND_PREWARM_TIMEOUT',parameters:{time:0.02}},{status});
     }});
-    const f=fixture([],{api});assert.deepEqual(await f.run(),{state:'complete'});
+    const f=fixture([],{api});assert.deepEqual(await f.run(),{state:'complete',dashboard_preparation:'failed'});
     assert.equal(requests,2);
     assert.deepEqual(f.output.at(-1),{dashboard_preparation:'failed',error:'remote_error',stage:'prewarm',http_status:status,
       remote_error:'execution',execution_ms:20,execution_code:'BACKGROUND_PREWARM_TIMEOUT',prewarm_phase:'prepare'});
@@ -584,7 +584,7 @@ test('unconfirmed or malformed confirmation never claims prepared and does not r
     {state:true},{state:'prepared ',description:token},new MonitoringAdminError('remote_error','prewarm',400,'execution',400,
       {execution_ms:10001,execution_code:'BACKGROUND_PREWARM_TIMEOUT',prewarm_phase:'prepare'})]) {
     const f=confirmationFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},result]);
-    assert.deepEqual(await f.run(),{state:'complete'});
+    assert.deepEqual(await f.run(),{state:'complete',dashboard_preparation:'failed'});
     assert.equal(f.calls.length,3);assert.deepEqual(f.waits,[]);
     const failure=f.output.at(-1);
     assert.equal(failure.dashboard_preparation,'failed');assert.equal(failure.prewarm_phase,'confirm');
@@ -624,7 +624,7 @@ test('terminal preparation needs the full two-request budget and retains indepen
     {limits:{duration_ms:300000},monotonic:()=>elapsed});
   const execute=f.args.api.runFunction;
   f.args.api.runFunction=async(...args)=>{const result=await execute(...args);elapsed+=args[1].prewarm_only?30001:255000;return result;};
-  assert.deepEqual(await f.run(),{state:'complete'});
+  const result=await f.run();assert.deepEqual(result,{state:'complete',dashboard_preparation:'failed'});assert.equal(monitoringExitCode(result),1);
   assert.equal(f.calls.length,2);
   assert.deepEqual(f.output.at(-1),{dashboard_preparation:'failed',error:'request_timeout',stage:'prewarm',prewarm_phase:'confirm'});
 });
@@ -1072,7 +1072,7 @@ test('preparation failure keeps its original bounded diagnostic without claiming
   const f=fixture([{state:'complete',runner_acknowledged:true},failure]);
   f.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']
     +'\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;'}});
-  assert.deepEqual(await f.run(),{state:'complete'});
+  assert.deepEqual(await f.run(),{state:'complete',dashboard_preparation:'failed'});
   assert.equal(f.calls.length,2);assert.deepEqual(f.waits,[]);
   assert.deepEqual(f.output.at(-1),{dashboard_preparation:'failed',error:'remote_error',stage:'prewarm',
     http_status:400,remote_error:'execution',remote_code:400,execution_ms:25001,
@@ -1291,7 +1291,7 @@ test('malformed or nonmonotone progressive acknowledgements stop without replay,
   {...next,state:'skipped'}];
  for(const reply of bad){
   const f=progressiveFixture([{state:'complete',runner_acknowledged:true},first,reply,{state:'prepared'}]);
-  assert.deepEqual(await f.run(),{state:'complete'});assert.equal(f.calls.length,3);
+  assert.deepEqual(await f.run(),{state:'complete',dashboard_preparation:'failed'});assert.equal(f.calls.length,3);
   assert.equal(f.output.at(-1).execution_code,'BACKGROUND_PREWARM_PROGRESS_INVALID');
   assert.ok(!f.output.some(row=>row.prewarm_phase==='cards'||row.prewarm_phase==='confirm'));
   assert.ok(!JSON.stringify(f.output).includes(token));
@@ -1349,4 +1349,12 @@ for(const fault of ['same-count','ready-false','after-ready','too-large','step8'
  const one={version:1,step:1,processed:100,token:'b'.repeat(64)},two={version:1,step:2,processed:200,token:'c'.repeat(64)},steps=[{state:'pending',continuation:one}];
  if(fault==='same-count')two.processed=100;if(fault==='ready-false')two.ready=false;if(fault==='after-ready'){one.ready=true;steps[0].continuation=one;}if(fault==='too-large')two.processed=786433;if(fault==='step8')two.step=8;
  steps.push({state:'pending',continuation:two});const f=ownedProgressiveFixture([{state:'complete',runner_acknowledged:true},{state:'pending'},...steps,{state:'failed',execution_code:'BACKGROUND_PREWARM_INCOMPLETE'}]);await f.run();assert.ok(f.output.some(r=>r.dashboard_preparation==='failed'&&r.prewarm_phase==='owned'&&r.execution_code==='BACKGROUND_PREWARM_PROGRESS_INVALID'));assert.ok(!f.output.some(r=>r.dashboard_preparation==='prepared'));
+});
+
+test('a checkpoint limit fails the workflow while preserving completed monitoring, and verified recovery succeeds',async()=>{
+ const failed=progressiveFixture([{state:'complete',runner_acknowledged:true},progress(1),{state:'failed',execution_code:'BACKGROUND_PREWARM_PROGRESS_LIMIT'}]);
+ const result=await failed.run();assert.deepEqual(result,{state:'complete',dashboard_preparation:'failed'});assert.equal(monitoringExitCode(result),1);
+ assert.equal(failed.output.at(-1).execution_code,'BACKGROUND_PREWARM_PROGRESS_LIMIT');assert.ok(!failed.calls.some(c=>c.input?.prewarm_confirm_only));
+ const recovered=confirmationFixture([{state:'complete',runner_acknowledged:true},new MonitoringAdminError('network_error','prewarm'),{state:'prepared'}]);
+ const ready=await recovered.run();assert.deepEqual(ready,{state:'complete'});assert.equal(monitoringExitCode(ready),0);assert.equal(recovered.output.at(-1).preparation_recovered,true);
 });
