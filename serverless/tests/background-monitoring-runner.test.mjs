@@ -1463,3 +1463,14 @@ test('new job flags reach the real HTTP client and mixed-operation requests are 
     assert.throws(()=>api.runFunction({}, {runner_id:runner,preparation_tick_only:true,...extra}),error=>error.reason==='invalid_request');
   assert.equal(requests.length,count);
 });
+
+test('native capacity pauses retain only the fixed SQLITE_FULL code and never claim readiness',async()=>{
+ for(const native of ['SQLITE_FULL','synthetic-private-native-detail']){
+  const f=jobFixture([{state:'complete'},jobResult('ingest',16,{reason:'STORAGE_CAPACITY_PAUSED',diagnostic:{
+   code:'STORAGE_CAPACITY_PAUSED',phase:'ingest',substage:'artifact_write',error_class:'capacity',native_code:native,private_detail:'synthetic-private-detail'}})]);
+  assert.equal((await f.run()).dashboard_preparation,'pending');assert.equal(f.calls.filter(r=>r.operation==='run').length,2);
+  const diagnostic=f.output.find(r=>r.preparation_job?.diagnostic)?.preparation_job.diagnostic;
+  assert.equal(diagnostic.code,'STORAGE_CAPACITY_PAUSED');assert.equal(diagnostic.native_code,native==='SQLITE_FULL'?'SQLITE_FULL':undefined);
+  assert.ok(!JSON.stringify(f.output).includes('synthetic-private'));assert.ok(!f.output.some(r=>r.dashboard_preparation==='prepared'));
+ }
+});
