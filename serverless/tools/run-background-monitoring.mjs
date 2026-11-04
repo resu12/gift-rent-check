@@ -8,6 +8,7 @@ import {pathToFileURL} from 'node:url';
 import {setTimeout as delay} from 'node:timers/promises';
 import {adminModuleSources} from './admin-module-sources.mjs';
 import {requireId,validateAuthenticatedDestination,validateServerlessEnvironment} from './destination.mjs';
+import {readPreparationTelemetry,PREPARATION_SUBSTAGES} from '../worker/monitoring.js';
 
 export const MONITORING_ENDPOINT='endpoints/backgroundMonitoringTick';
 export const RUNNER_LIMITS=Object.freeze({duration_ms:20*60*1000,steps:200,request_ms:90000,source_bytes:8*1024*1024,response_bytes:1024*1024,sleep_ms:60000,source_retries:2,recoveries:3,prewarm_ms:30000,prewarm_confirm_ms:15000,prewarm_basis_requests:12,prewarm_owned_requests:8,analytics_handoff_ms:1000});
@@ -21,6 +22,8 @@ const executionCodes=new Set(['BACKGROUND_PREWARM_PROGRESS_INVALID','BACKGROUND_
   'BACKGROUND_ANALYTICS_INVALID','BACKGROUND_RULES_INVALID','BACKGROUND_STATE_INVALID','BACKGROUND_CONFIGURATION',
   'BACKGROUND_CLOCK_INVALID','BACKGROUND_RUNNER_INVALID','BACKGROUND_SCOPE_INVALID','BACKGROUND_CONFLICT',
   'BACKGROUND_GIFT_INVALID','BACKGROUND_HISTORY_INVALID','BACKGROUND_OPERATION_FAILED']);
+for(const code of ['DASHBOARD_PREPARATION_SCHEMA_REQUIRED','DASHBOARD_PREPARATION_ITEM_LIMIT','DASHBOARD_PREPARATION_LEASE_LOST',
+  'DASHBOARD_PREPARATION_CONFLICT','DASHBOARD_PREPARATION_CORRUPT','DASHBOARD_PREPARATION_CAPACITY','DASHBOARD_PREPARATION_FAILED','STORAGE_CAPACITY_PAUSED'])executionCodes.add(code);
 const limitCodes=new Map([['CPU_TIME_LIMIT_EXCEEDED','cpu'],['CPU_LIMIT_EXCEEDED','cpu'],
   ['MEMORY_LIMIT_EXCEEDED','memory'],['OUT_OF_MEMORY','memory'],
   ['EXECUTION_TIME_LIMIT_EXCEEDED','time'],['TIME_LIMIT_EXCEEDED','time']]);
@@ -179,6 +182,14 @@ export function createMonitoringAdminApi({token,appId,env=process.env,fetch:requ
   return {
     getFiles:({timeoutMs}={})=>call('/get',undefined,RUNNER_LIMITS.source_bytes,'get_files',timeoutMs),
     runFunction:(sources,input,{timeoutMs}={})=>{
+      if(object(input)&&(Object.hasOwn(input,'preparation_tick_only')||Object.hasOwn(input,'preparation_confirm_only'))){
+        if(Object.keys(input).some(key=>!['runner_id','preparation_tick_only','preparation_confirm_only'].includes(key))
+          ||Object.hasOwn(input,'preparation_tick_only')&&input.preparation_tick_only!==true
+          ||Object.hasOwn(input,'preparation_confirm_only')&&input.preparation_confirm_only!==true
+          ||Object.hasOwn(input,'preparation_tick_only')&&Object.hasOwn(input,'preparation_confirm_only')
+          ||typeof input.runner_id!=='string'||!/^[a-f0-9]{64}$/.test(input.runner_id))fail('invalid_request','configuration');
+        return call('/run',{module:MONITORING_ENDPOINT,sources,args:input,ctx:{background_worker:'price-monitoring-v1'}},RUNNER_LIMITS.response_bytes,'prewarm',timeoutMs);
+      }
       if(!object(input)||Object.keys(input).some(key=>!['runner_id','retry','status_only','prewarm_only','prewarm_stage','prewarm_progressive','prewarm_continuation','prewarm_confirm_only','skip_analytics','yield_only','defer_completion','gift_continuation_only'].includes(key))
         ||Object.hasOwn(input,'gift_continuation_only')&&(input.gift_continuation_only!==true
           ||Object.keys(input).some(key=>!['runner_id','gift_continuation_only','status_only'].includes(key)))
@@ -276,9 +287,10 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
   const canOwned=canSplit&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_OWNED_STAGE_VERSION\s*=\s*1\s*;/m.test(runtime);
   const canContinue=canSplit&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_CONTINUATION_VERSION\s*=\s*1\s*;/m.test(runtime);
   const canOwnedContinue=canOwned&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_OWNED_CONTINUATION_VERSION\s*=\s*1\s*;/m.test(runtime);
+  const canJob=canConfirm&&/^\s*export\s+const\s+PRIVATE_BACKGROUND_DASHBOARD_JOB_VERSION\s*=\s*1\s*;/m.test(runtime);
   const basisRequests=canContinue?cap.prewarm_basis_requests:1,ownedRequests=canOwned?(canOwnedContinue?cap.prewarm_owned_requests:1):0,
-    prewarmReserve=cap.prewarm_ms*(canSplit?basisRequests+1+ownedRequests+(canContext?1:0):1)+(canConfirm?cap.prewarm_confirm_ms:0),
-    prewarmOperations=canSplit?basisRequests+2+ownedRequests+(canContext?1:0):canConfirm?2:1;
+    prewarmReserve=canJob?cap.prewarm_ms+cap.prewarm_confirm_ms:cap.prewarm_ms*(canSplit?basisRequests+1+ownedRequests+(canContext?1:0):1)+(canConfirm?cap.prewarm_confirm_ms:0),
+    prewarmOperations=canJob?2:canSplit?basisRequests+2+ownedRequests+(canContext?1:0):canConfirm?2:1;
   const {coreSource,entrypointSource}=loadSources();
   const sources=adminModuleSources(deployed.canonical_modules,{'lib/background-monitoring':coreSource},MONITORING_ENDPOINT,entrypointSource);
   if(check){const result={state:'ready',modules:Object.keys(sources).length};emit(result);return result;}
@@ -368,6 +380,64 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
     // this invocation must not reacquire it or prepare a not-yet-complete view.
     if(summary.continuation_pending===true)return summary;
     if(!['running','waiting','busy'].includes(summary.state)||summary.state==='busy'&&!summary.retry_at) {
+      if(canJob&&summary.state==='complete'){
+        let previous=null,confirm=false,supported=true;
+        const phases=new Set(['initialize','ingest','context-ready','owned','price-input','price-groups','count-input','count-groups','trees','cleanup','reduce','publish','publication','confirmation','ready']);
+        for(let request=step+1;request<cap.steps&&remaining()>=(confirm?cap.prewarm_confirm_ms:cap.prewarm_ms);request++){
+          let value;
+          try{
+            const response=await api.runFunction(sources,{runner_id:runner,...(confirm?{preparation_confirm_only:true}:{preparation_tick_only:true})},
+              {timeoutMs:confirm?cap.prewarm_confirm_ms:cap.prewarm_ms});value=response?.result;
+            if(value?.state==='failed'&&executionCodes.has(value.execution_code))fail('remote_error','prewarm',undefined,'execution',undefined,{execution_code:value.execution_code});
+            preparationFailure(value);
+            if(!object(value)||value.version!==1||!['pending','prepared','failed','unsupported','idle'].includes(value.state))fail('invalid_result','prewarm');
+            if(value.state==='unsupported'){supported=false;break;}
+            if(value.generation!==undefined){
+              if(typeof value.generation!=='string'||!/^[a-f0-9]{64}$/.test(value.generation)||!phases.has(value.phase)
+                ||!Number.isSafeInteger(value.step)||value.step<0||!Number.isSafeInteger(value.processed)||value.processed<0||value.processed>1048576
+                ||!Number.isSafeInteger(value.owned_processed)||value.owned_processed<0||value.owned_processed>1048576
+                ||typeof value.run_id!=='string'||!/^[a-f0-9]{64}:\d+$/.test(value.run_id))fail('invalid_result','prewarm');
+              if(previous?.generation===value.generation&&(previous.run_id!==value.run_id||value.step<previous.step
+                ||value.processed<previous.processed||value.owned_processed<previous.owned_processed))fail('invalid_result','prewarm');
+              previous=value;
+            }
+            if(value.state==='prepared'&&(value.phase!=='ready'||!date(value.confirmed_at)||!value.generation))fail('invalid_result','prewarm');
+            let proof;
+            if(value.state==='prepared'){
+              const expected=['initialize','ingest','context-ready','owned','price-input','price-groups','count-input','count-groups','trees','cleanup','reduce','publish','publication','confirmation'],candidate=value.preparation_evidence;
+              if(candidate?.version!==1||typeof candidate.automatic!=='boolean'||candidate.phase_evidence_complete!==true||candidate.job_generation!==value.generation
+                ||candidate.cycle_id!==value.run_id||candidate.confirmed_at!==value.confirmed_at||!object(candidate.phases))fail('invalid_result','prewarm');
+              const points={};let previous=0;for(const phase of expected){const point=candidate.phases[phase];
+                if(!object(point)||!date(point.at)||Date.parse(point.at)<previous||Date.parse(point.at)>Date.parse(value.confirmed_at)
+                  ||!Number.isSafeInteger(point.step)||point.step<1||point.step>value.step||!['automatic','foreground'].includes(point.actor)
+                  ||candidate.automatic&&point.actor!=='automatic')fail('invalid_result','prewarm');
+                previous=Date.parse(point.at);points[phase]={at:point.at,step:point.step,actor:point.actor};}
+              proof={version:1,job_generation:candidate.job_generation,cycle_id:candidate.cycle_id,confirmed_at:candidate.confirmed_at,automatic:candidate.automatic,phase_evidence_complete:true,phases:points};
+            }
+            const safe={version:1,...Object.fromEntries(['generation','phase','step','processed','owned_processed','run_id','confirmed_at'].filter(key=>value[key]!==undefined).map(key=>[key,value[key]]))};
+            const telemetry=value.telemetry===undefined?undefined:readPreparationTelemetry(value.telemetry);
+            if(value.telemetry!==undefined&&!telemetry)fail('invalid_result','prewarm');
+            if(typeof value.reason==='string'&&/^[A-Za-z_]{1,64}$/.test(value.reason))safe.reason=value.reason;
+            if(object(value.diagnostic)&&executionCodes.has(value.diagnostic.code)&&phases.has(value.diagnostic.phase))safe.diagnostic={code:value.diagnostic.code,phase:value.diagnostic.phase,
+              ...(PREPARATION_SUBSTAGES.includes(value.diagnostic.substage)?{substage:value.diagnostic.substage}:{}),
+              ...(/^[a-f0-9]{64}$/.test(value.diagnostic.operation_id??'')?{operation_id:value.diagnostic.operation_id}:{}),
+              ...(['artifact_readback','artifact_size','page_integrity','item_integrity'].includes(value.diagnostic.stage)?{stage:value.diagnostic.stage}:{}),
+              ...(['capacity','integrity','timeout','lease','conflict','unsupported','unclassified'].includes(value.diagnostic.error_class)?{error_class:value.diagnostic.error_class}:{})};
+            emit({dashboard_preparation:value.state==='prepared'?'prepared':value.state==='failed'?'failed':'pending',
+              prewarm_phase:value.state==='prepared'?'confirm':confirm?'confirm':'job',preparation_job:safe,...(telemetry?{preparation_telemetry:telemetry}:{}),
+              ...(value.preparation_recovered===true?{preparation_recovered:true}:{}),...(proof?{preparation_evidence:proof}:{})});
+            if(value.state==='prepared')return {...summary,dashboard_preparation:'prepared'};
+            if(value.state==='failed')return {...summary,dashboard_preparation:'failed'};
+            if(value.state==='idle'||!value.generation||value.reason==='STORAGE_CAPACITY_PAUSED')break;
+            confirm=value.phase==='confirmation';
+          }catch(error){emit({dashboard_preparation:'failed',...diagnostic(error),stage:'prewarm',prewarm_phase:confirm?'confirm':'job',
+              ...(previous?{preparation_job:{version:1,generation:previous.generation,phase:previous.phase,step:previous.step,run_id:previous.run_id}}:{})});
+            return {...summary,dashboard_preparation:'failed'};}
+        }
+        if(supported){emit({dashboard_preparation:'pending',prewarm_phase:'job',...(previous?{preparation_job:{version:1,generation:previous.generation,
+          phase:previous.phase,step:previous.step,processed:previous.processed,owned_processed:previous.owned_processed,run_id:previous.run_id}}:{})});
+          return {...summary,dashboard_preparation:'pending'};}
+      }
       let preparationFailed=false,preparationConfirmed=false;
       const emitPreparation=value=>{if(value.dashboard_preparation==='failed')preparationFailed=true;
         if(value.dashboard_preparation==='prepared'&&(value.prewarm_phase===undefined||value.prewarm_phase==='confirm'))preparationConfirmed=true;

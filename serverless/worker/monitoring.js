@@ -1,6 +1,25 @@
 // Portable orchestration only. The hosting bridge supplies owner authorization,
 // provider budgets and a guard that checks this checkpoint before every write
 // and provider request. This worker has no transaction or notification API.
+// One versioned transport contract is shared by the bridge worker and driver.
+// Only fixed labels, opaque operation IDs and bounded numeric costs may pass.
+export const PREPARATION_SUBSTAGES=Object.freeze(['source_check','job_claim','context_restore','source_scan','context_encode','artifact_write','artifact_read',
+  'owned_restore','owned_scan','owned_encode','group_reduce','tree_build','tree_reduce','cache_publish','cache_confirm','job_checkpoint','derived_retirement']);
+export const PREPARATION_PHASES=Object.freeze(['initialize','ingest','context-ready','owned','price-input','price-groups','count-input','count-groups','trees','cleanup','reduce','publish','publication','confirmation','ready']);
+export function readPreparationTelemetry(value) {
+  const plain=item=>item!==null&&typeof item==='object'&&!Array.isArray(item),number=item=>Number.isSafeInteger(item)&&item>=0&&item<=1099511627776,
+    exact=(item,keys)=>Object.keys(item).sort().join(',')===[...keys].sort().join(',');
+  if(!plain(value)||!exact(value,['version','operation_id','phase','substage','clock','elapsed_ms','stages'])||value.version!==1
+    ||!/^([a-f0-9]{64})$/.test(value.operation_id)||!PREPARATION_PHASES.includes(value.phase)||!PREPARATION_SUBSTAGES.includes(value.substage)
+    ||!['monotonic','wall'].includes(value.clock)||!number(value.elapsed_ms)||value.elapsed_ms>90000||!Array.isArray(value.stages)||value.stages.length>PREPARATION_SUBSTAGES.length)return null;
+  const seen=new Set(),stages=[];
+  for(const item of value.stages){
+    if(!plain(item)||!exact(item,['stage','calls','elapsed_ms','rows','bytes_read','bytes_written','bytes_encoded'])||!PREPARATION_SUBSTAGES.includes(item.stage)||seen.has(item.stage)
+      ||!['calls','elapsed_ms','rows','bytes_read','bytes_written','bytes_encoded'].every(key=>number(item[key]))||item.calls<1||item.elapsed_ms>90000)return null;
+    seen.add(item.stage);stages.push({...item});
+  }
+  return {version:1,operation_id:value.operation_id,phase:value.phase,substage:value.substage,clock:value.clock,elapsed_ms:value.elapsed_ms,stages};
+}
 export const BACKGROUND_MONITORING_LIMITS = Object.freeze({
   cadence_ms: 6 * 60 * 60 * 1000, run_ms: 20 * 60 * 1000,
   lease_ms: 120000, history_steps: 100, history_resumes: 3, history_daily_attempts: 800, manual_retry_ms: 60000,
@@ -261,6 +280,43 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
   }
   const prewarm = input => prepareDashboard(input);
   const confirmPreparation = input => prepareDashboard(input, true);
+  async function preparationTick(request={},confirm=false) {
+    const {runner_id}=request;
+    if(typeof runner_id!=='string'||!/^[a-f0-9]{64}$/.test(runner_id))throw new BackgroundMonitoringError('BACKGROUND_RUNNER_INVALID');
+    if(dashboard?.job_version!==1||typeof dashboard.advanceJob!=='function'||typeof dashboard.confirmJob!=='function'
+      ||typeof assertScopeReadOnly!=='function')throw new BackgroundMonitoringError('BACKGROUND_PREWARM_UNSUPPORTED');
+    const saved=await repository.read(),at=await now(),ledger=validate(saved.state.background_monitoring);
+    const eligible=row=>row?.state==='complete'&&row.run.stage==='done'&&row.run.lease===null&&row.run.gift_complete===true
+      &&row.run.history_complete===true&&row.last_success_at===row.last_finished_at&&time(row.last_finished_at)<=at;
+    if(!eligible(ledger))return {version:1,state:'idle'};
+    // The completed cycle and exact scope authorize this separate derived job.
+    // A later scheduled runner needs no provider retry grant or old run lease.
+    const input={run_id:ledger.run.id,session_id:ledger.run.session_id,scope:clone(ledger.run.scope),prewarm_only:true,
+      preparation_job:true,cycle_completed_at:ledger.last_finished_at,prepare_stage:confirm?'job-confirm':'job',...(confirm?{confirm_only:true}:{}),
+      deadline:at+(confirm?BACKGROUND_MONITORING_LIMITS.dashboard_confirm_ms:BACKGROUND_MONITORING_LIMITS.dashboard_prepare_ms)};
+    await assertScopeReadOnly(ledger.run.scope,input);
+    const result=await (confirm?dashboard.confirmJob:dashboard.advanceJob)(input),current=validate((await repository.read()).state.background_monitoring);
+    await assertScopeReadOnly(ledger.run.scope,input);
+    if(!eligible(current)||current.run.id!==ledger.run.id||current.run.session_id!==ledger.run.session_id
+      ||canonical(current.run.scope)!==canonical(ledger.run.scope))throw new BackgroundMonitoringError('BACKGROUND_SCOPE_CHANGED');
+    if(result?.version!==1||!['pending','prepared','failed','unsupported','idle'].includes(result.state))throw new BackgroundMonitoringError('BACKGROUND_PREWARM_PROGRESS_INVALID');
+    if(result.generation!==undefined&&(!/^[a-f0-9]{64}$/.test(result.generation)||!count(result.step)||!count(result.processed)
+      ||result.processed>1048576||!count(result.owned_processed)||result.owned_processed>1048576
+      ||typeof result.phase!=='string'||result.phase.length>40))throw new BackgroundMonitoringError('BACKGROUND_PREWARM_PROGRESS_INVALID');
+    if(result.state==='prepared'&&(result.phase!=='ready'||!millis(time(result.confirmed_at))
+      ||time(result.confirmed_at)>await now()||time(result.confirmed_at)<time(ledger.last_finished_at)))throw new BackgroundMonitoringError('BACKGROUND_PREWARM_CONFIRMATION_FAILED');
+    if(result.state==='prepared'){
+      const proof=result.preparation_evidence,phases=['initialize','ingest','context-ready','owned','price-input','price-groups','count-input','count-groups','trees','cleanup','reduce','publish','publication','confirmation'];
+      if(proof?.version!==1||typeof proof.automatic!=='boolean'||proof.phase_evidence_complete!==true||proof.job_generation!==result.generation||proof.cycle_id!==ledger.run.id
+        ||proof.confirmed_at!==result.confirmed_at)throw new BackgroundMonitoringError('BACKGROUND_PREWARM_CONFIRMATION_FAILED');
+      let previous=time(ledger.last_finished_at);for(const phase of phases){const point=time(proof.phases?.[phase]?.at);
+        if(!millis(point)||point<previous||point>time(result.confirmed_at)||!['automatic','foreground'].includes(proof.phases[phase].actor)
+          ||proof.automatic&&proof.phases[phase].actor!=='automatic')throw new BackgroundMonitoringError('BACKGROUND_PREWARM_PROGRESS_INVALID');previous=point;}
+    }
+    const telemetry=result.telemetry===undefined?undefined:readPreparationTelemetry(result.telemetry);
+    if(result.telemetry!==undefined&&!telemetry)throw new BackgroundMonitoringError('BACKGROUND_PREWARM_PROGRESS_INVALID');
+    return {...result,...(telemetry?{telemetry}:{}),run_id:ledger.run.id};
+  }
   async function append(saved, ledger, at, {allowScopeChange = false} = {}) {
     if (!allowScopeChange) await assertScope(ledger.run.scope, context(ledger.run));
     // A changed-scope failure is metadata only. Fence it to the current wallet
@@ -799,5 +855,5 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
       }
     }
   }
-  return {tick, status, prewarm, confirmPreparation};
+  return {tick, status, prewarm, confirmPreparation,preparationTick};
 }

@@ -1498,6 +1498,18 @@ test('read-only no-due terminal replies and active waits cannot stamp a new runn
   }
 });
 
+test('a separate preparation job resumes after the old five-minute window without repeating monitoring work',async()=>{
+  const f=fixture();await f.complete();f.advance(360000);const before=f.state(),revision=f.revision(),calls=f.calls.length,received=[];
+  f.dependencies.assertScopeReadOnly=async scope=>assert.deepEqual(scope,f.scope());
+  f.dependencies.dashboard={version:1,job_version:1,advanceJob:async context=>{received.push(context);return {version:1,state:'pending',generation:'c'.repeat(64),
+    phase:'ingest',step:16,processed:65536,owned_processed:0};},confirmJob:async()=>{throw Error('NOT_EXPECTED');}};
+  const result=await createBackgroundMonitoringWorker(f.dependencies).preparationTick({runner_id:OTHER});
+  assert.equal(result.state,'pending');assert.equal(result.run_id,before.background_monitoring.run.id);
+  assert.equal(received[0].run_id,before.background_monitoring.run.id);assert.equal(received[0].preparation_job,true);
+  assert.equal(received[0].deadline,f.at()+25000);assert.equal(received[0].cycle_completed_at,before.background_monitoring.last_finished_at);
+  assert.equal(f.revision(),revision);assert.equal(f.calls.length,calls);assert.deepEqual(f.state(),before);
+});
+
 test('driver reconciles a lost committed history response and completes without replaying history or requesting a wallet',async()=>{
   const f=fixture(),worker=createBackgroundMonitoringWorker(f.dependencies),inputs=[],output=[];
   let lost=false;

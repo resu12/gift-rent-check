@@ -6,7 +6,9 @@ import * as giftRuntime from '../lib/runtime.js';
 
 const preparationErrorCodes=new Set(['BACKGROUND_PREWARM_PROGRESS_INVALID','BACKGROUND_PREWARM_PROGRESS_LIMIT','BACKGROUND_PREWARM_TIMEOUT','BACKGROUND_PREWARM_DENIED','BACKGROUND_LEASE_LOST',
   'BACKGROUND_SCOPE_CHANGED','BACKGROUND_ACCESS_DENIED','BACKGROUND_RULES_CHANGED',
-  'BACKGROUND_PREWARM_CONFIRMATION_FAILED','BACKGROUND_PREWARM_INCOMPLETE','BACKGROUND_PREWARM_UNSUPPORTED']);
+  'BACKGROUND_PREWARM_CONFIRMATION_FAILED','BACKGROUND_PREWARM_INCOMPLETE','BACKGROUND_PREWARM_UNSUPPORTED',
+  'DASHBOARD_PREPARATION_SCHEMA_REQUIRED','DASHBOARD_PREPARATION_CONFLICT','DASHBOARD_PREPARATION_CORRUPT',
+  'DASHBOARD_PREPARATION_ITEM_LIMIT','DASHBOARD_PREPARATION_LEASE_LOST','DASHBOARD_PREPARATION_CAPACITY','DASHBOARD_PREPARATION_FAILED']);
 
 const operationErrorCodes=new Set([...preparationErrorCodes,
   'BACKGROUND_ANALYTICS_INVALID','BACKGROUND_RULES_INVALID','BACKGROUND_STATE_INVALID','BACKGROUND_CONFIGURATION',
@@ -14,6 +16,30 @@ const operationErrorCodes=new Set([...preparationErrorCodes,
   'BACKGROUND_GIFT_INVALID','BACKGROUND_HISTORY_INVALID','BACKGROUND_OPERATION_FAILED']);
 
 export default async function(input, ctx) {
+  if(input&&typeof input==='object'&&(Object.hasOwn(input,'preparation_tick_only')||Object.hasOwn(input,'preparation_confirm_only'))) {
+    const confirming=input.preparation_confirm_only===true;
+    if(ctx?.background_worker!=='price-monitoring-v1'||PRIVATE_BACKGROUND_MONITORING_VERSION!==1||PRIVATE_BACKGROUND_SCOPED_HISTORY_VERSION!==1
+      ||PRIVATE_BACKGROUND_PERSONAL_ANALYTICS_VERSION!==1||giftRuntime.PRIVATE_BACKGROUND_DASHBOARD_JOB_VERSION!==1||Array.isArray(input)
+      ||Object.keys(input).some(key=>!['runner_id','preparation_tick_only','preparation_confirm_only'].includes(key))
+      ||Object.hasOwn(input,'preparation_tick_only')&&input.preparation_tick_only!==true
+      ||Object.hasOwn(input,'preparation_confirm_only')&&input.preparation_confirm_only!==true
+      ||Object.hasOwn(input,'preparation_tick_only')&&Object.hasOwn(input,'preparation_confirm_only')
+      ||typeof input.runner_id!=='string'||!/^[a-f0-9]{64}$/.test(input.runner_id))return {state:'failed',execution_code:'BACKGROUND_ACCESS_DENIED'};
+    let access;
+    const check=async context=>{
+      const saved=await access.repository.read(),at=await access.clock(),ledger=saved.state.background_monitoring,run=ledger?.run;
+      if(context?.preparation_job!==true||context.prewarm_only!==true||context.prepare_stage!==(confirming?'job-confirm':'job')
+        ||(confirming?context.confirm_only!==true:context.confirm_only!==undefined)
+        ||!Number.isSafeInteger(context.deadline)||context.deadline<=at||context.deadline>at+(confirming?10000:25000)
+        ||ledger?.state!=='complete'||run?.id!==context.run_id||run.session_id!==context.session_id||run.stage!=='done'||run.lease!==null
+        ||run.gift_complete!==true||run.history_complete!==true||ledger.last_success_at!==ledger.last_finished_at||context.cycle_completed_at!==ledger.last_finished_at
+        ||JSON.stringify(context.scope)!==JSON.stringify(run.scope)||!Number.isFinite(Date.parse(ledger.last_finished_at))||Date.parse(ledger.last_finished_at)>at)
+        throw new BackgroundMonitoringError('BACKGROUND_LEASE_LOST');
+    };
+    try{access=createPrivateBackgroundMonitoringAccess(check);return await createBackgroundMonitoringWorker(access).preparationTick(input,confirming);}
+    catch(error){return {version:1,state:'failed',execution_code:preparationErrorCodes.has(error?.code??error?.message)
+      ?error.code??error.message:'DASHBOARD_PREPARATION_FAILED'};}
+  }
   if(ctx?.background_worker==='price-monitoring-v1'&&input?.gift_continuation_only===true) {
     if(!input||Object.keys(input).some(key=>!['runner_id','gift_continuation_only','status_only'].includes(key))
       ||typeof input.runner_id!=='string'||!/^[a-f0-9]{64}$/.test(input.runner_id)
