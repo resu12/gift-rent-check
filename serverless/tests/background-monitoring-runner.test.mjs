@@ -1407,3 +1407,59 @@ test('context flow reaches confirmation through the real administrative HTTP cli
  assert.ok(!f.output.some(r=>r.dashboard_preparation==='failed'));
  assert.deepEqual(f.output.at(-1),{dashboard_preparation:'prepared',prewarm_phase:'confirm'});
 });
+
+function jobFixture(results,options={}){
+  const f=fixture(results,options);f.args.api.getFiles=async()=>({canonical_modules:{...canonical,'lib/runtime':canonical['lib/runtime']+
+    '\nexport const PRIVATE_BACKGROUND_DASHBOARD_PREWARM_VERSION=1;\nexport const PRIVATE_BACKGROUND_DASHBOARD_CONFIRMATION_VERSION=1;\nexport const PRIVATE_BACKGROUND_DASHBOARD_JOB_VERSION=1;'}});return f;
+}
+function jobResult(phase,step,extra={}){return {version:1,state:phase==='ready'?'prepared':'pending',generation:'b'.repeat(64),phase,step,
+  processed:835273,owned_processed:phase==='ingest'?0:835273,run_id:runner+':'+start,...extra};}
+function jobReady(){const value=jobResult('ready',65,{confirmed_at:new Date(start+2000).toISOString()}),phases={};
+  ['initialize','ingest','context-ready','owned','price-input','price-groups','count-input','count-groups','trees','cleanup','reduce','publish','publication','confirmation']
+    .forEach((phase,index)=>{phases[phase]={at:new Date(start+index*100).toISOString(),step:index+1,actor:'automatic'};});
+  return {...value,preparation_evidence:{version:1,job_generation:value.generation,cycle_id:value.run_id,confirmed_at:value.confirmed_at,automatic:true,phase_evidence_complete:true,phases}};
+}
+test('resumable jobs continue an older completed cycle under a new scheduled runner without provider retries',async()=>{
+  const f=jobFixture([{state:'complete',runner_acknowledged:false},jobResult('ingest',16),jobResult('owned',32),jobResult('confirmation',64),jobReady()]);
+  assert.deepEqual(await f.run(),{state:'complete',dashboard_preparation:'prepared'});
+  const calls=f.calls.filter(row=>row.operation==='run');assert.deepEqual(calls.map(row=>row.input),[
+    {runner_id:runner},{runner_id:runner,preparation_tick_only:true},{runner_id:runner,preparation_tick_only:true},
+    {runner_id:runner,preparation_tick_only:true},{runner_id:runner,preparation_confirm_only:true}]);
+  assert.equal(f.output.at(-1).preparation_evidence.phase_evidence_complete,true);assert.equal(f.output.at(-1).preparation_evidence.automatic,true);
+  assert.equal(f.output.at(-1).preparation_evidence.cycle_id,runner+':'+start);
+});
+test('job request exhaustion remains pending and the next invocation resumes the same generation',async()=>{
+  const first=jobFixture([{state:'complete'},jobResult('ingest',16),jobResult('owned',32)],{limits:{steps:3}});
+  const pending=await first.run();assert.equal(pending.dashboard_preparation,'pending');assert.equal(monitoringExitCode(pending),0);
+  assert.equal(first.calls.filter(row=>row.operation==='run').length,3);
+  const next=jobFixture([{state:'complete'},jobResult('confirmation',64),jobReady()],{random:()=>'c'.repeat(64)});
+  assert.equal((await next.run()).dashboard_preparation,'prepared');
+  assert.equal(next.calls.filter(row=>row.operation==='run')[1].input.runner_id,'c'.repeat(64));
+  assert.equal(next.output.at(-1).preparation_evidence.cycle_id,runner+':'+start);
+});
+test('jobs reject backwards progress and incomplete or falsely automatic phase evidence',async()=>{
+  const backwards=jobFixture([{state:'complete'},jobResult('ingest',16),jobResult('ingest',15)]);
+  assert.equal((await backwards.run()).dashboard_preparation,'failed');assert.equal(backwards.output.at(-1).error,'invalid_result');
+  for(const change of [value=>{value.preparation_evidence.phase_evidence_complete=false;},value=>{value.preparation_evidence.cycle_id='c'.repeat(64)+':1';},
+    value=>{value.preparation_evidence.phases.ingest.actor='foreground';},value=>{delete value.preparation_evidence.phases.owned;}]){
+    const ready=jobReady();change(ready);const f=jobFixture([{state:'complete'},ready]);assert.equal((await f.run()).dashboard_preparation,'failed');
+  }
+  const mixed=jobReady();mixed.preparation_evidence.automatic=false;mixed.preparation_evidence.phases.ingest.actor='foreground';
+  const f=jobFixture([{state:'complete'},mixed]);assert.equal((await f.run()).dashboard_preparation,'prepared');assert.equal(f.output.at(-1).preparation_evidence.automatic,false);
+});
+test('fixed job failures retain their safe diagnostic and never enter legacy rebuilding',async()=>{
+  const f=jobFixture([{state:'complete'},{version:1,state:'failed',execution_code:'DASHBOARD_PREPARATION_SCHEMA_REQUIRED'}]);
+  assert.equal((await f.run()).dashboard_preparation,'failed');assert.equal(f.output.at(-1).execution_code,'DASHBOARD_PREPARATION_SCHEMA_REQUIRED');
+  assert.equal(f.calls.filter(row=>row.operation==='run').length,2);
+});
+test('new job flags reach the real HTTP client and mixed-operation requests are rejected before transport',async()=>{
+  const f=jobFixture([]),deployed=await f.args.api.getFiles(),requests=[],replies=[{state:'complete'},jobResult('confirmation',64),jobReady()];
+  const api=createMonitoringAdminApi({token,appId:'123',env:{},fetch:async(url,options)=>{
+    if(url.endsWith('/get'))return Response.json({ok:true,result:deployed});
+    const body=JSON.parse(options.body);requests.push(body.args);return Response.json({ok:true,result:{result:replies.shift()}});
+  }});f.args.api=api;assert.equal((await f.run()).dashboard_preparation,'prepared');
+  assert.deepEqual(requests.map(input=>input.preparation_confirm_only?'confirm':input.preparation_tick_only?'job':'monitor'),['monitor','job','confirm']);
+  const count=requests.length;for(const extra of [{retry:false},{status_only:true},{prewarm_only:true},{cursor:'x'},{preparation_confirm_only:true}])
+    assert.throws(()=>api.runFunction({}, {runner_id:runner,preparation_tick_only:true,...extra}),error=>error.reason==='invalid_request');
+  assert.equal(requests.length,count);
+});

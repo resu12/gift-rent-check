@@ -36,6 +36,37 @@ test('gift continuation is private worker-only with no selectable identity, run,
  assert.deepEqual(JSON.parse(JSON.stringify(await failed.call({...input,gift_continuation_only:true},admin))),{state:'failed',execution_code:'BACKGROUND_OPERATION_FAILED'});
 });
 
+test('resumable preparation accepts only fixed job operations before obtaining owner access',async()=>{
+  const received=[],f=bridge({giftRuntime:{PRIVATE_BACKGROUND_DASHBOARD_JOB_VERSION:1},worker:{preparationTick:async(input,confirm)=>{
+    received.push({input,confirm});return {version:1,state:'pending'};}}});
+  for(const flag of ['preparation_tick_only','preparation_confirm_only']){
+    assert.equal((await f.call({...input,[flag]:true},admin)).state,'pending');
+    for(const extra of [{retry:false},{status_only:true},{prewarm_only:true},{job_id:1},{cursor:'x'},{generation:'b'.repeat(64)}])await denied(f.call({...input,[flag]:true,...extra},admin));
+    await denied(f.call({...input,[flag]:false},admin));await denied(f.call({...input,[flag]:true},{}));
+  }
+  await denied(f.call({...input,preparation_tick_only:true,preparation_confirm_only:true},admin));
+  assert.equal(f.accesses(),2);assert.equal(received[0].confirm,false);assert.equal(received[1].confirm,true);
+  await denied(bridge().call({...input,preparation_tick_only:true},admin));
+});
+
+test('job bridge preserves fixed derived-storage diagnostics without exposing exception details',async()=>{
+  for(const code of ['DASHBOARD_PREPARATION_SCHEMA_REQUIRED','DASHBOARD_PREPARATION_CORRUPT','DASHBOARD_PREPARATION_ITEM_LIMIT','DASHBOARD_PREPARATION_LEASE_LOST']){
+    const f=bridge({giftRuntime:{PRIVATE_BACKGROUND_DASHBOARD_JOB_VERSION:1},worker:{preparationTick:async()=>{throw Object.assign(Error('synthetic-private-detail'),{code});}}});
+    assert.deepEqual(JSON.parse(JSON.stringify(await f.call({...input,preparation_tick_only:true},admin))),{version:1,state:'failed',execution_code:code});
+  }
+});
+test('job guard permits a later runner while binding the exact completed cycle, scope and confirmation mode',async()=>{
+  const scope={wallet:'0:'+'1'.repeat(64),wallet_revision:1,credential_version:0,session_generation:0},finished=new Date(1000).toISOString(),
+    ledger={state:'complete',last_finished_at:finished,last_success_at:finished,run:{id:'b'.repeat(64)+':1',session_id:'background_'+'b'.repeat(64)+'_1',scope,
+      stage:'done',lease:null,gift_complete:true,history_complete:true,last_runner_id:'b'.repeat(64)}},
+    f=bridge({ledger,at:1000000,giftRuntime:{PRIVATE_BACKGROUND_DASHBOARD_JOB_VERSION:1},worker:{preparationTick:async()=>({version:1,state:'pending'})}});
+  await f.call({...input,preparation_tick_only:true},admin);
+  const context={run_id:ledger.run.id,session_id:ledger.run.session_id,scope,preparation_job:true,prewarm_only:true,prepare_stage:'job',
+    cycle_completed_at:finished,deadline:1025000};await f.guard(context);
+  for(const change of [{run_id:'c'.repeat(64)+':1'},{scope:{...scope,wallet_revision:2}},{prepare_stage:'job-confirm'},
+    {confirm_only:true},{cycle_completed_at:new Date(2000).toISOString()},{deadline:1025001}])await assert.rejects(()=>f.guard({...context,...change}),/BACKGROUND_LEASE_LOST/);
+});
+
 test('completion deferral is a boolean tick-only hint and never grants prewarm or status access',async()=>{
  const f=bridge({worker:{tick:async input=>({state:'running',deferred:input.defer_completion})}});
  assert.equal((await f.call({...input,defer_completion:true},admin)).deferred,true);
