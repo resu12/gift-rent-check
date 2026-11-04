@@ -419,6 +419,7 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
             if(value.telemetry!==undefined&&!telemetry)fail('invalid_result','prewarm');
             if(typeof value.reason==='string'&&/^[A-Za-z_]{1,64}$/.test(value.reason))safe.reason=value.reason;
             if(object(value.diagnostic)&&executionCodes.has(value.diagnostic.code)&&phases.has(value.diagnostic.phase))safe.diagnostic={code:value.diagnostic.code,phase:value.diagnostic.phase,
+              ...(value.diagnostic.native_code==='SQLITE_FULL'?{native_code:'SQLITE_FULL'}:{}),
               ...(PREPARATION_SUBSTAGES.includes(value.diagnostic.substage)?{substage:value.diagnostic.substage}:{}),
               ...(/^[a-f0-9]{64}$/.test(value.diagnostic.operation_id??'')?{operation_id:value.diagnostic.operation_id}:{}),
               ...(['artifact_readback','artifact_size','page_integrity','item_integrity'].includes(value.diagnostic.stage)?{stage:value.diagnostic.stage}:{}),
