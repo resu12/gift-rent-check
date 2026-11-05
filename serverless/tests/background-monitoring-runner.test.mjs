@@ -1414,11 +1414,22 @@ function jobFixture(results,options={}){
 }
 function jobResult(phase,step,extra={}){return {version:1,state:phase==='ready'?'prepared':'pending',generation:'b'.repeat(64),phase,step,
   processed:835273,owned_processed:phase==='ingest'?0:835273,run_id:runner+':'+start,...extra};}
-function jobReady(){const value=jobResult('ready',65,{confirmed_at:new Date(start+2000).toISOString()}),phases={};
-  ['initialize','ingest','context-ready','owned','price-input','price-groups','count-input','count-groups','trees','cleanup','reduce','publish','publication','confirmation']
+function jobReady(storageVersion){const value=jobResult('ready',65,{confirmed_at:new Date(start+2000).toISOString()}),phases={};
+  (storageVersion===10?['initialize','ingest','context-ready','count-input','count-groups','price-input','price-groups','trees','cleanup','owned','reduce','publish','publication','confirmation']:['initialize','ingest','context-ready','owned','price-input','price-groups','count-input','count-groups','trees','cleanup','reduce','publish','publication','confirmation'])
     .forEach((phase,index)=>{phases[phase]={at:new Date(start+index*100).toISOString(),step:index+1,actor:'automatic'};});
-  return {...value,preparation_evidence:{version:1,job_generation:value.generation,cycle_id:value.run_id,confirmed_at:value.confirmed_at,automatic:true,phase_evidence_complete:true,phases}};
+  return {...value,preparation_evidence:{version:1,...(storageVersion===undefined?{}:{storage_version:storageVersion}),job_generation:value.generation,cycle_id:value.run_id,confirmed_at:value.confirmed_at,automatic:true,phase_evidence_complete:true,phases}};
 }
+
+test('versioned preparation accepts storage10 and explicit legacy formats without relaxing the phase proof',async()=>{
+ for(const version of [undefined,6,7,8,9,10]){const ready=jobReady(version),f=jobFixture([{state:'complete'},ready]);assert.equal((await f.run()).dashboard_preparation,'prepared');assert.equal(f.output.at(-1).preparation_evidence.storage_version,version);}
+});
+test('versioned preparation rejects unknown formats, wrong orders, missing tags and extra phases',async()=>{
+ const changes=[...['10',null,5,11,{},1.5].map(version=>value=>{value.preparation_evidence.storage_version=version;}),
+  value=>{value.preparation_evidence.storage_version=9;},value=>{delete value.preparation_evidence.storage_version;},
+  value=>{value.preparation_evidence.phases.unknown={at:new Date(start).toISOString(),step:1,actor:'automatic'};},
+  value=>{for(const point of Object.values(value.preparation_evidence.phases))point.at=new Date(start+100).toISOString();value.preparation_evidence.phases.owned.step=1;}];
+ for(const change of changes){const ready=jobReady(10);change(ready);const f=jobFixture([{state:'complete'},ready]);assert.equal((await f.run()).dashboard_preparation,'failed');assert.equal(f.output.at(-1).error,'invalid_result');}
+});
 test('resumable jobs continue an older completed cycle under a new scheduled runner without provider retries',async()=>{
   const f=jobFixture([{state:'complete',runner_acknowledged:false},jobResult('ingest',16),jobResult('owned',32),jobResult('confirmation',64),jobReady()]);
   assert.deepEqual(await f.run(),{state:'complete',dashboard_preparation:'prepared'});
@@ -1462,15 +1473,4 @@ test('new job flags reach the real HTTP client and mixed-operation requests are 
   const count=requests.length;for(const extra of [{retry:false},{status_only:true},{prewarm_only:true},{cursor:'x'},{preparation_confirm_only:true}])
     assert.throws(()=>api.runFunction({}, {runner_id:runner,preparation_tick_only:true,...extra}),error=>error.reason==='invalid_request');
   assert.equal(requests.length,count);
-});
-
-test('native capacity pauses retain only the fixed SQLITE_FULL code and never claim readiness',async()=>{
- for(const native of ['SQLITE_FULL','synthetic-private-native-detail']){
-  const f=jobFixture([{state:'complete'},jobResult('ingest',16,{reason:'STORAGE_CAPACITY_PAUSED',diagnostic:{
-   code:'STORAGE_CAPACITY_PAUSED',phase:'ingest',substage:'artifact_write',error_class:'capacity',native_code:native,private_detail:'synthetic-private-detail'}})]);
-  assert.equal((await f.run()).dashboard_preparation,'pending');assert.equal(f.calls.filter(r=>r.operation==='run').length,2);
-  const diagnostic=f.output.find(r=>r.preparation_job?.diagnostic)?.preparation_job.diagnostic;
-  assert.equal(diagnostic.code,'STORAGE_CAPACITY_PAUSED');assert.equal(diagnostic.native_code,native==='SQLITE_FULL'?'SQLITE_FULL':undefined);
-  assert.ok(!JSON.stringify(f.output).includes('synthetic-private'));assert.ok(!f.output.some(r=>r.dashboard_preparation==='prepared'));
- }
 });

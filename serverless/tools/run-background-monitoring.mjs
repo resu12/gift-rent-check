@@ -8,7 +8,7 @@ import {pathToFileURL} from 'node:url';
 import {setTimeout as delay} from 'node:timers/promises';
 import {adminModuleSources} from './admin-module-sources.mjs';
 import {requireId,validateAuthenticatedDestination,validateServerlessEnvironment} from './destination.mjs';
-import {readPreparationTelemetry,PREPARATION_SUBSTAGES} from '../worker/monitoring.js';
+import {readPreparationTelemetry,PREPARATION_SUBSTAGES,preparationPhaseOrder} from '../worker/monitoring.js';
 
 export const MONITORING_ENDPOINT='endpoints/backgroundMonitoringTick';
 export const RUNNER_LIMITS=Object.freeze({duration_ms:20*60*1000,steps:200,request_ms:90000,source_bytes:8*1024*1024,response_bytes:1024*1024,sleep_ms:60000,source_retries:2,recoveries:3,prewarm_ms:30000,prewarm_confirm_ms:15000,prewarm_basis_requests:12,prewarm_owned_requests:8,analytics_handoff_ms:1000});
@@ -404,15 +404,16 @@ export async function runBackgroundMonitoring({api,enabled=false,check=false,ret
             if(value.state==='prepared'&&(value.phase!=='ready'||!date(value.confirmed_at)||!value.generation))fail('invalid_result','prewarm');
             let proof;
             if(value.state==='prepared'){
-              const expected=['initialize','ingest','context-ready','owned','price-input','price-groups','count-input','count-groups','trees','cleanup','reduce','publish','publication','confirmation'],candidate=value.preparation_evidence;
+              const candidate=value.preparation_evidence,expected=preparationPhaseOrder(candidate?.storage_version);
               if(candidate?.version!==1||typeof candidate.automatic!=='boolean'||candidate.phase_evidence_complete!==true||candidate.job_generation!==value.generation
-                ||candidate.cycle_id!==value.run_id||candidate.confirmed_at!==value.confirmed_at||!object(candidate.phases))fail('invalid_result','prewarm');
-              const points={};let previous=0;for(const phase of expected){const point=candidate.phases[phase];
+                ||candidate.cycle_id!==value.run_id||candidate.confirmed_at!==value.confirmed_at||!expected||!object(candidate.phases)
+                ||Object.keys(candidate.phases).sort().join(',')!==[...expected].sort().join(','))fail('invalid_result','prewarm');
+              const points={};let previous=0,previousStep=0;for(const phase of expected){const point=candidate.phases[phase];
                 if(!object(point)||!date(point.at)||Date.parse(point.at)<previous||Date.parse(point.at)>Date.parse(value.confirmed_at)
-                  ||!Number.isSafeInteger(point.step)||point.step<1||point.step>value.step||!['automatic','foreground'].includes(point.actor)
+                  ||!Number.isSafeInteger(point.step)||point.step<1||point.step<previousStep||point.step>value.step||!['automatic','foreground'].includes(point.actor)
                   ||candidate.automatic&&point.actor!=='automatic')fail('invalid_result','prewarm');
-                previous=Date.parse(point.at);points[phase]={at:point.at,step:point.step,actor:point.actor};}
-              proof={version:1,job_generation:candidate.job_generation,cycle_id:candidate.cycle_id,confirmed_at:candidate.confirmed_at,automatic:candidate.automatic,phase_evidence_complete:true,phases:points};
+                previous=Date.parse(point.at);previousStep=point.step;points[phase]={at:point.at,step:point.step,actor:point.actor};}
+              proof={version:1,...(candidate.storage_version===undefined?{}:{storage_version:candidate.storage_version}),job_generation:candidate.job_generation,cycle_id:candidate.cycle_id,confirmed_at:candidate.confirmed_at,automatic:candidate.automatic,phase_evidence_complete:true,phases:points};
             }
             const safe={version:1,...Object.fromEntries(['generation','phase','step','processed','owned_processed','run_id','confirmed_at'].filter(key=>value[key]!==undefined).map(key=>[key,value[key]]))};
             const telemetry=value.telemetry===undefined?undefined:readPreparationTelemetry(value.telemetry);
