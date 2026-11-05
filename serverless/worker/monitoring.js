@@ -6,6 +6,10 @@
 export const PREPARATION_SUBSTAGES=Object.freeze(['source_check','job_claim','context_restore','source_scan','context_encode','artifact_write','artifact_read',
   'owned_restore','owned_scan','owned_encode','group_reduce','tree_build','tree_reduce','cache_publish','cache_confirm','job_checkpoint','derived_retirement']);
 export const PREPARATION_PHASES=Object.freeze(['initialize','ingest','context-ready','owned','price-input','price-groups','count-input','count-groups','trees','cleanup','reduce','publish','publication','confirmation','ready']);
+const LEGACY_PREPARATION_ORDER=Object.freeze(PREPARATION_PHASES.slice(0,-1)),COMPACT_PREPARATION_ORDER=Object.freeze(['initialize','ingest','context-ready','count-input','count-groups','price-input','price-groups','trees','cleanup','owned','reduce','publish','publication','confirmation']);
+export function preparationPhaseOrder(storageVersion){
+  return storageVersion===10?COMPACT_PREPARATION_ORDER:storageVersion===undefined||[6,7,8,9].includes(storageVersion)?LEGACY_PREPARATION_ORDER:null;
+}
 export function readPreparationTelemetry(value) {
   const plain=item=>item!==null&&typeof item==='object'&&!Array.isArray(item),number=item=>Number.isSafeInteger(item)&&item>=0&&item<=1099511627776,
     exact=(item,keys)=>Object.keys(item).sort().join(',')===[...keys].sort().join(',');
@@ -306,12 +310,12 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
     if(result.state==='prepared'&&(result.phase!=='ready'||!millis(time(result.confirmed_at))
       ||time(result.confirmed_at)>await now()||time(result.confirmed_at)<time(ledger.last_finished_at)))throw new BackgroundMonitoringError('BACKGROUND_PREWARM_CONFIRMATION_FAILED');
     if(result.state==='prepared'){
-      const proof=result.preparation_evidence,phases=['initialize','ingest','context-ready','owned','price-input','price-groups','count-input','count-groups','trees','cleanup','reduce','publish','publication','confirmation'];
+      const proof=result.preparation_evidence,phases=preparationPhaseOrder(proof?.storage_version);
       if(proof?.version!==1||typeof proof.automatic!=='boolean'||proof.phase_evidence_complete!==true||proof.job_generation!==result.generation||proof.cycle_id!==ledger.run.id
-        ||proof.confirmed_at!==result.confirmed_at)throw new BackgroundMonitoringError('BACKGROUND_PREWARM_CONFIRMATION_FAILED');
-      let previous=time(ledger.last_finished_at);for(const phase of phases){const point=time(proof.phases?.[phase]?.at);
+        ||proof.confirmed_at!==result.confirmed_at||!phases||!object(proof.phases)||Object.keys(proof.phases).sort().join(',')!==[...phases].sort().join(','))throw new BackgroundMonitoringError('BACKGROUND_PREWARM_CONFIRMATION_FAILED');
+      let previous=time(ledger.last_finished_at),previousStep=0;for(const phase of phases){const point=time(proof.phases?.[phase]?.at),step=proof.phases[phase]?.step;
         if(!millis(point)||point<previous||point>time(result.confirmed_at)||!['automatic','foreground'].includes(proof.phases[phase].actor)
-          ||proof.automatic&&proof.phases[phase].actor!=='automatic')throw new BackgroundMonitoringError('BACKGROUND_PREWARM_PROGRESS_INVALID');previous=point;}
+          ||!count(step)||step<1||step<previousStep||step>result.step||proof.automatic&&proof.phases[phase].actor!=='automatic')throw new BackgroundMonitoringError('BACKGROUND_PREWARM_PROGRESS_INVALID');previous=point;previousStep=step;}
     }
     const telemetry=result.telemetry===undefined?undefined:readPreparationTelemetry(result.telemetry);
     if(result.telemetry!==undefined&&!telemetry)throw new BackgroundMonitoringError('BACKGROUND_PREWARM_PROGRESS_INVALID');

@@ -1510,6 +1510,23 @@ test('a separate preparation job resumes after the old five-minute window withou
   assert.equal(f.revision(),revision);assert.equal(f.calls.length,calls);assert.deepEqual(f.state(),before);
 });
 
+async function preparedJobFixture(storageVersion){
+ const f=fixture();await f.complete();const completed=Date.parse(f.state().background_monitoring.last_finished_at);f.advance(2500);const phases={},order=storageVersion===10
+  ?['initialize','ingest','context-ready','count-input','count-groups','price-input','price-groups','trees','cleanup','owned','reduce','publish','publication','confirmation']
+  :['initialize','ingest','context-ready','owned','price-input','price-groups','count-input','count-groups','trees','cleanup','reduce','publish','publication','confirmation'];
+ order.forEach((phase,i)=>{phases[phase]={at:new Date(completed+i*100).toISOString(),step:i+1,actor:'automatic'};});
+ const value={version:1,state:'prepared',generation:'c'.repeat(64),phase:'ready',step:99,processed:1800,owned_processed:1800,confirmed_at:new Date(f.at()).toISOString(),preparation_evidence:{version:1,...(storageVersion===undefined?{}:{storage_version:storageVersion}),job_generation:'c'.repeat(64),cycle_id:f.state().background_monitoring.run.id,confirmed_at:new Date(f.at()).toISOString(),automatic:true,phase_evidence_complete:true,phases}};
+ f.dependencies.assertScopeReadOnly=async scope=>assert.deepEqual(scope,f.scope());f.dependencies.dashboard={version:1,job_version:1,advanceJob:async()=>value,confirmJob:async()=>value};return {f,value};
+}
+test('worker validates versioned storage10 and legacy phase proofs without changing monitoring state',async()=>{
+ for(const version of [undefined,6,7,8,9,10]){const {f}=await preparedJobFixture(version),before=f.state(),revision=f.revision(),calls=f.calls.length,result=await createBackgroundMonitoringWorker(f.dependencies).preparationTick({runner_id:OTHER},true);assert.equal(result.state,'prepared');assert.deepEqual(f.state(),before);assert.equal(f.revision(),revision);assert.equal(f.calls.length,calls);}
+});
+test('worker rejects relabeled, unknown and unordered versioned preparation evidence',async()=>{
+ for(const change of [value=>{value.preparation_evidence.storage_version=9;},value=>{value.preparation_evidence.storage_version=11;},value=>{delete value.preparation_evidence.storage_version;},value=>{value.preparation_evidence.phases.unknown={at:value.confirmed_at,step:1,actor:'automatic'};},value=>{for(const point of Object.values(value.preparation_evidence.phases))point.at=value.confirmed_at;value.preparation_evidence.phases.owned.step=1;}]){
+  const {f,value}=await preparedJobFixture(10),before=f.state();change(value);await assert.rejects(createBackgroundMonitoringWorker(f.dependencies).preparationTick({runner_id:OTHER},true),error=>['BACKGROUND_PREWARM_CONFIRMATION_FAILED','BACKGROUND_PREWARM_PROGRESS_INVALID'].includes(error.code));assert.deepEqual(f.state(),before);
+ }
+});
+
 test('driver reconciles a lost committed history response and completes without replaying history or requesting a wallet',async()=>{
   const f=fixture(),worker=createBackgroundMonitoringWorker(f.dependencies),inputs=[],output=[];
   let lost=false;
