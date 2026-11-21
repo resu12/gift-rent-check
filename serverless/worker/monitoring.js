@@ -833,6 +833,8 @@ export function createBackgroundMonitoringWorker({repository, clock, captureScop
         const prepared = await intent(claim, 'evaluate');
         if (prepared.stopped) return reply(prepared.stopped, await now());
         claim = prepared.run; result = await rules.evaluate(context(claim));
+        if (result?.rule_evaluation_pending === true && result.wallet === claim.scope.wallet)
+          return reply(await release(claim), await now());
         if (!object(result) || !Array.isArray(result.proposals) || result.wallet !== claim.scope.wallet) throw new BackgroundMonitoringError('BACKGROUND_RULES_INVALID');
         const row = await update(claim, (ledger, at) => {
           ledger.run.proposals = result.proposals.length;

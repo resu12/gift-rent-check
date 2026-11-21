@@ -150,6 +150,29 @@ test('background worker refreshes gifts, then bounded history, then evaluates an
   assert.ok(f.events.every(event => event.records.length === 0 && event.raw_body === null));
 });
 
+test('resumes checkpointed rule evidence without finishing the cycle or restarting completed stages', async () => {
+  const f = fixture({continuations:true});
+  await f.until('evaluate');
+  const original = f.dependencies.rules.evaluate;
+  const cycle = f.state().background_monitoring.run.id;
+  const earlierCalls = f.calls.length;
+  f.dependencies.rules.evaluate = async context => {
+    await original(context);
+    return {wallet:context.scope.wallet,rule_evaluation_pending:true};
+  };
+  const pending = await f.tick();
+  assert.equal(pending.state,'running');
+  assert.equal(f.state().background_monitoring.run.stage,'evaluate');
+  assert.equal(f.state().background_monitoring.run.lease,null);
+  assert.equal(f.state().background_monitoring.last_finished_at,null);
+  f.dependencies.rules.evaluate = original;
+  f.advance();
+  const final = await f.tick(OTHER);
+  assert.equal(final.state,'complete');
+  assert.equal(f.state().background_monitoring.run.id,cycle);
+  assert.deepEqual(f.calls.slice(earlierCalls).filter(call => call !== 'rules.status'),['rules.evaluate','rules.evaluate']);
+});
+
 test('cloud analytics refresh is a separate guarded stage before evaluation and cache preparation', async () => {
   const f = fixture(); let calls = 0;
   f.dependencies.analytics = {version: 1, refresh: async context => {
